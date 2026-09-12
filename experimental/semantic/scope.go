@@ -1,8 +1,10 @@
 package semantic
 
 type Scope struct {
-	names map[string]BindingID
-	next  BindingID
+	names  map[string]BindingID
+	parent *Scope
+	root   *Scope
+	next   BindingID
 }
 
 type ScopeError struct{ Category DiagnosticCategory }
@@ -14,13 +16,25 @@ const (
 	UnknownAssignment      DiagnosticCategory = "UnknownAssignment"
 )
 
-func NewScope() *Scope { return &Scope{names: make(map[string]BindingID)} }
+func NewScope() *Scope { s := &Scope{names: make(map[string]BindingID)}; s.root = s; return s }
+func (s *Scope) Child() *Scope {
+	return &Scope{names: make(map[string]BindingID), parent: s, root: s.root}
+}
+func (s *Scope) Resolve(name string) BindingID {
+	if id, ok := s.names[name]; ok {
+		return id
+	}
+	if s.parent != nil {
+		return s.parent.Resolve(name)
+	}
+	return 0
+}
 func (s *Scope) Declare(name string) *ScopeError {
 	if _, exists := s.names[name]; exists {
 		return &ScopeError{SameScopeRedeclaration}
 	}
-	s.next++
-	s.names[name] = s.next
+	s.root.next++
+	s.names[name] = s.root.next
 	return nil
 }
 func (s *Scope) Assign(name string) *ScopeError {
