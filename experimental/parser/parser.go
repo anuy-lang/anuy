@@ -13,6 +13,7 @@ const (
 	Var Kind = iota
 	Assign
 	If
+	Read
 )
 
 type Statement struct {
@@ -44,6 +45,9 @@ func Parse(source string) (Program, error) {
 		case len(fields) == 2 && fields[0] == "if":
 			st.Kind = If
 			st.Name = fields[1]
+		case len(fields) == 1:
+			st.Kind = Read
+			st.Name = fields[0]
 		default:
 			return Program{}, fmt.Errorf("experimental parser: unsupported syntax at %d", offset)
 		}
