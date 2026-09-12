@@ -35,12 +35,23 @@ func Read(binding BindingID) Operation    { return Operation{Kind: ReadOperation
 
 type DiagnosticCategory string
 
-const ReadBeforeInitialization DiagnosticCategory = "ReadBeforeInitialization"
+const (
+	ReadBeforeInitialization   DiagnosticCategory = "ReadBeforeInitialization"
+	PackageInitializerRequired DiagnosticCategory = "PackageInitializerRequired"
+)
 
 type Diagnostic struct {
 	Category DiagnosticCategory
 	Binding  BindingID
 }
+
+func ValidatePackageBinding(hasInitializer bool) *Diagnostic {
+	if hasInitializer {
+		return nil
+	}
+	return &Diagnostic{Category: PackageInitializerRequired}
+}
+
 type AnalysisResult struct{ Diagnostics []Diagnostic }
 type Analyzer struct{}
 
