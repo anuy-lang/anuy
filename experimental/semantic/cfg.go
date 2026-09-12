@@ -40,9 +40,19 @@ const (
 	PackageInitializerRequired DiagnosticCategory = "PackageInitializerRequired"
 )
 
+type SourceSpan struct {
+	File       string
+	Start, End int
+}
+
 type Diagnostic struct {
 	Category DiagnosticCategory
 	Binding  BindingID
+	Span     SourceSpan
+}
+
+func NewDiagnostic(category DiagnosticCategory, binding BindingID, span SourceSpan) Diagnostic {
+	return Diagnostic{Category: category, Binding: binding, Span: span}
 }
 
 func ValidatePackageBinding(hasInitializer bool) *Diagnostic {
@@ -117,7 +127,7 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 							reported[id] = make(map[BindingID]bool)
 						}
 						if !reported[id][op.Binding] {
-							result.Diagnostics = append(result.Diagnostics, Diagnostic{ReadBeforeInitialization, op.Binding})
+							result.Diagnostics = append(result.Diagnostics, Diagnostic{Category: ReadBeforeInitialization, Binding: op.Binding})
 							reported[id][op.Binding] = true
 						}
 					}
