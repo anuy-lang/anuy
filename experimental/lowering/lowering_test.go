@@ -29,3 +29,14 @@ func TestLowerRejectsNullableType(t *testing.T) {
 		t.Fatal("nullable type lowered")
 	}
 }
+
+func TestLowerClosureLiteralToGo(t *testing.T) {
+	got, err := Lower("var x int = 1\nvar increment = func() {\nx = x + 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\nfunc Run() {\n\tvar x int = 1\n\tincrement := func() {\n\tx = x + 1\n}\n\t_ = increment\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
