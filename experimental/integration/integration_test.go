@@ -60,3 +60,47 @@ func TestAnalyzeSourceAcceptsMultipleDeclarationWithInitializer(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result)
 	}
 }
+
+func TestAnalyzeSourceAcceptsIfElseInitializingBothBranches(t *testing.T) {
+	result, err := AnalyzeSource("var x int\nif ready {\nx = 1\n} else {\nx = 2\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceReportsBranchMissingAssignment(t *testing.T) {
+	result, err := AnalyzeSource("var x int\nif ready {\nx = 1\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceReportsUninitializedConditionRead(t *testing.T) {
+	result, err := AnalyzeSource("var c int\nif c {\nc = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceScopesBranchLocals(t *testing.T) {
+	result, err := AnalyzeSource("if ready {\nvar t int\n}\nt = 1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownAssignment")
+}
+
+func TestAnalyzeSourceAcceptsBranchShadowing(t *testing.T) {
+	result, err := AnalyzeSource("var x int = 1\nif ready {\nvar x int\nx = 2\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}

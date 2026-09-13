@@ -1,5 +1,7 @@
 var x int
 
 x = 1
-if ready
+if ready {
+x = 2
+}
 x

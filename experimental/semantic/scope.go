@@ -39,6 +39,9 @@ func (s *Scope) Declare(name string) *ScopeError {
 }
 func (s *Scope) Assign(name string) *ScopeError {
 	if _, exists := s.names[name]; !exists {
+		if s.parent != nil {
+			return s.parent.Assign(name)
+		}
 		return &ScopeError{UnknownAssignment}
 	}
 	return nil
