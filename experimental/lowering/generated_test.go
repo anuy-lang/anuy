@@ -8,7 +8,7 @@ import (
 )
 
 func TestLoweredGoCompiles(t *testing.T) {
-	source, err := Lower("var x\nx = 1\n")
+	source, err := Lower("var x int\nx = 1\n")
 	if err != nil {
 		t.Fatal(err)
 	}
