@@ -66,7 +66,7 @@ func (b *builder) emit(statements []parser.Statement, scope *semantic.Scope) {
 func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Scope) {
 	switch statement.Kind {
 	case parser.Var:
-		b.readIdents(statement.ValueIdents, scope)
+		b.readIdents(statement, scope)
 		declared := make([]string, 0, len(statement.Names))
 		for _, name := range statement.Names {
 			if serr := scope.Declare(name); serr != nil {
@@ -82,7 +82,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			}
 		}
 	case parser.Assign:
-		b.readIdents(statement.ValueIdents, scope)
+		b.readIdents(statement, scope)
 		for _, name := range statement.Names {
 			if serr := scope.Assign(name); serr != nil {
 				b.report(serr.Category, statement.Span)
@@ -137,9 +137,14 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 // expressions before any left-hand side operation, modeling "RHS values are
 // evaluated before any LHS updates become observable" (RFC-003 §61).
 // Declarations are not yet in scope for their own initializers (RFC-003 §36).
-func (b *builder) readIdents(idents [][]string, scope *semantic.Scope) {
-	for _, group := range idents {
-		for _, ident := range group {
+// Closure values carry no top-level idents; their bodies are analyzed
+// separately (RFC-003 §80–84).
+func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope) {
+	for _, value := range statement.Values {
+		if value.Closure != nil {
+			continue
+		}
+		for _, ident := range value.Idents {
 			if id := scope.Resolve(ident); id != 0 {
 				b.add(semantic.Read(id))
 			}

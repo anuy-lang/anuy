@@ -57,7 +57,7 @@ func TestParseAcceptsMultipleAssignment(t *testing.T) {
 	if statement.Kind != Assign || len(statement.Names) != 2 || len(statement.Values) != 2 {
 		t.Fatalf("statement = %#v", statement)
 	}
-	if statement.Values[0] != "y" || statement.Values[1] != "x" {
+	if statement.Values[0].Text != "y" || statement.Values[1].Text != "x" {
 		t.Fatalf("values = %#v", statement.Values)
 	}
 }
@@ -67,13 +67,65 @@ func TestParseCapturesValueSourceText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statement := program.Statements[0]
-	if statement.Values[0] != "count + 1" {
-		t.Fatalf("values = %#v", statement.Values)
+	value := program.Statements[0].Values[0]
+	if value.Text != "count + 1" {
+		t.Fatalf("value = %#v", value)
 	}
-	if len(statement.ValueIdents[0]) != 1 || statement.ValueIdents[0][0] != "count" {
-		t.Fatalf("value idents = %#v", statement.ValueIdents)
+	if len(value.Idents) != 1 || value.Idents[0] != "count" {
+		t.Fatalf("idents = %#v", value.Idents)
 	}
+}
+
+func TestParseAcceptsClosureLiteral(t *testing.T) {
+	program, err := Parse("var increment = func() {\ncount = count + 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := program.Statements[0].Values[0]
+	if value.Closure == nil {
+		t.Fatalf("value = %#v, want closure", value)
+	}
+	if len(value.Closure.Params) != 0 || len(value.Closure.Body) != 1 || value.Closure.Body[0].Kind != Assign {
+		t.Fatalf("closure = %#v", value.Closure)
+	}
+}
+
+func TestParseAcceptsClosureWithTypedParams(t *testing.T) {
+	program, err := Parse("var f = func(user User, ids []int) {\nuser\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := program.Statements[0].Values[0].Closure
+	if cl == nil || len(cl.Params) != 2 {
+		t.Fatalf("closure = %#v", cl)
+	}
+	if cl.Params[0].Name != "user" || cl.Params[0].Type != "User" || cl.Params[1].Type != "[]int" {
+		t.Fatalf("params = %#v", cl.Params)
+	}
+}
+
+func TestParseRejectsClosureWithMultipleBindings(t *testing.T) {
+	_, err := Parse("var f, g = func() {\nx = 1\n}\n")
+	if err == nil {
+		t.Fatal("closure with multiple bindings accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseRejectsClosureWithUntypedParam(t *testing.T) {
+	_, err := Parse("var f = func(x) {\nx = 1\n}\n")
+	if err == nil {
+		t.Fatal("untyped closure parameter accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseRejectsClosureInCondition(t *testing.T) {
+	_, err := Parse("if func() {\nreturn\n} {\nx = 1\n}\n")
+	if err == nil {
+		t.Fatal("closure in condition accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
 }
 
 func TestParseRejectsBareDeclaration(t *testing.T) {
