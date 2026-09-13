@@ -418,9 +418,21 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 		return Statement{}, &Error{Category: BareDeclaration, Offset: tokens[0].start, Message: "declaration requires a type or an initializer"}
 	}
 	if i < len(tokens) {
-		values, err := lp.parseValues(tokens, i+1, line, names)
-		if err != nil {
-			return Statement{}, err
+		if isClosureStart(tokens, i+1) {
+			if len(names) != 1 {
+				return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[i+1].start, Message: "closure initializer requires a single binding"}
+			}
+			cl, cerr := lp.parseClosure(tokens, i+1, line)
+			if cerr != nil {
+				return Statement{}, cerr
+			}
+			// lp.pos was advanced past the closure body by parseClosure.
+			statement.Values = []Value{{Closure: &cl}}
+			return statement, nil
+		}
+		values, verr := parseValueList(tokens, i+1, line)
+		if verr != nil {
+			return Statement{}, verr
 		}
 		statement.Values = values
 	}
@@ -436,9 +448,23 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 	if i >= len(tokens) || !isAssign(tokens[i]) {
 		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "assignment requires ="}
 	}
-	values, err := lp.parseValues(tokens, i+1, line, names)
-	if err != nil {
-		return Statement{}, err
+	var values []Value
+	if isClosureStart(tokens, i+1) {
+		if len(names) != 1 {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[i+1].start, Message: "closure initializer requires a single binding"}
+		}
+		cl, cerr := lp.parseClosure(tokens, i+1, line)
+		if cerr != nil {
+			return Statement{}, cerr
+		}
+		// lp.pos was advanced past the closure body by parseClosure.
+		values = []Value{{Closure: &cl}}
+	} else {
+		rest, verr := parseValueList(tokens, i+1, line)
+		if verr != nil {
+			return Statement{}, verr
+		}
+		values = rest
 	}
 	if len(values) > 1 && len(values) != len(names) {
 		return Statement{}, &Error{Category: ArityMismatch, Offset: tokens[0].start, Message: "assignment arity mismatch"}
@@ -450,6 +476,15 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 		}
 		seen[name] = true
 	}
+	if len(values) == 1 && values[0].Closure != nil {
+		// lp.pos was already advanced past the closure body.
+		return Statement{
+			Kind:   Assign,
+			Names:  names,
+			Values: values,
+			Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
+		}, nil
+	}
 	lp.pos++
 	return Statement{
 		Kind:   Assign,
@@ -457,26 +492,6 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 		Values: values,
 		Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
 	}, nil
-}
-
-// parseValues parses the right-hand side after `=`. A closure literal must be
-// the only value of a single-binding statement (RFC-003 §41, §80); all other
-// values are single-line top-level comma-separated expressions.
-func (lp *lineParser) parseValues(tokens []token, start int, line sourceLine, names []string) ([]Value, error) {
-	if start >= len(tokens) {
-		return nil, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "missing expression"}
-	}
-	if isClosureStart(tokens, start) {
-		if len(names) != 1 {
-			return nil, &Error{Category: UnsupportedSyntax, Offset: tokens[start].start, Message: "closure initializer requires a single binding"}
-		}
-		cl, cerr := lp.parseClosure(tokens, start, line)
-		if cerr != nil {
-			return nil, cerr
-		}
-		return []Value{{Closure: &cl}}, nil
-	}
-	return parseValueList(tokens, start, line)
 }
 
 // parseClosure parses `func(Params) {` plus its block. lp.pos is advanced

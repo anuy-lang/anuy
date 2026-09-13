@@ -7,11 +7,14 @@ import (
 
 type Result struct{ Diagnostics []semantic.Diagnostic }
 
-// AnalyzeSource parses the experimental program and translates it into a
-// kernel CFG: an if statement emits its condition reads in the branching
-// block, each branch is emitted into its own child scope, and a dedicated
-// join block receives edges from every continuing path, so initialization is
-// proven on all of them (RFC-001 §141.4).
+// AnalyzeSource parses the experimental program and translates it into kernel
+// CFGs. An if statement emits its condition reads in the branching block,
+// each branch is emitted into its own child scope, and a dedicated join
+// block receives edges from every continuing path, so initialization is
+// proven on all of them (RFC-001 §141.4). A closure literal is analyzed as
+// its own CFG seeded with the facts at the creation point (RFC-001 §48,
+// RFC-003 §82); closure operations never update caller facts
+// (RFC-003 §84, §170.31).
 func AnalyzeSource(source string) (Result, error) {
 	program, err := parser.Parse(source)
 	if err != nil {
@@ -19,13 +22,9 @@ func AnalyzeSource(source string) (Result, error) {
 	}
 	b := newBuilder()
 	b.emit(program.Statements, semantic.NewScope())
-	cfg := semantic.NewCFG(b.blocks...)
-	for _, e := range b.edges {
-		cfg.AddEdge(e.from, e.to)
-	}
 	result := Result{}
 	result.Diagnostics = append(result.Diagnostics, b.diagnostics...)
-	result.Diagnostics = append(result.Diagnostics, (semantic.Analyzer{}).Analyze(cfg).Diagnostics...)
+	result.Diagnostics = append(result.Diagnostics, b.analyze().Diagnostics...)
 	return result, nil
 }
 
@@ -33,6 +32,7 @@ type edge struct{ from, to semantic.BlockID }
 
 type builder struct {
 	blocks      []semantic.Block
+	facts       []map[semantic.BindingID]bool // initialization facts at the end of each block
 	edges       []edge
 	cur         int // index into blocks
 	nextBlockID semantic.BlockID
@@ -40,12 +40,17 @@ type builder struct {
 }
 
 func newBuilder() *builder {
-	return &builder{blocks: []semantic.Block{{ID: 1}}, nextBlockID: 1}
+	return &builder{
+		blocks:      []semantic.Block{{ID: 1}},
+		facts:       []map[semantic.BindingID]bool{{}},
+		nextBlockID: 1,
+	}
 }
 
 func (b *builder) appendBlock() {
 	b.nextBlockID++
 	b.blocks = append(b.blocks, semantic.Block{ID: b.nextBlockID})
+	b.facts = append(b.facts, map[semantic.BindingID]bool{})
 	b.cur = len(b.blocks) - 1
 }
 
@@ -53,8 +58,31 @@ func (b *builder) add(op semantic.Operation) {
 	b.blocks[b.cur].Operations = append(b.blocks[b.cur].Operations, op)
 }
 
+func (b *builder) declare(id semantic.BindingID) {
+	b.add(semantic.Declare(id))
+	b.facts[b.cur][id] = false
+}
+
+func (b *builder) initialize(id semantic.BindingID) {
+	b.add(semantic.Assign(id))
+	b.facts[b.cur][id] = true
+}
+
+func (b *builder) isInitialized(id semantic.BindingID) bool {
+	return b.facts[b.cur][id]
+}
+
 func (b *builder) connect(from, to semantic.BlockID) {
 	b.edges = append(b.edges, edge{from: from, to: to})
+}
+
+// analyze runs the kernel analyzer over the built CFG.
+func (b *builder) analyze() semantic.AnalysisResult {
+	cfg := semantic.NewCFG(b.blocks...)
+	for _, e := range b.edges {
+		cfg.AddEdge(e.from, e.to)
+	}
+	return (semantic.Analyzer{}).Analyze(cfg)
 }
 
 func (b *builder) emit(statements []parser.Statement, scope *semantic.Scope) {
@@ -74,13 +102,14 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 				continue
 			}
 			declared = append(declared, name)
-			b.add(semantic.Declare(scope.Resolve(name)))
+			b.declare(scope.Resolve(name))
 		}
 		if statement.Values != nil {
 			for _, name := range declared {
-				b.add(semantic.Assign(scope.Resolve(name)))
+				b.initialize(scope.Resolve(name))
 			}
 		}
+		b.analyzeClosures(statement, scope)
 	case parser.Assign:
 		b.readIdents(statement, scope)
 		for _, name := range statement.Names {
@@ -88,14 +117,25 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 				b.report(serr.Category, statement.Span)
 				continue
 			}
-			b.add(semantic.Assign(scope.Resolve(name)))
+			b.initialize(scope.Resolve(name))
 		}
+		b.analyzeClosures(statement, scope)
 	case parser.Read:
 		if id := scope.Resolve(statement.Names[0]); id != 0 {
 			b.add(semantic.Read(id))
 		}
 	case parser.If:
 		b.emitIf(statement, scope)
+	}
+}
+
+// analyzeClosures analyzes closure literals of the statement at its creation
+// point, after the left-hand side facts are recorded.
+func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.Scope) {
+	for _, value := range statement.Values {
+		if value.Closure != nil {
+			b.analyzeClosure(value.Closure, scope)
+		}
 	}
 }
 
@@ -106,22 +146,34 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 			b.add(semantic.Read(id))
 		}
 	}
+	before := copyFacts(b.facts[b.cur])
 	start := b.blocks[b.cur].ID
 	b.appendBlock()
 	thenID := b.blocks[b.cur].ID
+	b.facts[b.cur] = copyFacts(before)
 	b.emit(statement.Body, scope.Child())
+	thenFacts := copyFacts(b.facts[b.cur])
 	thenExit := b.blocks[b.cur].ID
 
 	hasElse := statement.Else != nil
 	var elseID, elseExit semantic.BlockID
+	var elseFacts map[semantic.BindingID]bool
 	if hasElse {
 		b.appendBlock()
 		elseID = b.blocks[b.cur].ID
+		b.facts[b.cur] = copyFacts(before)
 		b.emit(statement.Else, scope.Child())
+		elseFacts = copyFacts(b.facts[b.cur])
 		elseExit = b.blocks[b.cur].ID
 	}
 
+	joinFacts := intersectFacts(thenFacts, before)
+	if hasElse {
+		joinFacts = intersectFacts(thenFacts, elseFacts)
+	}
+
 	b.appendBlock()
+	b.facts[b.cur] = joinFacts
 	joinID := b.blocks[b.cur].ID
 	b.connect(start, thenID)
 	b.connect(thenExit, joinID)
@@ -137,8 +189,8 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 // expressions before any left-hand side operation, modeling "RHS values are
 // evaluated before any LHS updates become observable" (RFC-003 §61).
 // Declarations are not yet in scope for their own initializers (RFC-003 §36).
-// Closure values carry no top-level idents; their bodies are analyzed
-// separately (RFC-003 §80–84).
+// Closure values carry no top-level idents; their bodies are analyzed as
+// separate CFGs (RFC-003 §80–84).
 func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope) {
 	for _, value := range statement.Values {
 		if value.Closure != nil {
@@ -150,6 +202,96 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 			}
 		}
 	}
+}
+
+// analyzeClosure models a closure body as its own CFG whose entry facts are
+// the facts at the closure creation point:
+//
+//   - parameters are initialized at entry (RFC-003 §86);
+//   - if the body reads a captured binding, that binding must be definitely
+//     initialized at creation: an uninitialized capture is seeded
+//     uninitialized, so the body analysis reports the read (RFC-001 §48–49,
+//     RFC-003 §82);
+//   - a write-only capture of an uninitialized binding is allowed and its
+//     assignment initializes it inside the closure flow (RFC-003 §83);
+//   - closure operations never update caller facts (RFC-003 §84, §170.31).
+func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) {
+	bodyScope := scope.Child()
+	var entry []semantic.Operation
+	paramIDs := map[semantic.BindingID]bool{}
+	for _, p := range cl.Params {
+		if serr := bodyScope.Declare(p.Name); serr != nil {
+			b.report(serr.Category, cl.Span)
+			continue
+		}
+		id := bodyScope.Resolve(p.Name)
+		paramIDs[id] = true
+		entry = append(entry, semantic.Declare(id), semantic.Assign(id))
+	}
+	seen := map[semantic.BindingID]bool{}
+	for _, ident := range closureIdents(cl.Body) {
+		id := bodyScope.Resolve(ident)
+		if id == 0 || paramIDs[id] || seen[id] {
+			continue
+		}
+		seen[id] = true
+		entry = append(entry, semantic.Declare(id))
+		if b.isInitialized(id) {
+			entry = append(entry, semantic.Assign(id))
+		}
+	}
+	cb := &builder{
+		blocks:      []semantic.Block{{ID: 1, Operations: entry}},
+		facts:       []map[semantic.BindingID]bool{{}},
+		nextBlockID: 1,
+	}
+	cb.emit(cl.Body, bodyScope)
+	b.diagnostics = append(b.diagnostics, cb.diagnostics...)
+	b.diagnostics = append(b.diagnostics, cb.analyze().Diagnostics...)
+}
+
+// closureIdents collects identifiers referenced anywhere in the statements,
+// including nested closures, in source order. Assignment and declaration
+// targets are not reads and are not collected.
+func closureIdents(statements []parser.Statement) []string {
+	var out []string
+	for i := range statements {
+		s := &statements[i]
+		out = append(out, s.CondIdents...)
+		for _, value := range s.Values {
+			if value.Closure == nil {
+				out = append(out, value.Idents...)
+				continue
+			}
+			out = append(out, closureIdents(value.Closure.Body)...)
+		}
+		if s.Kind == parser.Read {
+			out = append(out, s.Names...)
+		}
+		out = append(out, closureIdents(s.Body)...)
+		out = append(out, closureIdents(s.Else)...)
+	}
+	return out
+}
+
+func copyFacts(facts map[semantic.BindingID]bool) map[semantic.BindingID]bool {
+	out := make(map[semantic.BindingID]bool, len(facts))
+	for id, initialized := range facts {
+		out[id] = initialized
+	}
+	return out
+}
+
+// intersectFacts keeps a binding initialized only if both incoming paths
+// initialize it, matching the kernel join semantics.
+func intersectFacts(a, b map[semantic.BindingID]bool) map[semantic.BindingID]bool {
+	out := make(map[semantic.BindingID]bool)
+	for id, initialized := range a {
+		if initialized && b[id] {
+			out[id] = true
+		}
+	}
+	return out
 }
 
 func (b *builder) report(category semantic.DiagnosticCategory, span parser.Span) {

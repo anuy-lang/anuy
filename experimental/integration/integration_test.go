@@ -104,3 +104,67 @@ func TestAnalyzeSourceAcceptsBranchShadowing(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result)
 	}
 }
+
+func TestAnalyzeSourceAcceptsClosureReadingInitializedCapture(t *testing.T) {
+	result, err := AnalyzeSource("var handler int = 1\nvar callback = func() {\nhandler\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceReportsCaptureReadBeforeInitialization(t *testing.T) {
+	result, err := AnalyzeSource("var handler int\nvar callback = func() {\nhandler\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceClosureWriteDoesNotProveCallerInitialization(t *testing.T) {
+	result, err := AnalyzeSource("var x int\nvar init = func() {\nx = 1\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceAcceptsWriteOnlyCaptureOfUninitializedBinding(t *testing.T) {
+	result, err := AnalyzeSource("var x int\nvar init = func() {\nx = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceClosureBodyLocalsFollowInitializationRules(t *testing.T) {
+	result, err := AnalyzeSource("var f = func() {\nvar count int\ncount\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceClosureParameterShadowsOuter(t *testing.T) {
+	result, err := AnalyzeSource("var x int\nvar f = func(x int) {\nx = 1\nx\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceCapturePreservesBindingIdentity(t *testing.T) {
+	result, err := AnalyzeSource("var count int = 0\nvar increment = func() {\ncount = count + 1\n}\ncount\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
