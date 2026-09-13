@@ -16,19 +16,25 @@ func AnalyzeSource(source string) (Result, error) {
 	bindings := map[string]semantic.BindingID{}
 	var next semantic.BindingID
 	for _, statement := range program.Statements {
-		id, exists := bindings[statement.Name]
 		switch statement.Kind {
 		case parser.Var:
-			next++
-			id = next
-			bindings[statement.Name] = id
-			ops = append(ops, semantic.Declare(id))
+			for _, name := range statement.Names {
+				next++
+				id := next
+				bindings[name] = id
+				ops = append(ops, semantic.Declare(id))
+				if statement.Values != nil {
+					ops = append(ops, semantic.Assign(id))
+				}
+			}
 		case parser.Assign:
-			if exists {
-				ops = append(ops, semantic.Assign(id))
+			for _, name := range statement.Names {
+				if id, exists := bindings[name]; exists {
+					ops = append(ops, semantic.Assign(id))
+				}
 			}
 		case parser.Read:
-			if exists {
+			if id, exists := bindings[statement.Names[0]]; exists {
 				ops = append(ops, semantic.Read(id))
 			}
 		}

@@ -3,7 +3,7 @@ package integration
 import "testing"
 
 func TestAnalyzeSourceReportsReadBeforeInitialization(t *testing.T) {
-	result, err := AnalyzeSource("var x\nx\n")
+	result, err := AnalyzeSource("var x int\nx\n")
 	if err != nil {
 		t.Fatal(err)
 	}
