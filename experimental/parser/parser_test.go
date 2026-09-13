@@ -139,3 +139,67 @@ func TestParseRejectsUnsupportedSyntax(t *testing.T) {
 		t.Fatal("unsupported syntax accepted")
 	}
 }
+
+func TestParseAcceptsIfWithBlock(t *testing.T) {
+	program, err := Parse("if ready {\nx = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := program.Statements[0]
+	if statement.Kind != If || statement.Cond != "ready" || len(statement.CondIdents) != 1 {
+		t.Fatalf("statement = %#v", statement)
+	}
+	if len(statement.Body) != 1 || statement.Body[0].Kind != Assign || statement.Else != nil {
+		t.Fatalf("branches = %#v", statement)
+	}
+}
+
+func TestParseAcceptsIfElseWithConditions(t *testing.T) {
+	program, err := Parse("if x != nil {\nx = 1\n} else {\nx = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := program.Statements[0]
+	if statement.Cond != "x != nil" || len(statement.Body) != 1 || len(statement.Else) != 1 {
+		t.Fatalf("statement = %#v", statement)
+	}
+}
+
+func TestParseAcceptsNestedIf(t *testing.T) {
+	program, err := Parse("if a {\nif b {\nx = 1\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := program.Statements[0]
+	if outer.Kind != If || len(outer.Body) != 1 || outer.Body[0].Kind != If || len(outer.Body[0].Body) != 1 {
+		t.Fatalf("statement = %#v", outer)
+	}
+}
+
+func TestParseRejectsIfWithoutBlock(t *testing.T) {
+	_, err := Parse("if ready\n")
+	if err == nil {
+		t.Fatal("if without block accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseRejectsElseIf(t *testing.T) {
+	_, err := Parse("if ready {\nx = 1\n} else if other {\nx = 2\n}\n")
+	if err == nil {
+		t.Fatal("else if accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseRejectsUnbalancedBlock(t *testing.T) {
+	if _, err := Parse("if ready {\nx = 1\n"); err == nil {
+		t.Fatal("unbalanced block accepted")
+	}
+}
+
+func TestParseRejectsUnexpectedClosingBrace(t *testing.T) {
+	if _, err := Parse("}\n"); err == nil {
+		t.Fatal("unexpected closing brace accepted")
+	}
+}

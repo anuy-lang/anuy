@@ -53,30 +53,185 @@ type Statement struct {
 	// ValueIdents lists, for each entry of Values, the identifiers referenced
 	// by the expression in source order.
 	ValueIdents [][]string
-	Span        Span
+	// Cond is the if condition as raw source text; CondIdents lists the
+	// identifiers it references.
+	Cond       string
+	CondIdents []string
+	// Body and Else hold the branch statements of an if statement.
+	Body []Statement
+	Else []Statement
+	Span Span
 }
 
 type Program struct{ Statements []Statement }
 
-// Parse accepts typed declarations, single and multiple assignment, `if <name>`
-// and bare identifier reads, one statement per line.
+// Parse accepts typed declarations, single and multiple assignment, if/else
+// statements with blocks and bare identifier reads. Statements are line
+// oriented; blocks open with `{` at the end of a header line and close with
+// a `}` line. Values and conditions are kept as raw source text; the
+// experimental grammar does not interpret them yet.
 func Parse(source string) (Program, error) {
-	var p Program
+	var lines []sourceLine
 	offset := 0
-	for _, line := range strings.SplitAfter(source, "\n") {
-		text := strings.TrimSpace(line)
-		if text == "" {
-			offset += len(line)
+	for _, raw := range strings.SplitAfter(source, "\n") {
+		lines = append(lines, sourceLine{raw: raw, text: strings.TrimSpace(raw), offset: offset})
+		offset += len(raw)
+	}
+	lp := &lineParser{lines: lines}
+	statements, err := lp.parseStatements()
+	if err != nil {
+		return Program{}, err
+	}
+	return Program{Statements: statements}, nil
+}
+
+type sourceLine struct {
+	raw    string
+	text   string
+	offset int
+}
+
+type lineParser struct {
+	lines []sourceLine
+	pos   int
+}
+
+func (lp *lineParser) parseStatements() ([]Statement, error) {
+	var out []Statement
+	for lp.pos < len(lp.lines) {
+		line := lp.lines[lp.pos]
+		if line.text == "" {
+			lp.pos++
 			continue
 		}
-		statement, err := parseStatement(text, line, offset)
-		if err != nil {
-			return Program{}, err
+		if line.text == "}" {
+			return nil, &Error{Category: UnsupportedSyntax, Offset: line.offset, Message: "unexpected }"}
 		}
-		p.Statements = append(p.Statements, statement)
-		offset += len(line)
+		statement, err := lp.parseStatement(line)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, statement)
+		if statement.Kind != If {
+			lp.pos++
+		}
 	}
-	return p, nil
+	return out, nil
+}
+
+// parseBlock parses statements until the closing } line, which it consumes.
+func (lp *lineParser) parseBlock() ([]Statement, error) {
+	var out []Statement
+	for {
+		if lp.pos >= len(lp.lines) {
+			return nil, &Error{Category: UnsupportedSyntax, Offset: lp.lines[len(lp.lines)-1].offset, Message: "missing closing }"}
+		}
+		line := lp.lines[lp.pos]
+		if line.text == "" {
+			lp.pos++
+			continue
+		}
+		if line.text == "}" {
+			lp.pos++
+			return out, nil
+		}
+		if lp.isElseHeader(line) {
+			// The block closes here; the else header belongs to the if
+			// statement that owns this block, which consumes it.
+			return out, nil
+		}
+		statement, err := lp.parseStatement(line)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, statement)
+		if statement.Kind != If {
+			lp.pos++
+		}
+	}
+}
+
+func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
+	tokens, terr := tokenize(line.raw, line.offset)
+	if terr != nil {
+		return Statement{}, terr
+	}
+	var statement Statement
+	var err *Error
+	switch {
+	case tokens[0].kind == tokenIdent && tokens[0].text == "var":
+		statement, err = parseVar(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "if":
+		return lp.parseIf(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "else":
+		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "unexpected else"}
+	case len(tokens) == 1 && tokens[0].kind == tokenIdent:
+		statement = Statement{Kind: Read, Names: []string{tokens[0].text}}
+	default:
+		statement, err = parseAssign(tokens, line)
+	}
+	if err != nil {
+		return Statement{}, err
+	}
+	statement.Span = Span{Start: line.offset, End: line.offset + len(line.text)}
+	return statement, nil
+}
+
+// parseIf parses `if <expression> {` plus its block and an optional
+// `} else {` block. The condition expression is kept as raw source text.
+func (lp *lineParser) parseIf(tokens []token, line sourceLine) (Statement, error) {
+	last := tokens[len(tokens)-1]
+	if len(tokens) < 3 || last.kind != tokenPunct || last.text != "{" {
+		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "if requires a block"}
+	}
+	condition := tokens[1 : len(tokens)-1]
+	var condIdents []string
+	for _, t := range condition {
+		if t.kind == tokenBlank {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "blank identifier is not part of the confirmed grammar"}
+		}
+		if t.kind == tokenIdent && (t.text == "var" || t.text == "if" || t.text == "else") {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in condition", t.text)}
+		}
+		if !isValueToken(t) {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected token %q in condition", t.text)}
+		}
+		if t.kind == tokenIdent && !reservedWords[t.text] {
+			condIdents = append(condIdents, t.text)
+		}
+	}
+	statement := Statement{
+		Kind:       If,
+		Cond:       line.raw[condition[0].start-line.offset : condition[len(condition)-1].end-line.offset],
+		CondIdents: condIdents,
+		Span:       Span{Start: line.offset, End: line.offset + len(line.text)},
+	}
+	lp.pos++
+	body, err := lp.parseBlock()
+	if err != nil {
+		return Statement{}, err
+	}
+	statement.Body = body
+	if lp.pos < len(lp.lines) && lp.isElseHeader(lp.lines[lp.pos]) {
+		lp.pos++
+		elseBody, err := lp.parseBlock()
+		if err != nil {
+			return Statement{}, err
+		}
+		statement.Else = elseBody
+	}
+	return statement, nil
+}
+
+func (lp *lineParser) isElseHeader(line sourceLine) bool {
+	tokens, terr := tokenize(line.raw, line.offset)
+	if terr != nil {
+		return false
+	}
+	return len(tokens) == 3 &&
+		tokens[0].kind == tokenPunct && tokens[0].text == "}" &&
+		tokens[1].kind == tokenIdent && tokens[1].text == "else" &&
+		tokens[2].kind == tokenPunct && tokens[2].text == "{"
 }
 
 type tokenKind uint8
@@ -95,7 +250,7 @@ type token struct {
 	start, end int // absolute byte offsets
 }
 
-var reservedWords = map[string]bool{"var": true, "if": true, "nil": true, "true": true, "false": true}
+var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "nil": true, "true": true, "false": true}
 
 func isIdentStart(c byte) bool {
 	return c == '_' || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
@@ -155,7 +310,7 @@ func tokenize(line string, base int) ([]token, *Error) {
 				continue
 			}
 			return nil, &Error{Category: UnsupportedSyntax, Offset: base + i, Message: "force unwrap is not part of the language"}
-		case strings.ContainsRune("=,.?()[]*+-", rune(c)):
+		case strings.ContainsRune("=,.?()[]*+-{}", rune(c)):
 			if c == '=' && i+1 < len(line) && line[i+1] == '=' {
 				tokens = append(tokens, token{kind: tokenPunct, text: "==", start: base + i, end: base + i + 2})
 				i += 2
@@ -174,39 +329,6 @@ func isAssign(t token) bool { return t.kind == tokenPunct && t.text == "=" }
 
 func listEnd(tokens []token) int { return tokens[len(tokens)-1].end }
 
-func parseStatement(text, line string, base int) (Statement, error) {
-	tokens, terr := tokenize(line, base)
-	if terr != nil {
-		return Statement{}, terr
-	}
-	var statement Statement
-	var err *Error
-	switch {
-	case tokens[0].kind == tokenIdent && tokens[0].text == "var":
-		statement, err = parseVar(tokens, line, base)
-	case tokens[0].kind == tokenIdent && tokens[0].text == "if":
-		statement, err = parseIf(tokens)
-	case len(tokens) == 1 && tokens[0].kind == tokenIdent:
-		statement = Statement{Kind: Read, Names: []string{tokens[0].text}}
-	default:
-		statement, err = parseAssign(tokens, line, base)
-	}
-	if err != nil {
-		return Statement{}, err
-	}
-	statement.Span = Span{Start: base, End: base + len(text)}
-	return statement, nil
-}
-
-func parseIf(tokens []token) (Statement, *Error) {
-	if len(tokens) != 2 || tokens[1].kind != tokenIdent {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "if accepts a single identifier condition in the experimental grammar"}
-	}
-	return Statement{Kind: If, Names: []string{tokens[1].text}}, nil
-}
-
-// parseNameList parses `name ("," name)*` starting at index start and rejects
-// the blank identifier, which is not part of the confirmed grammar.
 func parseNameList(tokens []token, start int) ([]string, int, *Error) {
 	var names []string
 	i := start
@@ -243,7 +365,7 @@ func isTypeToken(t token) bool {
 	}
 }
 
-func parseVar(tokens []token, line string, base int) (Statement, *Error) {
+func parseVar(tokens []token, line sourceLine) (Statement, *Error) {
 	names, i, terr := parseNameList(tokens, 1)
 	if terr != nil {
 		return Statement{}, terr
@@ -264,12 +386,12 @@ func parseVar(tokens []token, line string, base int) (Statement, *Error) {
 		return Statement{}, &Error{Category: TypedMultipleDeclaration, Offset: tokens[typeStart].start, Message: "typed multiple declaration is excluded from the confirmed grammar"}
 	}
 	if typeStart >= 0 {
-		statement.Type = line[tokens[typeStart].start-base : tokens[typeEnd].end-base]
+		statement.Type = line.raw[tokens[typeStart].start-line.offset : tokens[typeEnd].end-line.offset]
 	} else if i >= len(tokens) {
 		return Statement{}, &Error{Category: BareDeclaration, Offset: tokens[0].start, Message: "declaration requires a type or an initializer"}
 	}
 	if i < len(tokens) {
-		values, idents, verr := parseValueList(tokens, i+1, line, base)
+		values, idents, verr := parseValueList(tokens, i+1, line)
 		if verr != nil {
 			return Statement{}, verr
 		}
@@ -279,7 +401,7 @@ func parseVar(tokens []token, line string, base int) (Statement, *Error) {
 	return statement, nil
 }
 
-func parseAssign(tokens []token, line string, base int) (Statement, *Error) {
+func parseAssign(tokens []token, line sourceLine) (Statement, *Error) {
 	names, i, terr := parseNameList(tokens, 0)
 	if terr != nil {
 		return Statement{}, terr
@@ -287,7 +409,7 @@ func parseAssign(tokens []token, line string, base int) (Statement, *Error) {
 	if i >= len(tokens) || !isAssign(tokens[i]) {
 		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "assignment requires ="}
 	}
-	values, idents, verr := parseValueList(tokens, i+1, line, base)
+	values, idents, verr := parseValueList(tokens, i+1, line)
 	if verr != nil {
 		return Statement{}, verr
 	}
@@ -317,7 +439,7 @@ func isValueToken(t token) bool {
 
 // parseValueList splits the remaining tokens into top-level comma-separated
 // expressions and keeps each expression as raw source text.
-func parseValueList(tokens []token, start int, line string, base int) ([]string, [][]string, *Error) {
+func parseValueList(tokens []token, start int, line sourceLine) ([]string, [][]string, *Error) {
 	if start >= len(tokens) {
 		return nil, nil, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "missing expression"}
 	}
@@ -337,7 +459,7 @@ func parseValueList(tokens []token, start int, line string, base int) ([]string,
 				return nil, nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unbalanced brackets"}
 			}
 		case t.kind == tokenPunct && t.text == "," && depth == 0:
-			value, group, gerr := valueGroup(tokens, groupStart, i, line, base)
+			value, group, gerr := valueGroup(tokens, groupStart, i, line)
 			if gerr != nil {
 				return nil, nil, gerr
 			}
@@ -355,7 +477,7 @@ func parseValueList(tokens []token, start int, line string, base int) ([]string,
 	if depth != 0 {
 		return nil, nil, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "unbalanced brackets"}
 	}
-	value, group, gerr := valueGroup(tokens, groupStart, i, line, base)
+	value, group, gerr := valueGroup(tokens, groupStart, i, line)
 	if gerr != nil {
 		return nil, nil, gerr
 	}
@@ -364,18 +486,20 @@ func parseValueList(tokens []token, start int, line string, base int) ([]string,
 	return values, idents, nil
 }
 
-func valueGroup(tokens []token, lo, hi int, line string, base int) (string, []string, *Error) {
+func valueGroup(tokens []token, lo, hi int, line sourceLine) (string, []string, *Error) {
 	if lo >= hi {
 		return "", nil, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "missing expression"}
 	}
-	raw := line[tokens[lo].start-base : tokens[hi-1].end-base]
+	raw := line.raw[tokens[lo].start-line.offset : tokens[hi-1].end-line.offset]
 	var idents []string
 	for _, t := range tokens[lo:hi] {
-		if t.kind == tokenIdent && !reservedWords[t.text] {
-			idents = append(idents, t.text)
-		}
-		if t.kind == tokenIdent && (t.text == "var" || t.text == "if") {
-			return "", nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in expression", t.text)}
+		if t.kind == tokenIdent {
+			if t.text == "var" || t.text == "if" || t.text == "else" {
+				return "", nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in expression", t.text)}
+			}
+			if !reservedWords[t.text] {
+				idents = append(idents, t.text)
+			}
 		}
 	}
 	return raw, idents, nil
