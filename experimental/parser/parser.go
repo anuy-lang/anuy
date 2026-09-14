@@ -251,7 +251,7 @@ func (lp *lineParser) parseBlock() ([]Statement, error) {
 			lp.pos++
 			return out, nil
 		}
-		if lp.isElseHeader(line) {
+		if lp.isElseHeader(line) || lp.isElseIfHeader(line) {
 			return out, nil
 		}
 		statement, err := lp.parseStatement(line)
@@ -347,13 +347,31 @@ func (lp *lineParser) parseIf(tokens []token, line sourceLine) (Statement, error
 		return Statement{}, err
 	}
 	statement.Body = body
-	if lp.pos < len(lp.lines) && lp.isElseHeader(lp.lines[lp.pos]) {
-		lp.pos++
-		elseBody, err := lp.parseBlock()
-		if err != nil {
-			return Statement{}, err
+	if lp.pos < len(lp.lines) {
+		next := lp.lines[lp.pos]
+		switch {
+		case lp.isElseHeader(next):
+			lp.pos++
+			elseBody, err := lp.parseBlock()
+			if err != nil {
+				return Statement{}, err
+			}
+			statement.Else = elseBody
+		case lp.isElseIfHeader(next):
+			// D-03: `} else if` is parse-level sugar for a nested if
+			// statement in Else; the kernel CFG is unchanged. parseIf
+			// recurses, so chains and a final `} else {` all work.
+			tokens2, terr := tokenize(next.raw, next.offset)
+			if terr != nil {
+				return Statement{}, terr
+			}
+			inner, err := lp.parseIf(tokens2[2:], next)
+			if err != nil {
+				return Statement{}, err
+			}
+			inner.Span.Start = tokens2[2].start
+			statement.Else = []Statement{inner}
 		}
-		statement.Else = elseBody
 	}
 	return statement, nil
 }
@@ -1237,4 +1255,17 @@ func valueGroup(tokens []token, lo, hi int, line sourceLine) (Value, *Error) {
 		Idents:     idents,
 		Navigation: navigation,
 	}, nil
+}
+
+// isElseIfHeader reports a `} else if` continuation line that closes the
+// current branch and opens a nested else-if statement.
+func (lp *lineParser) isElseIfHeader(line sourceLine) bool {
+	tokens, terr := tokenize(line.raw, line.offset)
+	if terr != nil {
+		return false
+	}
+	return len(tokens) >= 3 &&
+		tokens[0].kind == tokenPunct && tokens[0].text == "}" &&
+		tokens[1].kind == tokenIdent && tokens[1].text == "else" &&
+		tokens[2].kind == tokenIdent && tokens[2].text == "if"
 }
