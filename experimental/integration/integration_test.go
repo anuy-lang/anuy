@@ -33,6 +33,16 @@ func TestAnalyzeSourceReportsSameScopeRedeclaration(t *testing.T) {
 	assertSingleDiagnostic(t, result, "SameScopeRedeclaration")
 }
 
+func TestAnalyzeSourceDoesNotTreatNavigationMembersAsBindingReads(t *testing.T) {
+	result, err := AnalyzeSource("var user int = 1\nvar address int\nvar city = user.address?.city\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
 func TestAnalyzeSourceAcceptsParallelSwap(t *testing.T) {
 	result, err := AnalyzeSource("var x int = 1\nvar y int = 2\nx, y = y, x\n")
 	if err != nil {
