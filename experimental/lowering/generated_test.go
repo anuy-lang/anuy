@@ -8,7 +8,7 @@ import (
 )
 
 func TestLoweredGoCompiles(t *testing.T) {
-	source, err := Lower("var x int\nx = 1\n")
+	source, err := Lower("var ready bool = true\nvar x int\nvar users []int\nvar total int\nfor ready {\nx = 1\n}\nfor u in users {\ntotal = total + u\n}\nfor {\nif x == 1 {\nbreak\n}\nx = 1\n}\nx\n")
 	if err != nil {
 		t.Fatal(err)
 	}

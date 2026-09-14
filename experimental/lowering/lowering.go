@@ -68,11 +68,59 @@ func lowerStatements(body *strings.Builder, statements []parser.Statement) (stri
 				}
 			}
 			body.WriteString("\t}\n")
+		case parser.Loop:
+			switch {
+			case len(statement.Names) > 0:
+				// Iteration form lowers to Go range with a discarded index
+				// (spec 1-3-1-1 lowering plan); the binding is fresh on every
+				// iteration, matching §76/§77.
+				operand, err := rangeOperand(statement.Values[0])
+				if err != nil {
+					return "", err
+				}
+				fmt.Fprintf(body, "\tfor _, %s := range %s {\n", statement.Names[0], operand)
+				if _, err := lowerStatements(body, statement.Body); err != nil {
+					return "", err
+				}
+				body.WriteString("\t}\n")
+			case statement.Cond != "":
+				fmt.Fprintf(body, "\tfor %s {\n", statement.Cond)
+				if _, err := lowerStatements(body, statement.Body); err != nil {
+					return "", err
+				}
+				body.WriteString("\t}\n")
+			default:
+				body.WriteString("\tfor {\n")
+				if _, err := lowerStatements(body, statement.Body); err != nil {
+					return "", err
+				}
+				body.WriteString("\t}\n")
+			}
+		case parser.Break:
+			body.WriteString("\tbreak\n")
+		case parser.Continue:
+			body.WriteString("\tcontinue\n")
 		default:
 			return "", fmt.Errorf("experimental lowering: unsupported statement")
 		}
 	}
 	return last, nil
+}
+
+// rangeOperand restricts the iteration operand to the documented
+// experimental slice: a bare identifier or a recognized navigation chain
+// lowers to Go range. Anything else (call, index, compound expression) is
+// rejected with a clear error. Type-level checks (slice/array vs map, and
+// iteration order) belong to the future typed slice — map iteration order is
+// outside the Anuy slice (spec 1-3-1-1 lowering plan, PLAN risk).
+func rangeOperand(value parser.Value) (string, error) {
+	if value.Navigation != nil {
+		return value.Text, nil
+	}
+	if len(value.Idents) == 1 && value.Idents[0] == value.Text {
+		return value.Text, nil
+	}
+	return "", fmt.Errorf("experimental lowering: unsupported range operand %q", value.Text)
 }
 
 // lowerValue renders one right-hand side value; closure literals are emitted
