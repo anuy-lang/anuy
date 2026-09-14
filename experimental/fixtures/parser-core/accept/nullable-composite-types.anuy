@@ -1,0 +1,8 @@
+var nullableSlice []User?
+var nullableSliceParens ([]User)?
+var nullableElements [](User?)
+var nullableMap map[string]User?
+var nullableMapParens (map[string]User)?
+var nullableMapValues map[string](User?)
+var nullablePointer *User?
+var nullableUser User?

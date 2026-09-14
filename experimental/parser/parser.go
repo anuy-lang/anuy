@@ -8,6 +8,79 @@ import (
 
 type Span struct{ Start, End int }
 
+// TypeKind identifies the structural kind of a parsed type expression.
+type TypeKind uint8
+
+const (
+	NamedType TypeKind = iota
+	PointerType
+	SliceType
+	MapType
+)
+
+// TypeExpr is the restricted structural type grammar used by the experimental
+// parser. Parentheses affect parsing but are not a semantic node.
+type TypeExpr struct {
+	Kind     TypeKind
+	Name     string
+	Elem     *TypeExpr
+	Key      *TypeExpr
+	Value    *TypeExpr
+	Nullable bool
+	Span     Span
+}
+
+// Canonical returns the owner-approved spelling for this restricted type
+// grammar. It is intentionally independent of a future general formatter.
+func (t *TypeExpr) Canonical() string {
+	return formatType(t, false)
+}
+
+func formatType(t *TypeExpr, nested bool) string {
+	if t == nil {
+		return ""
+	}
+	var text string
+	switch t.Kind {
+	case NamedType:
+		text = t.Name
+	case PointerType:
+		text = "*" + formatType(t.Elem, true)
+	case SliceType:
+		text = "[]" + formatType(t.Elem, true)
+	case MapType:
+		text = "map[" + formatType(t.Key, true) + "]" + formatType(t.Value, true)
+	}
+	if !t.Nullable {
+		return text
+	}
+	if t.Kind == MapType {
+		text = "(" + text + ")?"
+	} else {
+		text += "?"
+	}
+	if nested {
+		return "(" + text + ")"
+	}
+	return text
+}
+
+// NavigationSegment is one ordinary or safe selector in a parsed navigation
+// expression.
+type NavigationSegment struct {
+	Name string
+	Safe bool
+	Call bool
+	Span Span
+}
+
+// NavigationExpr preserves a receiver and selector order for the restricted
+// parser slice.
+type NavigationExpr struct {
+	Receiver string
+	Segments []NavigationSegment
+}
+
 type Kind uint8
 
 const (
@@ -43,12 +116,13 @@ func (e *Error) Error() string {
 
 // Value is one right-hand side expression of a declaration or assignment.
 type Value struct {
-	// Text is the raw source text of a non-closure expression. The
-	// experimental grammar does not interpret it yet.
+	// Text is the raw source text of a non-closure expression.
 	Text string
-	// Idents lists the identifiers referenced by a non-closure expression in
-	// source order.
+	// Idents lists the binding identifiers referenced by a non-closure
+	// expression in source order.
 	Idents []string
+	// Navigation is non-nil when the value is a recognized selector chain.
+	Navigation *NavigationExpr
 	// Closure is non-nil for closure literals.
 	Closure *Closure
 }
@@ -60,24 +134,29 @@ type Closure struct {
 	Span   Span
 }
 
-// Param is a closure parameter; Type is the raw source text of its type.
+// Param is a closure parameter. Type preserves source spelling; TypeExpr is
+// its restricted structural representation.
 type Param struct {
-	Name string
-	Type string
+	Name     string
+	Type     string
+	TypeExpr *TypeExpr
 }
 
 type Statement struct {
 	Kind  Kind
 	Names []string
 	// Type is the declared type as raw source text, or "" for inferred
-	// declarations.
-	Type string
+	// declarations. TypeExpr is non-nil for a typed declaration.
+	Type     string
+	TypeExpr *TypeExpr
 	// Values holds right-hand side expressions.
 	Values []Value
 	// Cond is the if condition as raw source text; CondIdents lists the
-	// identifiers it references.
-	Cond       string
-	CondIdents []string
+	// binding identifiers it references. CondNavigation is non-nil for a
+	// recognized selector chain.
+	Cond           string
+	CondIdents     []string
+	CondNavigation *NavigationExpr
 	// Body and Else hold the branch statements of an if statement.
 	Body []Statement
 	Else []Statement
@@ -90,8 +169,8 @@ type Program struct{ Statements []Statement }
 // literals in single-value initializers, if/else statements with blocks and
 // bare identifier reads. Statements are line oriented; blocks open with `{`
 // at the end of a header line and close with a `}` line. Expressions and
-// conditions are kept as raw source text; the experimental grammar does not
-// interpret them yet.
+// conditions retain raw source text; recognized navigation chains additionally
+// receive restricted structural validation and metadata.
 func Parse(source string) (Program, error) {
 	var lines []sourceLine
 	offset := 0
@@ -204,26 +283,29 @@ func (lp *lineParser) parseIf(tokens []token, line sourceLine) (Statement, error
 	if condition[0].kind == tokenIdent && condition[0].text == "func" {
 		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: condition[0].start, Message: "closure literal is not allowed in a condition"}
 	}
-	var condIdents []string
-	for _, t := range condition {
-		if t.kind == tokenBlank {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "blank identifier is not part of the confirmed grammar"}
+	if conditionErr := validateConditionTokens(condition); conditionErr != nil {
+		return Statement{}, conditionErr
+	}
+	navigation, condIdents, recognized, navErr := navigationMetadata(condition)
+	if navErr != nil {
+		return Statement{}, navErr
+	}
+	if !recognized {
+		if validationErr := validateNavigationTokens(condition); validationErr != nil {
+			return Statement{}, validationErr
 		}
-		if t.kind == tokenIdent && (t.text == "var" || t.text == "if" || t.text == "else") {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in condition", t.text)}
-		}
-		if !isValueToken(t) {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected token %q in condition", t.text)}
-		}
-		if t.kind == tokenIdent && !reservedWords[t.text] {
-			condIdents = append(condIdents, t.text)
+		var identErr *Error
+		condIdents, identErr = valueIdents(condition)
+		if identErr != nil {
+			return Statement{}, identErr
 		}
 	}
 	statement := Statement{
-		Kind:       If,
-		Cond:       line.raw[condition[0].start-line.offset : condition[len(condition)-1].end-line.offset],
-		CondIdents: condIdents,
-		Span:       Span{Start: line.offset, End: line.offset + len(line.text)},
+		Kind:           If,
+		Cond:           line.raw[condition[0].start-line.offset : condition[len(condition)-1].end-line.offset],
+		CondIdents:     condIdents,
+		CondNavigation: navigation,
+		Span:           Span{Start: line.offset, End: line.offset + len(line.text)},
 	}
 	lp.pos++
 	body, err := lp.parseBlock()
@@ -379,17 +461,112 @@ func parseNameList(tokens []token, start int) ([]string, int, *Error) {
 	}
 }
 
-func isTypeToken(t token) bool {
-	switch t.kind {
-	case tokenInt:
-		return true
-	case tokenIdent:
-		return !reservedWords[t.text]
-	case tokenPunct:
-		return strings.ContainsRune("*[]().?", rune(t.text[0]))
+type typeParser struct {
+	tokens []token
+	pos    int
+}
+
+func parseType(tokens []token) (*TypeExpr, *Error) {
+	p := typeParser{tokens: tokens}
+	typ, err := p.parseType()
+	if err != nil {
+		return nil, err
+	}
+	if p.pos != len(p.tokens) {
+		return nil, p.errorAtCurrent("invalid type expression")
+	}
+	return typ, nil
+}
+
+func (p *typeParser) parseType() (*TypeExpr, *Error) {
+	typ, err := p.parseOperand()
+	if err != nil {
+		return nil, err
+	}
+	if p.take("?") {
+		typ.Nullable = true
+		typ.Span.End = p.tokens[p.pos-1].end
+	}
+	return typ, nil
+}
+
+func (p *typeParser) parseOperand() (*TypeExpr, *Error) {
+	if p.pos >= len(p.tokens) {
+		return nil, p.errorAtCurrent("expected type operand")
+	}
+	t := p.tokens[p.pos]
+	switch {
+	case t.kind == tokenIdent && t.text == "map" && p.peek("["):
+		p.pos++
+		p.pos++
+		key, err := p.parseOperand()
+		if err != nil {
+			return nil, err
+		}
+		if !p.take("]") {
+			return nil, p.errorAtCurrent("map type requires closing ]")
+		}
+		value, err := p.parseOperand()
+		if err != nil {
+			return nil, err
+		}
+		return &TypeExpr{Kind: MapType, Key: key, Value: value, Span: Span{Start: t.start, End: value.Span.End}}, nil
+	case t.kind == tokenIdent:
+		p.pos++
+		return &TypeExpr{Kind: NamedType, Name: t.text, Span: Span{Start: t.start, End: t.end}}, nil
+	case t.kind == tokenPunct && t.text == "*":
+		p.pos++
+		elem, err := p.parseOperand()
+		if err != nil {
+			return nil, err
+		}
+		return &TypeExpr{Kind: PointerType, Elem: elem, Span: Span{Start: t.start, End: elem.Span.End}}, nil
+	case t.kind == tokenPunct && t.text == "[":
+		p.pos++
+		if !p.take("]") {
+			return nil, p.errorAtCurrent("slice type requires closing ]")
+		}
+		elem, err := p.parseOperand()
+		if err != nil {
+			return nil, err
+		}
+		return &TypeExpr{Kind: SliceType, Elem: elem, Span: Span{Start: t.start, End: elem.Span.End}}, nil
+	case t.kind == tokenPunct && t.text == "(":
+		p.pos++
+		inner, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		if !p.take(")") {
+			return nil, p.errorAtCurrent("parenthesized type requires closing )")
+		}
+		inner.Span = Span{Start: t.start, End: p.tokens[p.pos-1].end}
+		return inner, nil
 	default:
+		return nil, p.errorAtCurrent("expected type operand")
+	}
+}
+
+func (p *typeParser) take(text string) bool {
+	if p.pos >= len(p.tokens) || p.tokens[p.pos].kind != tokenPunct || p.tokens[p.pos].text != text {
 		return false
 	}
+	p.pos++
+	return true
+}
+
+func (p *typeParser) peek(text string) bool {
+	return p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].kind == tokenPunct && p.tokens[p.pos+1].text == text
+}
+
+func (p *typeParser) errorAtCurrent(message string) *Error {
+	offset := 0
+	if p.pos < len(p.tokens) {
+		offset = p.tokens[p.pos].start
+	} else if len(p.tokens) > 0 {
+		offset = p.tokens[len(p.tokens)-1].end
+	}
+	return &Error{Category: UnsupportedSyntax, Offset: offset, Message: message}
 }
 
 func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, error) {
@@ -398,22 +575,20 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 		return Statement{}, terr
 	}
 	statement := Statement{Kind: Var, Names: names, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
-	typeStart, typeEnd := -1, -1
+	typeStart := i
 	for i < len(tokens) && !isAssign(tokens[i]) {
-		if !isTypeToken(tokens[i]) {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[i].start, Message: "invalid type expression"}
-		}
-		if typeStart < 0 {
-			typeStart = i
-		}
-		typeEnd = i
 		i++
 	}
-	if len(names) > 1 && typeStart >= 0 {
+	if len(names) > 1 && typeStart < i {
 		return Statement{}, &Error{Category: TypedMultipleDeclaration, Offset: tokens[typeStart].start, Message: "typed multiple declaration is excluded from the confirmed grammar"}
 	}
-	if typeStart >= 0 {
-		statement.Type = line.raw[tokens[typeStart].start-line.offset : tokens[typeEnd].end-line.offset]
+	if typeStart < i {
+		typeExpr, typeErr := parseType(tokens[typeStart:i])
+		if typeErr != nil {
+			return Statement{}, typeErr
+		}
+		statement.Type = line.raw[tokens[typeStart].start-line.offset : tokens[i-1].end-line.offset]
+		statement.TypeExpr = typeExpr
 	} else if i >= len(tokens) {
 		return Statement{}, &Error{Category: BareDeclaration, Offset: tokens[0].start, Message: "declaration requires a type or an initializer"}
 	}
@@ -446,6 +621,9 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 		return Statement{}, terr
 	}
 	if i >= len(tokens) || !isAssign(tokens[i]) {
+		if offset, hasSafeTarget := safeNavigationTargetOffset(tokens, i); hasSafeTarget {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: offset, Message: "safe navigation is not an assignment target"}
+		}
 		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "assignment requires ="}
 	}
 	var values []Value
@@ -538,14 +716,14 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine) (
 		if len(g) < 2 {
 			return Closure{}, &Error{Category: UnsupportedSyntax, Offset: g[0].start, Message: "closure parameter requires a type"}
 		}
-		for _, t := range g[1:] {
-			if !isTypeToken(t) {
-				return Closure{}, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "invalid parameter type"}
-			}
+		typeExpr, typeErr := parseType(g[1:])
+		if typeErr != nil {
+			return Closure{}, typeErr
 		}
 		params = append(params, Param{
-			Name: g[0].text,
-			Type: line.raw[g[1].start-line.offset : g[len(g)-1].end-line.offset],
+			Name:     g[0].text,
+			Type:     line.raw[g[1].start-line.offset : g[len(g)-1].end-line.offset],
+			TypeExpr: typeExpr,
 		})
 	}
 	if i >= len(tokens) || tokens[i].kind != tokenPunct || tokens[i].text != "{" {
@@ -572,6 +750,266 @@ func isValueToken(t token) bool {
 	}
 }
 
+func isPunct(t token, text string) bool {
+	return t.kind == tokenPunct && t.text == text
+}
+
+func isCallCallee(t token) bool {
+	return t.kind == tokenIdent || isPunct(t, ")") || isPunct(t, "]")
+}
+
+func validateConditionTokens(tokens []token) *Error {
+	var delimiters []bool // true only for a call's opening parenthesis
+	for i, t := range tokens {
+		switch {
+		case t.kind == tokenBlank:
+			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "blank identifier is not part of the confirmed grammar"}
+		case t.kind == tokenIdent && (t.text == "var" || t.text == "if" || t.text == "else"):
+			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in condition", t.text)}
+		case isPunct(t, "(") || isPunct(t, "["):
+			isCall := isPunct(t, "(") && i > 0 && isCallCallee(tokens[i-1])
+			delimiters = append(delimiters, isCall)
+		case isPunct(t, ")") || isPunct(t, "]"):
+			if len(delimiters) == 0 {
+				return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unbalanced brackets"}
+			}
+			delimiters = delimiters[:len(delimiters)-1]
+		case isPunct(t, ","):
+			if len(delimiters) > 0 && delimiters[len(delimiters)-1] {
+				continue
+			}
+			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected token %q in condition", t.text)}
+		case !isValueToken(t):
+			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected token %q in condition", t.text)}
+		}
+	}
+	if len(delimiters) != 0 {
+		return &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "unbalanced brackets"}
+	}
+	return nil
+}
+
+// navigationMetadata recognizes a selector chain rooted at an identifier. A
+// chain may have ordinary selectors before its first safe selector, but every
+// selector after that point must remain safe (RFC-002 §49, owner-approved
+// strict profile).
+func navigationMetadata(tokens []token) (*NavigationExpr, []string, bool, *Error) {
+	if len(tokens) == 0 {
+		return nil, nil, false, nil
+	}
+	if isPunct(tokens[0], "(") {
+		next, inner, err := consumeCall(tokens, 0)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		innerNavigation, innerIdents, innerRecognized, innerErr := navigationMetadata(inner)
+		if innerErr != nil {
+			return nil, nil, false, innerErr
+		}
+		if !innerRecognized {
+			if len(inner) != 1 || inner[0].kind != tokenIdent || reservedWords[inner[0].text] {
+				return nil, nil, false, nil
+			}
+			innerNavigation = &NavigationExpr{Receiver: inner[0].text}
+			innerIdents = []string{inner[0].text}
+		}
+		return navigationSuffix(tokens, next, innerNavigation.Receiver, innerNavigation.Segments, innerIdents)
+	}
+	if tokens[0].kind != tokenIdent || reservedWords[tokens[0].text] {
+		return nil, nil, false, nil
+	}
+	idents := []string{tokens[0].text}
+	pos := 1
+	if pos < len(tokens) && isPunct(tokens[pos], "(") {
+		next, args, err := consumeCall(tokens, pos)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		argIdents, argErr := navigationArgumentIdents(args)
+		if argErr != nil {
+			return nil, nil, false, argErr
+		}
+		idents = append(idents, argIdents...)
+		pos = next
+	}
+	return navigationSuffix(tokens, pos, tokens[0].text, nil, idents)
+}
+
+func navigationSuffix(tokens []token, pos int, receiver string, initial []NavigationSegment, idents []string) (*NavigationExpr, []string, bool, *Error) {
+	segments := append([]NavigationSegment(nil), initial...)
+	safeTail := false
+	for _, segment := range segments {
+		safeTail = safeTail || segment.Safe
+	}
+	for pos < len(tokens) {
+		safe := false
+		var operator token
+		switch {
+		case isPunct(tokens[pos], "?"):
+			if pos+1 >= len(tokens) || !isPunct(tokens[pos+1], ".") {
+				return nil, nil, false, nil
+			}
+			safe = true
+			operator = tokens[pos]
+			pos += 2
+		case isPunct(tokens[pos], "."):
+			operator = tokens[pos]
+			if safeTail {
+				return nil, nil, true, &Error{Category: UnsupportedSyntax, Offset: operator.start, Message: "ordinary selector cannot follow safe navigation"}
+			}
+			pos++
+		default:
+			return nil, nil, false, nil
+		}
+		if pos >= len(tokens) || tokens[pos].kind != tokenIdent || reservedWords[tokens[pos].text] {
+			return nil, nil, true, &Error{Category: UnsupportedSyntax, Offset: operator.start, Message: "navigation operator requires a member name"}
+		}
+		member := tokens[pos]
+		segments = append(segments, NavigationSegment{
+			Name: member.text,
+			Safe: safe,
+			Span: Span{Start: operator.start, End: member.end},
+		})
+		if safe {
+			safeTail = true
+		}
+		pos++
+		if pos < len(tokens) && isPunct(tokens[pos], "(") {
+			segments[len(segments)-1].Call = true
+			next, args, err := consumeCall(tokens, pos)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			argIdents, argErr := navigationArgumentIdents(args)
+			if argErr != nil {
+				return nil, nil, false, argErr
+			}
+			idents = append(idents, argIdents...)
+			pos = next
+		}
+	}
+	if len(segments) == 0 {
+		return nil, nil, false, nil
+	}
+	return &NavigationExpr{Receiver: receiver, Segments: segments}, idents, true, nil
+}
+
+func validateNavigationTokens(tokens []token) *Error {
+	for i, t := range tokens {
+		if t.kind != tokenIdent && !isPunct(t, "(") {
+			continue
+		}
+		_, _, _, err := navigationMetadata(tokens[i:])
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func consumeCall(tokens []token, start int) (int, []token, *Error) {
+	depth := 0
+	for i := start; i < len(tokens); i++ {
+		switch {
+		case isPunct(tokens[i], "(") || isPunct(tokens[i], "["):
+			depth++
+		case isPunct(tokens[i], ")") || isPunct(tokens[i], "]"):
+			depth--
+			if depth == 0 {
+				return i + 1, tokens[start+1 : i], nil
+			}
+			if depth < 0 {
+				return 0, nil, &Error{Category: UnsupportedSyntax, Offset: tokens[i].start, Message: "unbalanced navigation call"}
+			}
+		}
+	}
+	return 0, nil, &Error{Category: UnsupportedSyntax, Offset: tokens[start].start, Message: "unterminated navigation call"}
+}
+
+func navigationArgumentIdents(tokens []token) ([]string, *Error) {
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+	var idents []string
+	groupStart := 0
+	depth := 0
+	for i, t := range tokens {
+		switch {
+		case isPunct(t, "(") || isPunct(t, "["):
+			depth++
+		case isPunct(t, ")") || isPunct(t, "]"):
+			depth--
+			if depth < 0 {
+				return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unbalanced navigation arguments"}
+			}
+		case isPunct(t, ",") && depth == 0:
+			if i == groupStart {
+				return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "missing navigation argument"}
+			}
+			groupIdents, err := navigationArgumentGroupIdents(tokens[groupStart:i])
+			if err != nil {
+				return nil, err
+			}
+			idents = append(idents, groupIdents...)
+			groupStart = i + 1
+		}
+	}
+	if depth != 0 {
+		return nil, &Error{Category: UnsupportedSyntax, Offset: tokens[len(tokens)-1].end, Message: "unbalanced navigation arguments"}
+	}
+	if groupStart == len(tokens) {
+		return nil, &Error{Category: UnsupportedSyntax, Offset: tokens[len(tokens)-1].end, Message: "missing navigation argument"}
+	}
+	groupIdents, err := navigationArgumentGroupIdents(tokens[groupStart:])
+	if err != nil {
+		return nil, err
+	}
+	return append(idents, groupIdents...), nil
+}
+
+func navigationArgumentGroupIdents(tokens []token) ([]string, *Error) {
+	_, idents, recognized, err := navigationMetadata(tokens)
+	if err != nil {
+		return nil, err
+	}
+	if recognized {
+		return idents, nil
+	}
+	if validationErr := validateNavigationTokens(tokens); validationErr != nil {
+		return nil, validationErr
+	}
+	return valueIdents(tokens)
+}
+
+func valueIdents(tokens []token) ([]string, *Error) {
+	var idents []string
+	for _, t := range tokens {
+		if t.kind != tokenIdent {
+			continue
+		}
+		if t.text == "var" || t.text == "if" || t.text == "else" {
+			return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in expression", t.text)}
+		}
+		if !reservedWords[t.text] {
+			idents = append(idents, t.text)
+		}
+	}
+	return idents, nil
+}
+
+func safeNavigationTargetOffset(tokens []token, start int) (int, bool) {
+	safeOffset := -1
+	for i := start; i+1 < len(tokens); i++ {
+		if isAssign(tokens[i]) {
+			return safeOffset, safeOffset >= 0
+		}
+		if safeOffset < 0 && isPunct(tokens[i], "?") && isPunct(tokens[i+1], ".") {
+			safeOffset = tokens[i].start
+		}
+	}
+	return 0, false
+}
+
 // parseValueList splits the remaining tokens into top-level comma-separated
 // expressions and keeps each expression as raw source text.
 func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error) {
@@ -580,19 +1018,26 @@ func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error)
 	}
 	var values []Value
 	groupStart := start
-	depth := 0
+	var delimiters []bool // true only for a call's opening parenthesis
 	i := start
 	for ; i < len(tokens); i++ {
 		t := tokens[i]
 		switch {
 		case t.kind == tokenPunct && (t.text == "(" || t.text == "["):
-			depth++
+			isCall := t.text == "(" && i > start && isCallCallee(tokens[i-1])
+			delimiters = append(delimiters, isCall)
 		case t.kind == tokenPunct && (t.text == ")" || t.text == "]"):
-			depth--
-			if depth < 0 {
+			if len(delimiters) == 0 {
 				return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unbalanced brackets"}
 			}
-		case t.kind == tokenPunct && t.text == "," && depth == 0:
+			delimiters = delimiters[:len(delimiters)-1]
+		case t.kind == tokenPunct && t.text == ",":
+			if len(delimiters) > 0 {
+				if delimiters[len(delimiters)-1] {
+					continue
+				}
+				return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unexpected comma in expression"}
+			}
 			value, gerr := valueGroup(tokens, groupStart, i, line)
 			if gerr != nil {
 				return nil, gerr
@@ -607,7 +1052,7 @@ func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error)
 			return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected token %q in expression", t.text)}
 		}
 	}
-	if depth != 0 {
+	if len(delimiters) != 0 {
 		return nil, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "unbalanced brackets"}
 	}
 	value, gerr := valueGroup(tokens, groupStart, i, line)
@@ -622,19 +1067,24 @@ func valueGroup(tokens []token, lo, hi int, line sourceLine) (Value, *Error) {
 	if lo >= hi {
 		return Value{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "missing expression"}
 	}
-	var idents []string
-	for _, t := range tokens[lo:hi] {
-		if t.kind == tokenIdent {
-			if t.text == "var" || t.text == "if" || t.text == "else" {
-				return Value{}, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in expression", t.text)}
-			}
-			if !reservedWords[t.text] {
-				idents = append(idents, t.text)
-			}
+	group := tokens[lo:hi]
+	navigation, idents, recognized, navErr := navigationMetadata(group)
+	if navErr != nil {
+		return Value{}, navErr
+	}
+	if !recognized {
+		if validationErr := validateNavigationTokens(group); validationErr != nil {
+			return Value{}, validationErr
+		}
+		var identErr *Error
+		idents, identErr = valueIdents(group)
+		if identErr != nil {
+			return Value{}, identErr
 		}
 	}
 	return Value{
-		Text:   line.raw[tokens[lo].start-line.offset : tokens[hi-1].end-line.offset],
-		Idents: idents,
+		Text:       line.raw[tokens[lo].start-line.offset : tokens[hi-1].end-line.offset],
+		Idents:     idents,
+		Navigation: navigation,
 	}, nil
 }

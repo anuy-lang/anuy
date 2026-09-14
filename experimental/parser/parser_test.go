@@ -16,6 +16,17 @@ func requireCategory(t *testing.T, err error, want ErrorCategory) {
 	}
 }
 
+func requireOffset(t *testing.T, err error, want int) {
+	t.Helper()
+	var perr *Error
+	if !errors.As(err, &perr) {
+		t.Fatalf("err = %v, want parser error", err)
+	}
+	if perr.Offset != want {
+		t.Fatalf("offset = %d, want %d", perr.Offset, want)
+	}
+}
+
 func TestParseVarAndAssignmentWithSpans(t *testing.T) {
 	program, err := Parse("var x int\nx = 1\n")
 	if err != nil {
@@ -45,6 +56,268 @@ func TestParseAcceptsDeclarationForms(t *testing.T) {
 		if len(program.Statements) != 1 || program.Statements[0].Kind != Var {
 			t.Fatalf("Parse(%q): program = %#v", source, program)
 		}
+	}
+}
+
+func TestParseRejectsRepeatedNullableSuffix(t *testing.T) {
+	cases := []struct {
+		source string
+		offset int
+	}{
+		{source: "var value int??\n", offset: 14},
+		{source: "var value []User??\n", offset: 17},
+		{source: "var value map[string]User??\n", offset: 26},
+	}
+	for _, tc := range cases {
+		_, err := Parse(tc.source)
+		if err == nil {
+			t.Fatalf("Parse(%q) accepted repeated nullable suffix", tc.source)
+		}
+		requireCategory(t, err, UnsupportedSyntax)
+		requireOffset(t, err, tc.offset)
+	}
+}
+
+func TestParseRejectsOrdinarySelectorAfterSafeSelector(t *testing.T) {
+	cases := []struct {
+		source string
+		offset int
+	}{
+		{source: "var city = user?.address.city\n", offset: 24},
+		{source: "var city = user.address?.city.name\n", offset: 29},
+	}
+	for _, tc := range cases {
+		_, err := Parse(tc.source)
+		if err == nil {
+			t.Fatalf("Parse(%q) accepted ordinary selector after safe selector", tc.source)
+		}
+		requireCategory(t, err, UnsupportedSyntax)
+		requireOffset(t, err, tc.offset)
+	}
+}
+
+func TestParseDoesNotLetParenthesesResetSafeTail(t *testing.T) {
+	_, err := Parse("var city = (user?.address).city\n")
+	if err == nil {
+		t.Fatal("parentheses reset the safe-navigation tail")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 26)
+}
+
+func TestParseRejectsSafeNavigationAssignmentTargetAtSuffix(t *testing.T) {
+	_, err := Parse("user?.name = value\n")
+	if err == nil {
+		t.Fatal("safe-navigation assignment target accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 4)
+}
+
+func TestParseDoesNotClassifySafeNavigationExpressionAsAssignmentTarget(t *testing.T) {
+	_, err := Parse("user?.name\n")
+	if err == nil {
+		t.Fatal("bare safe-navigation expression accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 10)
+}
+
+func TestParseBuildsCanonicalNullableTypeExpressions(t *testing.T) {
+	cases := []struct {
+		source string
+		want   string
+	}{
+		{source: "var value User?\n", want: "User?"},
+		{source: "var value []User?\n", want: "[]User?"},
+		{source: "var value ([]User)?\n", want: "[]User?"},
+		{source: "var value [](User?)\n", want: "[](User?)"},
+		{source: "var value map[string]User?\n", want: "(map[string]User)?"},
+		{source: "var value (map[string]User)?\n", want: "(map[string]User)?"},
+		{source: "var value map[string](User?)\n", want: "map[string](User?)"},
+		{source: "var value *User?\n", want: "*User?"},
+	}
+	for _, tc := range cases {
+		program, err := Parse(tc.source)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tc.source, err)
+		}
+		typeExpr := program.Statements[0].TypeExpr
+		if typeExpr == nil {
+			t.Fatalf("Parse(%q) did not build a type expression", tc.source)
+		}
+		if got := typeExpr.Canonical(); got != tc.want {
+			t.Fatalf("Parse(%q).TypeExpr.Canonical() = %q, want %q", tc.source, got, tc.want)
+		}
+	}
+}
+
+func TestParseBuildsNullableTypeExpressionForClosureParameter(t *testing.T) {
+	program, err := Parse("var handler = func(value map[string](User?)) {\nvalue\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	param := program.Statements[0].Values[0].Closure.Params[0]
+	if param.TypeExpr == nil {
+		t.Fatal("closure parameter did not build a type expression")
+	}
+	if got := param.TypeExpr.Canonical(); got != "map[string](User?)" {
+		t.Fatalf("parameter canonical type = %q, want %q", got, "map[string](User?)")
+	}
+}
+
+func TestParseBuildsNavigationSegmentsAndReceiverIdents(t *testing.T) {
+	program, err := Parse("var city = user.address?.city\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := program.Statements[0].Values[0]
+	if len(value.Idents) != 1 || value.Idents[0] != "user" {
+		t.Fatalf("idents = %#v, want only receiver user", value.Idents)
+	}
+	if value.Navigation == nil {
+		t.Fatal("value did not build a navigation expression")
+	}
+	segments := value.Navigation.Segments
+	if len(segments) != 2 {
+		t.Fatalf("segments = %#v, want two segments", segments)
+	}
+	if segments[0].Name != "address" || segments[0].Safe {
+		t.Fatalf("first segment = %#v, want ordinary address", segments[0])
+	}
+	if segments[1].Name != "city" || !segments[1].Safe {
+		t.Fatalf("second segment = %#v, want safe city", segments[1])
+	}
+}
+
+func TestParseRejectsCommaInParenthesizedExpression(t *testing.T) {
+	_, err := Parse("var value = (left, right)\n")
+	if err == nil {
+		t.Fatal("parenthesized comma expression accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 17)
+}
+
+func TestParseNavigationCallArgumentsExcludeMemberNames(t *testing.T) {
+	program, err := Parse("var result = user?.method(address.city, postcode)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idents := program.Statements[0].Values[0].Idents
+	want := []string{"user", "address", "postcode"}
+	if len(idents) != len(want) {
+		t.Fatalf("idents = %#v, want %#v", idents, want)
+	}
+	for i := range want {
+		if idents[i] != want[i] {
+			t.Fatalf("idents = %#v, want %#v", idents, want)
+		}
+	}
+}
+
+func TestParseRejectsUnsafeNavigationTailInsideAdditiveExpression(t *testing.T) {
+	_, err := Parse("var result = prefix + user?.address.city\n")
+	if err == nil {
+		t.Fatal("unsafe navigation tail inside additive expression accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 35)
+}
+
+func TestParseRejectsUnsafeNavigationTailInCallArgument(t *testing.T) {
+	_, err := Parse("var result = user?.method(first, other?.address.city)\n")
+	if err == nil {
+		t.Fatal("unsafe navigation tail in a call argument accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 47)
+}
+
+func TestParseBuildsNavigationMetadataThroughParentheses(t *testing.T) {
+	program, err := Parse("var city = (user?.address)?.city\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := program.Statements[0].Values[0]
+	if len(value.Idents) != 1 || value.Idents[0] != "user" {
+		t.Fatalf("idents = %#v, want only receiver user", value.Idents)
+	}
+	if value.Navigation == nil {
+		t.Fatal("parenthesized chain did not build a navigation expression")
+	}
+	if value.Navigation.Receiver != "user" || len(value.Navigation.Segments) != 2 {
+		t.Fatalf("navigation = %#v, want receiver user with two segments", value.Navigation)
+	}
+	if !value.Navigation.Segments[0].Safe || !value.Navigation.Segments[1].Safe {
+		t.Fatalf("segments = %#v, want a pure safe tail", value.Navigation.Segments)
+	}
+}
+
+func TestParseBuildsNavigationMetadataForCondition(t *testing.T) {
+	program, err := Parse("if user.address?.city {\nvalue = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := program.Statements[0]
+	if len(statement.CondIdents) != 1 || statement.CondIdents[0] != "user" {
+		t.Fatalf("condition idents = %#v, want only receiver user", statement.CondIdents)
+	}
+	if statement.CondNavigation == nil {
+		t.Fatal("condition did not build a navigation expression")
+	}
+	if statement.CondNavigation.Receiver != "user" || len(statement.CondNavigation.Segments) != 2 {
+		t.Fatalf("condition navigation = %#v, want receiver user with two segments", statement.CondNavigation)
+	}
+}
+
+func TestParseBuildsNavigationMetadataForConditionCallArguments(t *testing.T) {
+	program, err := Parse("if user?.method(address.city, postcode) {\nvalue = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := program.Statements[0]
+	want := []string{"user", "address", "postcode"}
+	if len(statement.CondIdents) != len(want) {
+		t.Fatalf("condition idents = %#v, want %#v", statement.CondIdents, want)
+	}
+	for i := range want {
+		if statement.CondIdents[i] != want[i] {
+			t.Fatalf("condition idents = %#v, want %#v", statement.CondIdents, want)
+		}
+	}
+	if statement.CondNavigation == nil || len(statement.CondNavigation.Segments) != 1 || !statement.CondNavigation.Segments[0].Call {
+		t.Fatalf("condition navigation = %#v, want one safe call segment", statement.CondNavigation)
+	}
+}
+
+func TestParseRejectsUnsafeNavigationTailInCondition(t *testing.T) {
+	_, err := Parse("if user?.address.city {\nvalue = 1\n}\n")
+	if err == nil {
+		t.Fatal("unsafe navigation tail in condition accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 16)
+}
+
+func TestParseRecordsNavigationReceiverAndSafeCallSegment(t *testing.T) {
+	program, err := Parse("var name = user.address?.city?.name()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	navigation := program.Statements[0].Values[0].Navigation
+	if navigation == nil {
+		t.Fatal("value did not build a navigation expression")
+	}
+	if navigation.Receiver != "user" {
+		t.Fatalf("receiver = %q, want %q", navigation.Receiver, "user")
+	}
+	segments := navigation.Segments
+	if len(segments) != 3 {
+		t.Fatalf("segments = %#v, want three segments", segments)
+	}
+	if segments[2].Name != "name" || !segments[2].Safe || !segments[2].Call {
+		t.Fatalf("final segment = %#v, want safe name call", segments[2])
 	}
 }
 

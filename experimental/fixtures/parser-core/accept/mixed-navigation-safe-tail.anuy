@@ -1,0 +1,5 @@
+var city = user.address?.city
+var postcode = user?.address?.postcode
+var name = user.address?.city?.name()
+var suburb = (user?.address)?.suburb
+var label = user?.method(address.city, postcode)
