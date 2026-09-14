@@ -370,3 +370,23 @@ func TestAnalyzeSourceConditionLoopIntersectsBreakAndConditionExits(t *testing.T
 	}
 	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
 }
+
+func TestAnalyzeSourceBlockLocalsDoNotLeak(t *testing.T) {
+	// RFC-003 §25: block-local declarations do not survive the block; the
+	// name resolves to nothing afterwards, so an assignment is unknown.
+	result, err := AnalyzeSource("var x int = 1\n{\nvar y int = 2\n}\ny = 1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownAssignment")
+}
+
+func TestAnalyzeSourceBlockShadowingIsolated(t *testing.T) {
+	// RFC-003 §30–31, §170.27: the block-local x is a new binding; its
+	// initialization does not touch the outer x, which stays uninitialized.
+	result, err := AnalyzeSource("var x int\n{\nvar x int = 2\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}

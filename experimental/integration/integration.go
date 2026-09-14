@@ -147,6 +147,10 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		b.emitJump(true)
 	case parser.Continue:
 		b.emitJump(false)
+	case parser.Block:
+		// RFC-003 §25: the block creates a child scope; locals declared
+		// inside do not survive it. Linear flow — no join block required.
+		b.emit(statement.Body, scope.Child())
 	}
 }
 

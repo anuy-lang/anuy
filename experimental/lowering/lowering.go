@@ -100,6 +100,12 @@ func lowerStatements(body *strings.Builder, statements []parser.Statement) (stri
 			body.WriteString("\tbreak\n")
 		case parser.Continue:
 			body.WriteString("\tcontinue\n")
+		case parser.Block:
+			body.WriteString("\t{\n")
+			if _, err := lowerStatements(body, statement.Body); err != nil {
+				return "", err
+			}
+			body.WriteString("\t}\n")
 		default:
 			return "", fmt.Errorf("experimental lowering: unsupported statement")
 		}

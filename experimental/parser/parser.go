@@ -91,6 +91,7 @@ const (
 	Loop
 	Break
 	Continue
+	Block
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -276,6 +277,17 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return lp.parseLoop(tokens, line)
 	case tokens[0].kind == tokenIdent && (tokens[0].text == "break" || tokens[0].text == "continue"):
 		return lp.parseJump(tokens, line)
+	case tokens[0].kind == tokenPunct && tokens[0].text == "{":
+		if len(tokens) != 1 {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[1].start, Message: "unexpected token after {"}
+		}
+		start := line.offset
+		lp.pos++
+		body, err := lp.parseBlock()
+		if err != nil {
+			return Statement{}, err
+		}
+		return Statement{Kind: Block, Body: body, Span: Span{Start: start, End: line.offset + len(line.text)}}, nil
 	case tokens[0].kind == tokenIdent && tokens[0].text == "else":
 		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "unexpected else"}
 	case len(tokens) == 1 && tokens[0].kind == tokenIdent:

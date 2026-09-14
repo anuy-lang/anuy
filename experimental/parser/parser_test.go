@@ -706,3 +706,36 @@ func TestParseRejectsLabeledBreak(t *testing.T) {
 	requireCategory(t, err, UnsupportedSyntax)
 	requireOffset(t, err, 6)
 }
+
+func TestParseAcceptsStandaloneBlock(t *testing.T) {
+	program, err := Parse("{\nx = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk := program.Statements[0]
+	if len(program.Statements) != 1 || blk.Kind != Block || len(blk.Body) != 1 || blk.Body[0].Kind != Assign {
+		t.Fatalf("block = %#v", blk)
+	}
+}
+
+func TestParseAcceptsNestedBlocks(t *testing.T) {
+	program, err := Parse("{\nx = 1\n{\ny = 2\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := program.Statements[0]
+	if outer.Kind != Block || len(outer.Body) != 2 || outer.Body[0].Kind != Assign || outer.Body[1].Kind != Block {
+		t.Fatalf("outer block = %#v", outer)
+	}
+	if len(outer.Body[1].Body) != 1 || outer.Body[1].Body[0].Kind != Assign {
+		t.Fatalf("inner block = %#v", outer.Body[1])
+	}
+}
+
+func TestParseRejectsUnbalancedStandaloneBlock(t *testing.T) {
+	_, err := Parse("{\nx = 1\n")
+	if err == nil {
+		t.Fatal("unbalanced standalone block accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
