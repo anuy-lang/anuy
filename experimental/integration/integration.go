@@ -11,7 +11,10 @@ type Result struct{ Diagnostics []semantic.Diagnostic }
 // CFGs. An if statement emits its condition reads in the branching block,
 // each branch is emitted into its own child scope, and a dedicated join
 // block receives edges from every continuing path, so initialization is
-// proven on all of them (RFC-001 §141.4). A closure literal is analyzed as
+// proven on all of them (RFC-001 §141.4). A loop emits condition reads in
+// its header, wires a body block over a child scope with a back edge to the
+// header, and an exit join intersecting the zero-iteration and body paths
+// (RFC-003 §70–75, §170.28–29). A closure literal is analyzed as
 // its own CFG seeded with the facts at the creation point (RFC-001 §48,
 // RFC-003 §82); closure operations never update caller facts
 // (RFC-003 §84, §170.31).
@@ -126,6 +129,8 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		}
 	case parser.If:
 		b.emitIf(statement, scope)
+	case parser.Loop:
+		b.emitLoop(statement, scope)
 	}
 }
 
@@ -183,6 +188,54 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	} else {
 		b.connect(start, joinID)
 	}
+}
+
+// emitLoop wires a loop CFG (spec 1-3-1-1, RFC-003 §70–75): condition reads
+// evaluate in the header on every iteration, the body block starts from
+// header facts so reads are proven per iteration (loop-carried), and the
+// exit keeps a binding initialized only when both the zero-iteration path
+// and the body path initialize it (§170.28–29). The back edge body→header
+// lets the analyzer's fixpoint downgrade facts that only the body
+// establishes. An infinite loop (`for { }`) has no condition exit: its exit
+// block stays unreachable until break edges arrive (task 1-3-2-2), matching
+// §74 — only reachable exits contribute to post-loop state.
+func (b *builder) emitLoop(statement *parser.Statement, scope *semantic.Scope) {
+	entryID := b.blocks[b.cur].ID
+	b.appendBlock()
+	headerID := b.blocks[b.cur].ID
+	for _, ident := range statement.CondIdents {
+		if id := scope.Resolve(ident); id != 0 {
+			b.add(semantic.Read(id))
+		}
+	}
+	if len(statement.Values) > 0 {
+		// The iteration collection evaluates in the header on every
+		// iteration (RFC-003 §76); the binding itself is scoped in 1-3-2-2.
+		for _, ident := range statement.Values[0].Idents {
+			if id := scope.Resolve(ident); id != 0 {
+				b.add(semantic.Read(id))
+			}
+		}
+	}
+	headerFacts := copyFacts(b.facts[b.cur])
+
+	b.appendBlock()
+	bodyID := b.blocks[b.cur].ID
+	b.facts[b.cur] = copyFacts(headerFacts)
+	b.emit(statement.Body, scope.Child())
+	bodyFacts := copyFacts(b.facts[b.cur])
+	bodyExit := b.blocks[b.cur].ID
+
+	b.appendBlock()
+	b.facts[b.cur] = intersectFacts(headerFacts, bodyFacts)
+	exitID := b.blocks[b.cur].ID
+
+	b.connect(entryID, headerID)
+	b.connect(headerID, bodyID)
+	if statement.Cond != "" || len(statement.Values) > 0 {
+		b.connect(headerID, exitID)
+	}
+	b.connect(bodyExit, headerID)
 }
 
 // readIdents emits reads for identifiers referenced by right-hand side
