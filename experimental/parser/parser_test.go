@@ -739,3 +739,13 @@ func TestParseRejectsUnbalancedStandaloneBlock(t *testing.T) {
 	}
 	requireCategory(t, err, UnsupportedSyntax)
 }
+
+func TestParseRejectsTokensAfterBlockOpen(t *testing.T) {
+	// The line-oriented block model requires `{` alone on its opening line;
+	// single-line `{ x = 1 }` blocks are outside the confirmed grammar.
+	_, err := Parse("{ x = 1 }\n")
+	if err == nil {
+		t.Fatal("single-line block accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
