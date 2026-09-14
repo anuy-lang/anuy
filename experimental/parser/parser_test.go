@@ -528,3 +528,181 @@ func TestParseRejectsUnexpectedClosingBrace(t *testing.T) {
 		t.Fatal("unexpected closing brace accepted")
 	}
 }
+
+func TestParseAcceptsLoopForms(t *testing.T) {
+	program, err := Parse("for ready {\nx = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop := program.Statements[0]
+	if len(program.Statements) != 1 || loop.Kind != Loop || loop.Cond != "ready" || len(loop.Body) != 1 {
+		t.Fatalf("condition loop = %#v", loop)
+	}
+
+	program, err = Parse("for {\nx = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop = program.Statements[0]
+	if loop.Kind != Loop || loop.Cond != "" || len(loop.Body) != 1 {
+		t.Fatalf("infinite loop = %#v", loop)
+	}
+
+	program, err = Parse("for user in users {\nx = user\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop = program.Statements[0]
+	if loop.Kind != Loop || len(loop.Names) != 1 || loop.Names[0] != "user" ||
+		len(loop.Values) != 1 || loop.Values[0].Text != "users" ||
+		len(loop.Values[0].Idents) != 1 || loop.Values[0].Idents[0] != "users" {
+		t.Fatalf("iteration loop = %#v", loop)
+	}
+
+	program, err = Parse("for x != nil {\nx = next(x)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop = program.Statements[0]
+	if loop.Kind != Loop || loop.Cond != "x != nil" ||
+		len(loop.CondIdents) != 1 || loop.CondIdents[0] != "x" {
+		t.Fatalf("expression condition loop = %#v", loop)
+	}
+
+	// Spec 1-3-1-1 collision resolution: `for <identifier> { ... }` is a
+	// condition loop, not an iteration-binding reject.
+	program, err = Parse("for user {\nx = user\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop = program.Statements[0]
+	if loop.Kind != Loop || loop.Cond != "user" {
+		t.Fatalf("identifier condition loop = %#v", loop)
+	}
+}
+
+func TestParseLoopSpanCoversHeaderLine(t *testing.T) {
+	program, err := Parse("for ready {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if span := program.Statements[0].Span; span.Start != 0 || span.End != 11 {
+		t.Fatalf("loop span = %#v", span)
+	}
+}
+
+func TestParseAcceptsBreakContinueAndNesting(t *testing.T) {
+	program, err := Parse("for {\nx = readValue()\nif valid(x) {\nbreak\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop := program.Statements[0]
+	if loop.Kind != Loop || len(loop.Body) != 2 || loop.Body[1].Kind != If ||
+		len(loop.Body[1].Body) != 1 || loop.Body[1].Body[0].Kind != Break {
+		t.Fatalf("break in if in loop = %#v", loop)
+	}
+
+	program, err = Parse("for ready {\ncontinue\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if program.Statements[0].Body[0].Kind != Continue {
+		t.Fatalf("continue in loop = %#v", program.Statements[0])
+	}
+
+	program, err = Parse("for {\nfor i in items {\nif done {\ncontinue\n}\n}\nbreak\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := program.Statements[0]
+	if outer.Kind != Loop || len(outer.Body) != 2 || outer.Body[0].Kind != Loop || outer.Body[1].Kind != Break {
+		t.Fatalf("nested loops = %#v", outer)
+	}
+	inner := outer.Body[0]
+	if len(inner.Names) != 1 || inner.Names[0] != "i" || inner.Body[0].Kind != If ||
+		inner.Body[0].Body[0].Kind != Continue {
+		t.Fatalf("inner loop = %#v", inner)
+	}
+}
+
+func TestParseRejectsMalformedLoopHeaders(t *testing.T) {
+	cases := []struct {
+		source string
+		offset int
+	}{
+		{source: "for ready\n", offset: 0},
+		{source: "for\n", offset: 0},
+		{source: "for x = 1 {\n}\n", offset: 6},
+		{source: "for a, b {\n}\n", offset: 5},
+		{source: "for var x = 1 {\n}\n", offset: 4},
+		{source: "for in users {\n}\n", offset: 4},
+	}
+	for _, tc := range cases {
+		_, err := Parse(tc.source)
+		if err == nil {
+			t.Fatalf("Parse(%q) accepted malformed loop header", tc.source)
+		}
+		requireCategory(t, err, UnsupportedSyntax)
+		requireOffset(t, err, tc.offset)
+	}
+}
+
+func TestParseRejectsUnterminatedLoopBlock(t *testing.T) {
+	_, err := Parse("for {\nx = 1\n")
+	if err == nil {
+		t.Fatal("unterminated loop block accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseRejectsIterationHeaderErrors(t *testing.T) {
+	cases := []struct {
+		source string
+		offset int
+	}{
+		{source: "for user in {\n}\n", offset: 12},
+		{source: "for user User in users {\n}\n", offset: 14},
+		{source: "for i, item in items {\n}\n", offset: 5},
+		{source: "for _ in xs {\n}\n", offset: 4},
+		{source: "for u.name in xs {\n}\n", offset: 11},
+	}
+	for _, tc := range cases {
+		_, err := Parse(tc.source)
+		if err == nil {
+			t.Fatalf("Parse(%q) accepted malformed iteration header", tc.source)
+		}
+		requireCategory(t, err, UnsupportedSyntax)
+		requireOffset(t, err, tc.offset)
+	}
+}
+
+func TestParseRejectsBreakContinueOutsideLoop(t *testing.T) {
+	_, err := Parse("break\n")
+	if err == nil {
+		t.Fatal("break outside loop accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 0)
+
+	_, err = Parse("continue\n")
+	if err == nil {
+		t.Fatal("continue outside loop accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+
+	_, err = Parse("for {\nvar f = func() {\nbreak\n}\n}\n")
+	if err == nil {
+		t.Fatal("break inside closure in loop accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 23)
+}
+
+func TestParseRejectsLabeledBreak(t *testing.T) {
+	_, err := Parse("break outer\n")
+	if err == nil {
+		t.Fatal("labeled break accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+	requireOffset(t, err, 6)
+}

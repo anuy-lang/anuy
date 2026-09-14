@@ -88,6 +88,9 @@ const (
 	Assign
 	If
 	Read
+	Loop
+	Break
+	Continue
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -151,7 +154,7 @@ type Statement struct {
 	TypeExpr *TypeExpr
 	// Values holds right-hand side expressions.
 	Values []Value
-	// Cond is the if condition as raw source text; CondIdents lists the
+	// Cond is the if/loop condition as raw source text; CondIdents lists the
 	// binding identifiers it references. CondNavigation is non-nil for a
 	// recognized selector chain.
 	Cond           string
@@ -163,14 +166,21 @@ type Statement struct {
 	Span Span
 }
 
+// A Loop statement reuses fields by loop form (spec 1-3-1-1): condition form
+// sets Cond/CondIdents/CondNavigation; iteration form `for item in xs`
+// sets Names to the binding and Values to the collection expression;
+// infinite form leaves both empty. Body holds the loop body.
+
 type Program struct{ Statements []Statement }
 
 // Parse accepts typed declarations, single and multiple assignment, closure
-// literals in single-value initializers, if/else statements with blocks and
-// bare identifier reads. Statements are line oriented; blocks open with `{`
-// at the end of a header line and close with a `}` line. Expressions and
-// conditions retain raw source text; recognized navigation chains additionally
-// receive restricted structural validation and metadata.
+// literals in single-value initializers, if/else statements with blocks, the
+// three loop forms `for [Expression] Block` / `for identifier in Expression
+// Block` with bare `break`/`continue`, and bare identifier reads. Statements
+// are line oriented; blocks open with `{` at the end of a header line and
+// close with a `}` line. Expressions and conditions retain raw source text;
+// recognized navigation chains additionally receive restricted structural
+// validation and metadata.
 func Parse(source string) (Program, error) {
 	var lines []sourceLine
 	offset := 0
@@ -195,6 +205,10 @@ type sourceLine struct {
 type lineParser struct {
 	lines []sourceLine
 	pos   int
+	// loopDepth tracks syntactic loop nesting for `break`/`continue`.
+	// It resets to zero inside closure literals: a jump never crosses a
+	// function boundary.
+	loopDepth int
 }
 
 func (lp *lineParser) parseStatements() ([]Statement, error) {
@@ -258,6 +272,10 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return lp.parseVar(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "if":
 		return lp.parseIf(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "for":
+		return lp.parseLoop(tokens, line)
+	case tokens[0].kind == tokenIdent && (tokens[0].text == "break" || tokens[0].text == "continue"):
+		return lp.parseJump(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "else":
 		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "unexpected else"}
 	case len(tokens) == 1 && tokens[0].kind == tokenIdent:
@@ -324,6 +342,105 @@ func (lp *lineParser) parseIf(tokens []token, line sourceLine) (Statement, error
 	return statement, nil
 }
 
+// parseLoop parses the three confirmed loop forms: `for [Expression] Block`
+// (condition / infinite) and `for identifier in Expression Block` (iteration).
+// The header is one line closed by `{`; condition and collection are kept as
+// raw source text. Iteration form stores the binding in Names and the
+// collection expression in Values[0].
+func (lp *lineParser) parseLoop(tokens []token, line sourceLine) (Statement, error) {
+	last := tokens[len(tokens)-1]
+	if len(tokens) < 2 || last.kind != tokenPunct || last.text != "{" {
+		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "loop requires a block"}
+	}
+	statement := Statement{Kind: Loop, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
+	header := tokens[1 : len(tokens)-1]
+	if len(header) >= 2 &&
+		header[0].kind == tokenIdent && !reservedWords[header[0].text] &&
+		header[1].kind == tokenIdent && header[1].text == "in" {
+		if len(header) == 2 {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: last.start, Message: "iteration requires an expression"}
+		}
+		collection := header[2:]
+		if collection[0].kind == tokenIdent && collection[0].text == "func" {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: collection[0].start, Message: "closure literal is not allowed in a condition"}
+		}
+		navigation, idents, metaErr := expressionMetadata(collection)
+		if metaErr != nil {
+			return Statement{}, metaErr
+		}
+		statement.Names = []string{header[0].text}
+		statement.Values = []Value{{
+			Text:       line.raw[collection[0].start-line.offset : collection[len(collection)-1].end-line.offset],
+			Idents:     idents,
+			Navigation: navigation,
+		}}
+	} else if len(header) > 0 {
+		if header[0].kind == tokenIdent && header[0].text == "func" {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: header[0].start, Message: "closure literal is not allowed in a condition"}
+		}
+		if condErr := validateConditionTokens(header); condErr != nil {
+			return Statement{}, condErr
+		}
+		navigation, condIdents, metaErr := expressionMetadata(header)
+		if metaErr != nil {
+			return Statement{}, metaErr
+		}
+		statement.Cond = line.raw[header[0].start-line.offset : header[len(header)-1].end-line.offset]
+		statement.CondIdents = condIdents
+		statement.CondNavigation = navigation
+	}
+	lp.pos++
+	lp.loopDepth++
+	body, err := lp.parseBlock()
+	lp.loopDepth--
+	if err != nil {
+		return Statement{}, err
+	}
+	statement.Body = body
+	return statement, nil
+}
+
+// parseJump parses a bare `break` or `continue` inside a loop. The jump
+// binds to the nearest enclosing loop; labels are deferred, and the loop
+// depth resets at closure literals, so a jump never crosses a function
+// boundary.
+func (lp *lineParser) parseJump(tokens []token, line sourceLine) (Statement, error) {
+	jump := tokens[0].text
+	if len(tokens) > 1 {
+		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[1].start, Message: jump + " accepts no label"}
+	}
+	if lp.loopDepth == 0 {
+		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: jump + " outside loop"}
+	}
+	lp.pos++
+	kind := Break
+	if jump == "continue" {
+		kind = Continue
+	}
+	return Statement{Kind: kind, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}, nil
+}
+
+// expressionMetadata mirrors the if-condition pipeline: navigation metadata
+// when the expression is a recognized selector chain, otherwise validated raw
+// identifier lists.
+func expressionMetadata(tokens []token) (*NavigationExpr, []string, *Error) {
+	navigation, idents, recognized, navErr := navigationMetadata(tokens)
+	if navErr != nil {
+		return nil, nil, navErr
+	}
+	if !recognized {
+		if validationErr := validateNavigationTokens(tokens); validationErr != nil {
+			return nil, nil, validationErr
+		}
+		var identErr *Error
+		idents, identErr = valueIdents(tokens)
+		if identErr != nil {
+			return nil, nil, identErr
+		}
+	}
+	return navigation, idents, nil
+}
+
 func (lp *lineParser) isElseHeader(line sourceLine) bool {
 	tokens, terr := tokenize(line.raw, line.offset)
 	if terr != nil {
@@ -351,7 +468,15 @@ type token struct {
 	start, end int // absolute byte offsets
 }
 
-var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "nil": true, "true": true, "false": true}
+var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true}
+
+// isStatementKeyword reports words rejected in expression and condition
+// positions. `in` is contextual: it is only recognized in a loop header
+// between the binding and the collection expression.
+func isStatementKeyword(text string) bool {
+	return text == "var" || text == "if" || text == "else" || text == "for" ||
+		text == "break" || text == "continue" || text == "in"
+}
 
 func isIdentStart(c byte) bool {
 	return c == '_' || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
@@ -731,7 +856,11 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine) (
 	}
 	cl := Closure{Params: params, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
 	lp.pos++
+	// A closure body is a function boundary: loop depth does not carry in.
+	savedDepth := lp.loopDepth
+	lp.loopDepth = 0
 	body, err := lp.parseBlock()
+	lp.loopDepth = savedDepth
 	if err != nil {
 		return Closure{}, err.(*Error)
 	}
@@ -764,7 +893,7 @@ func validateConditionTokens(tokens []token) *Error {
 		switch {
 		case t.kind == tokenBlank:
 			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "blank identifier is not part of the confirmed grammar"}
-		case t.kind == tokenIdent && (t.text == "var" || t.text == "if" || t.text == "else"):
+		case t.kind == tokenIdent && isStatementKeyword(t.text):
 			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in condition", t.text)}
 		case isPunct(t, "(") || isPunct(t, "["):
 			isCall := isPunct(t, "(") && i > 0 && isCallCallee(tokens[i-1])
@@ -987,7 +1116,7 @@ func valueIdents(tokens []token) ([]string, *Error) {
 		if t.kind != tokenIdent {
 			continue
 		}
-		if t.text == "var" || t.text == "if" || t.text == "else" {
+		if isStatementKeyword(t.text) {
 			return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in expression", t.text)}
 		}
 		if !reservedWords[t.text] {
