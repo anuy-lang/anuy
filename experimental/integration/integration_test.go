@@ -229,3 +229,122 @@ func TestAnalyzeSourceAcceptsLoopBodyReadAfterAssignment(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result)
 	}
 }
+
+func TestAnalyzeSourceIterationBindingIsInitializedPerIteration(t *testing.T) {
+	// RFC-003 §76: the binding is created initialized for each logical
+	// iteration, so reading it in the body needs no proof.
+	result, err := AnalyzeSource("for user in users {\nuser\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceIterationBindingShadowsOuter(t *testing.T) {
+	// RFC-003 §78, §170.20/27: the loop binding shadows the outer name and
+	// leaves the outer binding untouched.
+	result, err := AnalyzeSource("var user = defaultUser()\nfor user in users {\nuser\n}\nuser\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceIterationBindingNotVisibleAfterLoop(t *testing.T) {
+	// RFC-003 §27: the binding belongs to the loop construct; after the loop
+	// the name resolves to nothing, so an assignment is unknown.
+	result, err := AnalyzeSource("for user in users {\n}\nuser = 1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownAssignment")
+}
+
+func TestAnalyzeSourceIterationBindingAssignmentInsideBody(t *testing.T) {
+	// RFC-003 §76: the binding is an ordinary initialized mutable binding
+	// inside the body; reassignment resolves and needs no diagnostic.
+	result, err := AnalyzeSource("for user in users {\nuser = next(user)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceInfiniteLoopAllBreakPathsInitialize(t *testing.T) {
+	// RFC-003 §72: every reachable exit assigns the binding, so the post-loop
+	// read is proven (two break paths, both initializing).
+	result, err := AnalyzeSource("var x int\nfor {\nif cancel() {\nx = fallback()\nbreak\n}\nx = readValue()\nif valid(x) {\nbreak\n}\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceInfiniteLoopRejectsBreakPathWithoutAssignment(t *testing.T) {
+	// RFC-003 §73: one reachable exit leaves the binding uninitialized.
+	result, err := AnalyzeSource("var x int\nfor {\nif cancel() {\nbreak\n}\nx = readValue()\nif valid(x) {\nbreak\n}\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceContinueDoesNotContributeToLoopExit(t *testing.T) {
+	// RFC-003 §74: continue only loops back; the condition exit carries
+	// header facts, where x is still uninitialized (§70).
+	result, err := AnalyzeSource("var x int\nvar ready int = 1\nfor ready {\nif bad() {\ncontinue\n}\nx = 1\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceInfiniteLoopContinueSkipsToNextIteration(t *testing.T) {
+	// RFC-003 §74: continue targets the header; the only reachable exit is
+	// the break after the assignment.
+	result, err := AnalyzeSource("var x int\nfor {\nif bad() {\ncontinue\n}\nx = readValue()\nbreak\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceIterationBindingClosureCaptureObservation(t *testing.T) {
+	// RFC-003 §77/§170.32 observation: per-iteration logical identity is a
+	// SHOULD the static single-CFG does not model — the closure capture
+	// refers to the single static binding of the loop (§79). Choosing a
+	// mechanism is out of scope; this test only records that the capture is
+	// seeded initialized (§76) and reports no diagnostic.
+	result, err := AnalyzeSource("for user in users {\nvar f = func() {\nuser\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceNestedLoopBreakBindsToNearestLoop(t *testing.T) {
+	// The inner break exits the inner loop only, so x = 2 stays reachable on
+	// the outer body path and the outer break exit proves x for the post-loop
+	// read (nearest-loop binding, no labeled transfer). With the break
+	// wrongly bound to the outer loop, x = 2 would be unreachable and the
+	// read would report ReadBeforeInitialization.
+	result, err := AnalyzeSource("var x int\nfor {\nfor {\nbreak\n}\nx = 2\nbreak\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
