@@ -1,0 +1,3 @@
+for x != nil {
+x = next(x)
+}

@@ -1,0 +1,6 @@
+for {
+x = readValue()
+if valid(x) {
+break
+}
+}
