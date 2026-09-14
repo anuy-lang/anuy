@@ -511,12 +511,17 @@ func TestParseRejectsIfWithoutBlock(t *testing.T) {
 	requireCategory(t, err, UnsupportedSyntax)
 }
 
-func TestParseRejectsElseIf(t *testing.T) {
-	_, err := Parse("if ready {\nx = 1\n} else if other {\nx = 2\n}\n")
-	if err == nil {
-		t.Fatal("else if accepted")
+func TestParseAcceptsElseIf(t *testing.T) {
+	// D-03 (owner decision 2026-09-15): `else if` is parse-level sugar for a
+	// nested if; this flips the former blanket reject (F-11).
+	program, err := Parse("if ready {\nx = 1\n} else if other {\nx = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
 	}
-	requireCategory(t, err, UnsupportedSyntax)
+	outer := program.Statements[0]
+	if outer.Kind != If || len(outer.Else) != 1 || outer.Else[0].Kind != If || outer.Else[0].Cond != "other" {
+		t.Fatalf("else if chain = %#v", outer)
+	}
 }
 
 func TestParseRejectsUnbalancedBlock(t *testing.T) {
@@ -798,5 +803,61 @@ func TestParseRejectsBlankIdentifierRead(t *testing.T) {
 		}
 		requireCategory(t, err, BlankIdentifierRead)
 		requireOffset(t, err, tc.offset)
+	}
+}
+
+func TestParseAcceptsElseIfChainWithFinalElse(t *testing.T) {
+	program, err := Parse("if a {\nx = 1\n} else if b {\nx = 2\n} else if c {\nx = 3\n} else {\nx = 4\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := program.Statements[0]
+	if first.Kind != If || first.Cond != "a" || len(first.Else) != 1 {
+		t.Fatalf("first = %#v", first)
+	}
+	second := first.Else[0]
+	if second.Kind != If || second.Cond != "b" || len(second.Else) != 1 {
+		t.Fatalf("second = %#v", second)
+	}
+	third := second.Else[0]
+	if third.Kind != If || third.Cond != "c" || len(third.Else) != 1 || third.Else[0].Kind != Assign {
+		t.Fatalf("third = %#v", third)
+	}
+}
+
+func TestParseAcceptsElseIfWithoutFinalElse(t *testing.T) {
+	program, err := Parse("if a {\nx = 1\n} else if b {\nx = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := program.Statements[0].Else[0]
+	if second.Kind != If || second.Cond != "b" || second.Else != nil {
+		t.Fatalf("chain without final else = %#v", second)
+	}
+}
+
+func TestParseRejectsElseIfWithoutBlock(t *testing.T) {
+	_, err := Parse("if a {\nx = 1\n} else if b\n")
+	if err == nil {
+		t.Fatal("else if without block accepted")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseRejectsElseIfConditionViolations(t *testing.T) {
+	// Existing condition rules apply to the else-if header.
+	cases := []struct {
+		source   string
+		category ErrorCategory
+	}{
+		{source: "if a {\nx = 1\n} else if _ {\n}\n", category: BlankIdentifierRead},
+		{source: "if a {\nx = 1\n} else if x = 1 {\n}\n", category: UnsupportedSyntax},
+	}
+	for _, tc := range cases {
+		_, err := Parse(tc.source)
+		if err == nil {
+			t.Fatalf("Parse(%q) accepted invalid else-if condition", tc.source)
+		}
+		requireCategory(t, err, tc.category)
 	}
 }
