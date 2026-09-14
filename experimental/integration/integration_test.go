@@ -390,3 +390,27 @@ func TestAnalyzeSourceBlockShadowingIsolated(t *testing.T) {
 	}
 	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
 }
+
+func TestAnalyzeSourceBlankDiscardCreatesNoBinding(t *testing.T) {
+	// GB-3 variant A: `_` receives a value position but creates no binding;
+	// the named sibling is initialized normally.
+	result, err := AnalyzeSource("var value, _ = f()\nvalue\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceBlankTargetAssignsNothing(t *testing.T) {
+	// `_ = 1` and blank targets in a list emit no assignment operation and
+	// never report UnknownAssignment.
+	result, err := AnalyzeSource("var x int\n_ = 1\n_, x = 2, 3\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}

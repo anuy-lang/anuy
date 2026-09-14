@@ -112,6 +112,11 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		b.readIdents(statement, scope)
 		declared := make([]string, 0, len(statement.Names))
 		for _, name := range statement.Names {
+			if name == "_" {
+				// GB-3 variant A: the blank identifier receives a value but
+				// creates no binding (RFC-003 §65).
+				continue
+			}
 			if serr := scope.Declare(name); serr != nil {
 				b.report(serr.Category, statement.Span)
 				continue
@@ -128,6 +133,11 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 	case parser.Assign:
 		b.readIdents(statement, scope)
 		for _, name := range statement.Names {
+			if name == "_" {
+				// GB-3 variant A: a blank target receives the value without
+				// creating or initializing any binding.
+				continue
+			}
 			if serr := scope.Assign(name); serr != nil {
 				b.report(serr.Category, statement.Span)
 				continue

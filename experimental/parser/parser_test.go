@@ -449,13 +449,15 @@ func TestParseRejectsDuplicateAssignmentTargets(t *testing.T) {
 	requireCategory(t, err, DuplicateAssignmentTarget)
 }
 
-func TestParseRejectsBlankIdentifier(t *testing.T) {
+func TestParseAcceptsBlankIdentifierInNameAndTargetLists(t *testing.T) {
+	// GB-3 variant A (owner decision 2026-09-15): `_` is accepted as a
+	// write-only discard in name and target lists. This supersedes the former
+	// blanket reject; read positions remain rejected (see
+	// TestParseRejectsBlankIdentifierRead).
 	for _, source := range []string{"var v, _ = f()", "_ = 1"} {
-		_, err := Parse(source + "\n")
-		if err == nil {
-			t.Fatalf("Parse(%q) accepted blank identifier", source)
+		if _, err := Parse(source + "\n"); err != nil {
+			t.Fatalf("Parse(%q): %v", source, err)
 		}
-		requireCategory(t, err, UnsupportedSyntax)
 	}
 }
 
@@ -663,7 +665,6 @@ func TestParseRejectsIterationHeaderErrors(t *testing.T) {
 		{source: "for user in {\n}\n", offset: 12},
 		{source: "for user User in users {\n}\n", offset: 14},
 		{source: "for i, item in items {\n}\n", offset: 5},
-		{source: "for _ in xs {\n}\n", offset: 4},
 		{source: "for u.name in xs {\n}\n", offset: 11},
 	}
 	for _, tc := range cases {
@@ -674,6 +675,18 @@ func TestParseRejectsIterationHeaderErrors(t *testing.T) {
 		requireCategory(t, err, UnsupportedSyntax)
 		requireOffset(t, err, tc.offset)
 	}
+}
+
+func TestParseRejectsBlankIterationBindingAsRead(t *testing.T) {
+	// GB-3 variant A refines the experimental category for `_` in a loop
+	// header (spec 1-3-1-1 RM-11): the header reads the blank identifier,
+	// which holds no value.
+	_, err := Parse("for _ in xs {\n}\n")
+	if err == nil {
+		t.Fatal("blank iteration binding accepted")
+	}
+	requireCategory(t, err, BlankIdentifierRead)
+	requireOffset(t, err, 4)
 }
 
 func TestParseRejectsBreakContinueOutsideLoop(t *testing.T) {
@@ -748,4 +761,42 @@ func TestParseRejectsTokensAfterBlockOpen(t *testing.T) {
 		t.Fatal("single-line block accepted")
 	}
 	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseAcceptsBlankDiscardPositions(t *testing.T) {
+	sources := []string{
+		"var value, _ = f()",
+		"var _ = f()",
+		"var _ int",
+		"_, y = 1, 2",
+		"_, _ = f(), g()",
+		"_ = 1",
+	}
+	for _, source := range sources {
+		if _, err := Parse(source + "\n"); err != nil {
+			t.Fatalf("Parse(%q): %v", source, err)
+		}
+	}
+}
+
+func TestParseRejectsBlankIdentifierRead(t *testing.T) {
+	cases := []struct {
+		source string
+		offset int
+	}{
+		{source: "x = _\n", offset: 4},
+		{source: "_\n", offset: 0},
+		{source: "var v = _\n", offset: 8},
+		{source: "if _ {\n}\n", offset: 3},
+		{source: "for _ {\n}\n", offset: 4},
+		{source: "for _ in xs {\n}\n", offset: 4},
+	}
+	for _, tc := range cases {
+		_, err := Parse(tc.source)
+		if err == nil {
+			t.Fatalf("Parse(%q) accepted blank identifier read", tc.source)
+		}
+		requireCategory(t, err, BlankIdentifierRead)
+		requireOffset(t, err, tc.offset)
+	}
 }

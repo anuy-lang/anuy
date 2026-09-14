@@ -108,3 +108,14 @@ func TestLowerBlockToGo(t *testing.T) {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
 }
+
+func TestLowerBlankDiscardToGo(t *testing.T) {
+	got, err := Lower("var value, _ = f()\n_, y = 1, 2\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\nfunc Run() {\n\tvalue, _ := f()\n\t_, y = 1, 2\n\t_ = y\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
