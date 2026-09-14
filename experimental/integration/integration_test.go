@@ -348,3 +348,25 @@ func TestAnalyzeSourceNestedLoopBreakBindsToNearestLoop(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result)
 	}
 }
+
+func TestAnalyzeSourceConditionLoopBreakPathInitializedAtEntry(t *testing.T) {
+	// §71+§74: with x initialized at entry, both exits — the zero-iteration
+	// condition exit and the break exit — carry x initialized.
+	result, err := AnalyzeSource("var x int = 0\nvar ready int = 1\nfor ready {\nif bad() {\nbreak\n}\nx = 1\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceConditionLoopIntersectsBreakAndConditionExits(t *testing.T) {
+	// §70+§74: the exit initializes x only if BOTH the condition exit and the
+	// break path initialize it; neither does, so the post-loop read reports.
+	result, err := AnalyzeSource("var x int\nvar ready int = 1\nfor ready {\nif bad() {\nbreak\n}\nx = 1\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
