@@ -414,3 +414,15 @@ func TestAnalyzeSourceBlankTargetAssignsNothing(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result)
 	}
 }
+
+func TestAnalyzeSourceElseIfChainJoinsAllBranches(t *testing.T) {
+	// D-03: else if is sugar for a nested if, so the kernel join proves every
+	// branch of the chain initializes x.
+	result, err := AnalyzeSource("var x int\nvar a int = 1\nvar b int = 1\nif a {\nx = 1\n} else if b {\nx = 2\n} else {\nx = 3\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
