@@ -97,3 +97,14 @@ func TestLowerRejectsUnsupportedRangeOperand(t *testing.T) {
 		t.Fatalf("err = %v, want unsupported range operand error", err)
 	}
 }
+
+func TestLowerBlockToGo(t *testing.T) {
+	got, err := Lower("var x int = 1\n{\nx = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\nfunc Run() {\n\tvar x int = 1\n\t{\n\tx = 2\n\t}\n\t_ = x\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
