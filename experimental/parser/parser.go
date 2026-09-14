@@ -105,6 +105,7 @@ const (
 	TypedMultipleDeclaration  ErrorCategory = "TypedMultipleDeclaration"
 	DuplicateAssignmentTarget ErrorCategory = "DuplicateAssignmentTarget"
 	ArityMismatch             ErrorCategory = "ArityMismatch"
+	BlankIdentifierRead       ErrorCategory = "BlankIdentifierRead"
 )
 
 // Error reports a parse-level reject with its category and byte offset.
@@ -288,6 +289,9 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 			return Statement{}, err
 		}
 		return Statement{Kind: Block, Body: body, Span: Span{Start: start, End: line.offset + len(line.text)}}, nil
+	case tokens[0].kind == tokenBlank && len(tokens) == 1:
+		// A bare `_` is a read position: the blank identifier holds no value.
+		return Statement{}, &Error{Category: BlankIdentifierRead, Offset: tokens[0].start, Message: "_ does not hold a value"}
 	case tokens[0].kind == tokenIdent && tokens[0].text == "else":
 		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "unexpected else"}
 	case len(tokens) == 1 && tokens[0].kind == tokenIdent:
@@ -582,12 +586,12 @@ func parseNameList(tokens []token, start int) ([]string, int, *Error) {
 		if i >= len(tokens) {
 			return nil, 0, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "expected identifier"}
 		}
-		if tokens[i].kind != tokenIdent {
+		if tokens[i].kind != tokenIdent && tokens[i].kind != tokenBlank {
 			return nil, 0, &Error{Category: UnsupportedSyntax, Offset: tokens[i].start, Message: "expected identifier"}
 		}
-		if tokens[i].text == "_" {
-			return nil, 0, &Error{Category: UnsupportedSyntax, Offset: tokens[i].start, Message: "blank identifier is not part of the confirmed grammar"}
-		}
+		// GB-3 variant A: `_` is accepted in name lists as a write-only
+		// discard; it stays in the name list for arity but the kernel
+		// creates no binding for it.
 		names = append(names, tokens[i].text)
 		i++
 		if i < len(tokens) && tokens[i].kind == tokenPunct && tokens[i].text == "," {
@@ -786,6 +790,11 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 	}
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
+		if name == "_" {
+			// GB-3 variant A: the blank identifier is not a binding target;
+			// the duplicate-target check (RFC-003 §63) does not apply.
+			continue
+		}
 		if seen[name] {
 			return Statement{}, &Error{Category: DuplicateAssignmentTarget, Offset: tokens[0].start, Message: fmt.Sprintf("duplicate assignment target %q", name)}
 		}
@@ -904,7 +913,7 @@ func validateConditionTokens(tokens []token) *Error {
 	for i, t := range tokens {
 		switch {
 		case t.kind == tokenBlank:
-			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "blank identifier is not part of the confirmed grammar"}
+			return &Error{Category: BlankIdentifierRead, Offset: t.start, Message: "_ does not hold a value"}
 		case t.kind == tokenIdent && isStatementKeyword(t.text):
 			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in condition", t.text)}
 		case isPunct(t, "(") || isPunct(t, "["):
@@ -1188,7 +1197,7 @@ func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error)
 		case t.kind == tokenPunct && (t.text == "=" || t.text == "=="):
 			return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unexpected = in expression"}
 		case t.kind == tokenBlank:
-			return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "blank identifier is not part of the confirmed grammar"}
+			return nil, &Error{Category: BlankIdentifierRead, Offset: t.start, Message: "_ does not hold a value"}
 		case !isValueToken(t):
 			return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected token %q in expression", t.text)}
 		}
