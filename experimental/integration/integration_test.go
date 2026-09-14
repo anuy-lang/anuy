@@ -178,3 +178,54 @@ func TestAnalyzeSourceCapturePreservesBindingIdentity(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result)
 	}
 }
+
+func TestAnalyzeSourceRejectsZeroIterationLoopAssignment(t *testing.T) {
+	// RFC-003 §70, §170.28: a loop that may execute zero times does not
+	// establish post-loop initialization by body assignment alone.
+	result, err := AnalyzeSource("var ready int = 1\nvar x int\nfor ready {\nx = 1\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceAcceptsInitializationBeforeLoop(t *testing.T) {
+	// RFC-003 §71: initialized before the loop, the binding stays proven.
+	result, err := AnalyzeSource("var x int = 0\nvar ready int = 1\nfor ready {\nx = update(x)\n}\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
+func TestAnalyzeSourceRejectsLoopCarriedReadBeforeAssignment(t *testing.T) {
+	// RFC-003 §75: the first iteration may read before initialization.
+	result, err := AnalyzeSource("var x int\nvar ready int = 1\nfor ready {\nx\nx = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceRejectsUninitializedLoopConditionRead(t *testing.T) {
+	// RFC-001 §141.3: condition reads evaluate in the header and require
+	// definite initialization.
+	result, err := AnalyzeSource("var c int\nfor c {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "ReadBeforeInitialization")
+}
+
+func TestAnalyzeSourceAcceptsLoopBodyReadAfterAssignment(t *testing.T) {
+	// A read after an assignment on the same path is safe on every iteration.
+	result, err := AnalyzeSource("var x int\nvar ready int = 1\nfor ready {\nx = 1\nx\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
