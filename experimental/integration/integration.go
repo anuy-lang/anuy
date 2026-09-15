@@ -1,6 +1,8 @@
 package integration
 
 import (
+	"strings"
+
 	"github.com/san-smith/anuy/experimental/parser"
 	"github.com/san-smith/anuy/experimental/semantic"
 )
@@ -42,23 +44,39 @@ type loopContext struct {
 	header    semantic.BlockID
 	exit      semantic.BlockID
 	exitFacts map[semantic.BindingID]bool
+	exitNN    map[semantic.BindingID]bool
 }
 
 type builder struct {
 	blocks      []semantic.Block
 	facts       []map[semantic.BindingID]bool // initialization facts at the end of each block
+	nonNil      []map[semantic.BindingID]bool // non-nil narrowing facts, parallel to facts (story 05)
 	edges       []edge
 	cur         int // index into blocks
 	nextBlockID semantic.BlockID
 	loops       []loopContext
 	diagnostics []semantic.Diagnostic
+	// nilable marks bindings declared with a nullable `T?` type - the only
+	// nilability evidence in the type-free experimental layer.
+	nilable map[semantic.BindingID]bool
+	// closureMutates registers, per closure binding, the captured bindings
+	// its body assigns (RFC-003 §85 invalidation).
+	closureMutates map[semantic.BindingID][]semantic.BindingID
+	// declared/assigned feed the mutator computation for closure bodies.
+	declared map[semantic.BindingID]bool
+	assigned map[semantic.BindingID]bool
 }
 
 func newBuilder() *builder {
 	return &builder{
-		blocks:      []semantic.Block{{ID: 1}},
-		facts:       []map[semantic.BindingID]bool{{}},
-		nextBlockID: 1,
+		blocks:         []semantic.Block{{ID: 1}},
+		facts:          []map[semantic.BindingID]bool{{}},
+		nonNil:         []map[semantic.BindingID]bool{{}},
+		nextBlockID:    1,
+		nilable:        map[semantic.BindingID]bool{},
+		closureMutates: map[semantic.BindingID][]semantic.BindingID{},
+		declared:       map[semantic.BindingID]bool{},
+		assigned:       map[semantic.BindingID]bool{},
 	}
 }
 
@@ -66,6 +84,7 @@ func (b *builder) appendBlock() {
 	b.nextBlockID++
 	b.blocks = append(b.blocks, semantic.Block{ID: b.nextBlockID})
 	b.facts = append(b.facts, map[semantic.BindingID]bool{})
+	b.nonNil = append(b.nonNil, map[semantic.BindingID]bool{})
 	b.cur = len(b.blocks) - 1
 }
 
@@ -76,11 +95,28 @@ func (b *builder) add(op semantic.Operation) {
 func (b *builder) declare(id semantic.BindingID) {
 	b.add(semantic.Declare(id))
 	b.facts[b.cur][id] = false
+	b.nonNil[b.cur][id] = false
+	b.declared[id] = true
 }
 
 func (b *builder) initialize(id semantic.BindingID) {
 	b.add(semantic.Assign(id))
 	b.facts[b.cur][id] = true
+	// RFC-002 §25: assignment invalidates narrowing; without RHS types the
+	// layer cannot re-establish it (§26 is out of slice).
+	b.nonNil[b.cur][id] = false
+	b.assigned[id] = true
+}
+
+// assume establishes the non-nil narrowing fact for the lowering of a
+// proven `x != nil` predicate (RFC-002 §22).
+func (b *builder) assume(id semantic.BindingID) {
+	b.add(semantic.Assume(id))
+	b.nonNil[b.cur][id] = true
+}
+
+func (b *builder) isNonNil(id semantic.BindingID) bool {
+	return b.nonNil[b.cur][id]
 }
 
 func (b *builder) isInitialized(id semantic.BindingID) bool {
@@ -111,6 +147,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 	case parser.Var:
 		b.readIdents(statement, scope)
 		declared := make([]string, 0, len(statement.Names))
+		targets := make([]semantic.BindingID, 0, len(statement.Names))
 		for _, name := range statement.Names {
 			if name == "_" {
 				// GB-3 variant A: the blank identifier receives a value but
@@ -122,16 +159,22 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 				continue
 			}
 			declared = append(declared, name)
-			b.declare(scope.Resolve(name))
+			id := scope.Resolve(name)
+			targets = append(targets, id)
+			b.declare(id)
+			if statement.TypeExpr != nil && statement.TypeExpr.Nullable {
+				b.nilable[id] = true
+			}
 		}
 		if statement.Values != nil {
 			for _, name := range declared {
 				b.initialize(scope.Resolve(name))
 			}
 		}
-		b.analyzeClosures(statement, scope)
+		b.analyzeClosures(statement, scope, targets)
 	case parser.Assign:
 		b.readIdents(statement, scope)
+		targets := make([]semantic.BindingID, 0, len(statement.Names))
 		for _, name := range statement.Names {
 			if name == "_" {
 				// GB-3 variant A: a blank target receives the value without
@@ -142,11 +185,14 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 				b.report(serr.Category, statement.Span)
 				continue
 			}
+			targets = append(targets, scope.Resolve(name))
 			b.initialize(scope.Resolve(name))
 		}
-		b.analyzeClosures(statement, scope)
+		b.analyzeClosures(statement, scope, targets)
 	case parser.Read:
 		b.readIdent(statement.Names[0], scope, statement.Span, nil)
+	case parser.Call:
+		b.emitCall(statement, scope)
 	case parser.If:
 		b.emitIf(statement, scope)
 	case parser.Loop:
@@ -163,12 +209,20 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 }
 
 // analyzeClosures analyzes closure literals of the statement at its creation
-// point, after the left-hand side facts are recorded.
-func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.Scope) {
+// point, after the left-hand side facts are recorded. targets are the
+// binding ids the closure values are assigned to; the closure's mutated
+// captures are registered there for RFC-003 §85 call invalidation.
+func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.Scope, targets []semantic.BindingID) {
+	index := 0
 	for _, value := range statement.Values {
-		if value.Closure != nil {
-			b.analyzeClosure(value.Closure, scope)
+		if value.Closure == nil {
+			continue
 		}
+		mutators := b.analyzeClosure(value.Closure, scope)
+		if index < len(targets) {
+			b.closureMutates[targets[index]] = mutators
+		}
+		index++
 	}
 }
 
@@ -176,33 +230,44 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	// Condition reads evaluate in the branching block, before any branch.
 	b.readConditionIdents(statement, scope)
 	before := copyFacts(b.facts[b.cur])
+	beforeNN := copyFacts(b.nonNil[b.cur])
 	start := b.blocks[b.cur].ID
 	b.appendBlock()
 	thenID := b.blocks[b.cur].ID
 	b.facts[b.cur] = copyFacts(before)
+	b.nonNil[b.cur] = copyFacts(beforeNN)
+	if narrowID := b.condNarrowTarget(statement, scope); narrowID != 0 {
+		b.assume(narrowID)
+	}
 	b.emit(statement.Body, scope.Child())
 	thenFacts := copyFacts(b.facts[b.cur])
+	thenNN := copyFacts(b.nonNil[b.cur])
 	thenExit := b.blocks[b.cur].ID
 
 	hasElse := statement.Else != nil
 	var elseID, elseExit semantic.BlockID
-	var elseFacts map[semantic.BindingID]bool
+	var elseFacts, elseNN map[semantic.BindingID]bool
 	if hasElse {
 		b.appendBlock()
 		elseID = b.blocks[b.cur].ID
 		b.facts[b.cur] = copyFacts(before)
+		b.nonNil[b.cur] = copyFacts(beforeNN)
 		b.emit(statement.Else, scope.Child())
 		elseFacts = copyFacts(b.facts[b.cur])
+		elseNN = copyFacts(b.nonNil[b.cur])
 		elseExit = b.blocks[b.cur].ID
 	}
 
 	joinFacts := intersectFacts(thenFacts, before)
+	joinNN := intersectFacts(thenNN, beforeNN)
 	if hasElse {
 		joinFacts = intersectFacts(thenFacts, elseFacts)
+		joinNN = intersectFacts(thenNN, elseNN)
 	}
 
 	b.appendBlock()
 	b.facts[b.cur] = joinFacts
+	b.nonNil[b.cur] = joinNN
 	joinID := b.blocks[b.cur].ID
 	b.connect(start, thenID)
 	b.connect(thenExit, joinID)
@@ -239,6 +304,7 @@ func (b *builder) emitLoop(statement *parser.Statement, scope *semantic.Scope) {
 		}
 	}
 	headerFacts := copyFacts(b.facts[b.cur])
+	headerNN := copyFacts(b.nonNil[b.cur])
 
 	b.appendBlock()
 	exitIdx := b.cur
@@ -248,13 +314,21 @@ func (b *builder) emitLoop(statement *parser.Statement, scope *semantic.Scope) {
 	// is captured before the body because breaks replace the nil exitFacts.
 	hasConditionExit := statement.Cond != "" || len(statement.Values) > 0
 	var exitFacts map[semantic.BindingID]bool
+	var exitNN map[semantic.BindingID]bool
 	if hasConditionExit {
 		exitFacts = copyFacts(headerFacts)
+		exitNN = copyFacts(headerNN)
 	}
 
 	b.appendBlock()
 	bodyID := b.blocks[b.cur].ID
 	b.facts[b.cur] = copyFacts(headerFacts)
+	b.nonNil[b.cur] = copyFacts(headerNN)
+	// A bare `x != nil` loop condition re-establishes the narrowing for the
+	// body on every iteration; the exit path stays unproven.
+	if narrowID := b.condNarrowTarget(statement, scope); narrowID != 0 {
+		b.assume(narrowID)
+	}
 	bodyScope := scope.Child()
 	if len(statement.Names) > 0 {
 		// RFC-003 §76, §27: the binding lives in the loop's child scope and
@@ -270,13 +344,14 @@ func (b *builder) emitLoop(statement *parser.Statement, scope *semantic.Scope) {
 			b.initialize(id)
 		}
 	}
-	b.loops = append(b.loops, loopContext{header: headerID, exit: exitID, exitFacts: exitFacts})
+	b.loops = append(b.loops, loopContext{header: headerID, exit: exitID, exitFacts: exitFacts, exitNN: exitNN})
 	b.emit(statement.Body, bodyScope)
 	loopCtx := &b.loops[len(b.loops)-1]
 	b.connect(b.blocks[b.cur].ID, headerID)
 	b.loops = b.loops[:len(b.loops)-1]
 
 	b.facts[exitIdx] = loopCtx.exitFacts
+	b.nonNil[exitIdx] = loopCtx.exitNN
 	b.cur = exitIdx // post-loop statements emit in the exit/join block
 
 	b.connect(entryID, headerID)
@@ -298,6 +373,7 @@ func (b *builder) emitJump(isBreak bool) {
 	}
 	ctx := &b.loops[len(b.loops)-1]
 	curFacts := copyFacts(b.facts[b.cur])
+	curNN := copyFacts(b.nonNil[b.cur])
 	if isBreak {
 		b.connect(b.blocks[b.cur].ID, ctx.exit)
 		if ctx.exitFacts == nil {
@@ -305,11 +381,17 @@ func (b *builder) emitJump(isBreak bool) {
 		} else {
 			ctx.exitFacts = intersectFacts(ctx.exitFacts, curFacts)
 		}
+		if ctx.exitNN == nil {
+			ctx.exitNN = curNN
+		} else {
+			ctx.exitNN = intersectFacts(ctx.exitNN, curNN)
+		}
 	} else {
 		b.connect(b.blocks[b.cur].ID, ctx.header)
 	}
 	b.appendBlock()
 	b.facts[b.cur] = curFacts
+	b.nonNil[b.cur] = curNN
 }
 
 // readIdents emits reads for identifiers referenced by right-hand side
@@ -328,6 +410,15 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 		for _, ident := range value.Idents {
 			if id := scope.Resolve(ident); id != 0 {
 				b.add(semantic.Read(id))
+			}
+		}
+		// An ordinary member access on a declared `T?` receiver requires
+		// the non-nil proof (RFC-002 §22; safe tails are exempt via
+		// SafeNavigate). Unresolved receivers stay in the F-G3 tolerance
+		// zone.
+		if value.Navigation != nil && len(value.Navigation.Segments) > 0 && !value.Navigation.Segments[0].Safe {
+			if id := scope.Resolve(value.Navigation.Receiver); id != 0 && b.nilable[id] {
+				b.add(semantic.Deref(id))
 			}
 		}
 	}
@@ -378,10 +469,15 @@ func (b *builder) readIdent(name string, scope *semantic.Scope, span parser.Span
 //     initialized at creation: an uninitialized capture is seeded
 //     uninitialized, so the body analysis reports the read (RFC-001 §48–49,
 //     RFC-003 §82);
+//   - a non-nil capture is seeded with its narrowing (CONTRACTS §1.5, the
+//     narrowing analogue of the initialization seeding);
 //   - a write-only capture of an uninitialized binding is allowed and its
 //     assignment initializes it inside the closure flow (RFC-003 §83);
 //   - closure operations never update caller facts (RFC-003 §84, §170.31).
-func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) {
+//
+// It returns the bindings the body assigns without declaring - the mutated
+// captures, for §85 call invalidation.
+func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) []semantic.BindingID {
 	bodyScope := scope.Child()
 	var entry []semantic.Operation
 	paramIDs := map[semantic.BindingID]bool{}
@@ -405,15 +501,73 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) {
 		if b.isInitialized(id) {
 			entry = append(entry, semantic.Assign(id))
 		}
+		if b.isNonNil(id) {
+			entry = append(entry, semantic.Assume(id))
+		}
 	}
 	cb := &builder{
 		blocks:      []semantic.Block{{ID: 1, Operations: entry}},
 		facts:       []map[semantic.BindingID]bool{{}},
+		nonNil:      []map[semantic.BindingID]bool{{}},
 		nextBlockID: 1,
+		nilable:     b.nilable,
+		declared:    map[semantic.BindingID]bool{},
+		assigned:    map[semantic.BindingID]bool{},
 	}
 	cb.emit(cl.Body, bodyScope)
+	var mutators []semantic.BindingID
+	for id := range cb.assigned {
+		if !cb.declared[id] {
+			mutators = append(mutators, id)
+		}
+	}
 	b.diagnostics = append(b.diagnostics, cb.diagnostics...)
 	b.diagnostics = append(b.diagnostics, cb.analyze().Diagnostics...)
+	return mutators
+}
+
+// emitCall lowers a call statement: the bare callee is a binding read, and
+// the call of a known mutating closure invalidates the non-nil narrowing of
+// its captured bindings (RFC-003 §85). A navigation call requires the
+// non-nil proof for its ordinary prefix; its method name is never a binding
+// read (F-G3 boundary).
+func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
+	call := statement.Call
+	id := scope.Resolve(call.Receiver)
+	if id == 0 {
+		if len(call.Segments) == 0 {
+			b.report(semantic.UnknownRead, statement.Span)
+		}
+		return
+	}
+	b.add(semantic.Read(id))
+	if len(call.Segments) > 0 {
+		if !call.Segments[0].Safe && b.nilable[id] {
+			b.add(semantic.Deref(id))
+		}
+		return
+	}
+	if mutators := b.closureMutates[id]; len(mutators) > 0 {
+		b.add(semantic.Call(mutators...))
+	}
+}
+
+// condNarrowTarget resolves the binding narrowed by a bare `x != nil`
+// condition - the only nil-comparison form in the experimental slice;
+// conditions otherwise stay raw text until the general expression grammar
+// exists. Zero means the condition carries no narrowing.
+func (b *builder) condNarrowTarget(statement *parser.Statement, scope *semantic.Scope) semantic.BindingID {
+	parts := strings.SplitN(statement.Cond, "!=", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) != "nil" {
+		return 0
+	}
+	name := strings.TrimSpace(parts[0])
+	for _, ident := range statement.CondIdents {
+		if ident == name {
+			return scope.Resolve(ident)
+		}
+	}
+	return 0
 }
 
 // closureIdents collects identifiers referenced anywhere in the statements,
@@ -433,6 +587,11 @@ func closureIdents(statements []parser.Statement) []string {
 		}
 		if s.Kind == parser.Read {
 			out = append(out, s.Names...)
+		}
+		// A call statement's bare callee and navigation receiver are binding
+		// reads (CONTRACTS §2): they participate in capture seeding.
+		if s.Kind == parser.Call && s.Call != nil {
+			out = append(out, s.Call.Receiver)
 		}
 		out = append(out, closureIdents(s.Body)...)
 		out = append(out, closureIdents(s.Else)...)
