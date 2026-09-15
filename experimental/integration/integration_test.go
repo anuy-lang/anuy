@@ -33,6 +33,35 @@ func TestAnalyzeSourceReportsSameScopeRedeclaration(t *testing.T) {
 	assertSingleDiagnostic(t, result, "SameScopeRedeclaration")
 }
 
+func TestAnalyzeSourceReportsUnknownRead(t *testing.T) {
+	// D-01/P-25: a bare identifier that resolves through no scope reports
+	// exactly one UnknownRead at the read span.
+	result, err := AnalyzeSource("x\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownRead")
+	if result.Diagnostics[0].Span.Start != 0 || result.Diagnostics[0].Span.End != 1 {
+		t.Fatalf("span = %#v, want the read span 0..1", result.Diagnostics[0].Span)
+	}
+}
+
+func TestAnalyzeSourceReportsUnknownReadInIfCondition(t *testing.T) {
+	result, err := AnalyzeSource("if ready {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownRead")
+}
+
+func TestAnalyzeSourceReportsUnknownReadInLoopCondition(t *testing.T) {
+	result, err := AnalyzeSource("for ready {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownRead")
+}
+
 func TestAnalyzeSourceDoesNotTreatNavigationMembersAsBindingReads(t *testing.T) {
 	result, err := AnalyzeSource("var user int = 1\nvar address int\nvar city = user.address?.city\n")
 	if err != nil {
@@ -72,7 +101,7 @@ func TestAnalyzeSourceAcceptsMultipleDeclarationWithInitializer(t *testing.T) {
 }
 
 func TestAnalyzeSourceAcceptsIfElseInitializingBothBranches(t *testing.T) {
-	result, err := AnalyzeSource("var x int\nif ready {\nx = 1\n} else {\nx = 2\n}\nx\n")
+	result, err := AnalyzeSource("var x int\nvar ready int = 1\nif ready {\nx = 1\n} else {\nx = 2\n}\nx\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +111,7 @@ func TestAnalyzeSourceAcceptsIfElseInitializingBothBranches(t *testing.T) {
 }
 
 func TestAnalyzeSourceReportsBranchMissingAssignment(t *testing.T) {
-	result, err := AnalyzeSource("var x int\nif ready {\nx = 1\n}\nx\n")
+	result, err := AnalyzeSource("var x int\nvar ready int = 1\nif ready {\nx = 1\n}\nx\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +127,7 @@ func TestAnalyzeSourceReportsUninitializedConditionRead(t *testing.T) {
 }
 
 func TestAnalyzeSourceScopesBranchLocals(t *testing.T) {
-	result, err := AnalyzeSource("if ready {\nvar t int\n}\nt = 1\n")
+	result, err := AnalyzeSource("var ready int = 1\nif ready {\nvar t int\n}\nt = 1\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +135,7 @@ func TestAnalyzeSourceScopesBranchLocals(t *testing.T) {
 }
 
 func TestAnalyzeSourceAcceptsBranchShadowing(t *testing.T) {
-	result, err := AnalyzeSource("var x int = 1\nif ready {\nvar x int\nx = 2\n}\nx\n")
+	result, err := AnalyzeSource("var x int = 1\nvar ready int = 1\nif ready {\nvar x int\nx = 2\n}\nx\n")
 	if err != nil {
 		t.Fatal(err)
 	}

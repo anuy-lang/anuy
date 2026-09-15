@@ -146,9 +146,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		}
 		b.analyzeClosures(statement, scope)
 	case parser.Read:
-		if id := scope.Resolve(statement.Names[0]); id != 0 {
-			b.add(semantic.Read(id))
-		}
+		b.readIdent(statement.Names[0], scope, statement.Span, nil)
 	case parser.If:
 		b.emitIf(statement, scope)
 	case parser.Loop:
@@ -176,11 +174,7 @@ func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.S
 
 func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	// Condition reads evaluate in the branching block, before any branch.
-	for _, ident := range statement.CondIdents {
-		if id := scope.Resolve(ident); id != 0 {
-			b.add(semantic.Read(id))
-		}
-	}
+	b.readConditionIdents(statement, scope)
 	before := copyFacts(b.facts[b.cur])
 	start := b.blocks[b.cur].ID
 	b.appendBlock()
@@ -233,14 +227,11 @@ func (b *builder) emitLoop(statement *parser.Statement, scope *semantic.Scope) {
 	entryID := b.blocks[b.cur].ID
 	b.appendBlock()
 	headerID := b.blocks[b.cur].ID
-	for _, ident := range statement.CondIdents {
-		if id := scope.Resolve(ident); id != 0 {
-			b.add(semantic.Read(id))
-		}
-	}
+	b.readConditionIdents(statement, scope)
 	if len(statement.Values) > 0 {
 		// The iteration collection evaluates in the header on every
-		// iteration (RFC-003 §76).
+		// iteration (RFC-003 §76). Collection resolution has no binding
+		// model yet, so an unresolved collection stays invisible here.
 		for _, ident := range statement.Values[0].Idents {
 			if id := scope.Resolve(ident); id != 0 {
 				b.add(semantic.Read(id))
@@ -326,7 +317,9 @@ func (b *builder) emitJump(isBreak bool) {
 // evaluated before any LHS updates become observable" (RFC-003 §61).
 // Declarations are not yet in scope for their own initializers (RFC-003 §36).
 // Closure values carry no top-level idents; their bodies are analyzed as
-// separate CFGs (RFC-003 §80–84).
+// separate CFGs (RFC-003 §80–84). Unresolved RHS idents — including call
+// callees, for which the grammar has no declaration form yet — stay
+// invisible here: recorded conformance sources pin them as accepted.
 func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope) {
 	for _, value := range statement.Values {
 		if value.Closure != nil {
@@ -338,6 +331,43 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 			}
 		}
 	}
+}
+
+// readConditionIdents emits the condition reads of an if/loop header. A
+// condition that is exactly one bare identifier is a binding read: unresolved,
+// it reports one UnknownRead (D-01). Compound conditions keep calls and
+// navigation opaque — the grammar has no declaration form for callees yet, so
+// only their resolved idents become reads.
+func (b *builder) readConditionIdents(statement *parser.Statement, scope *semantic.Scope) {
+	reported := map[string]bool{}
+	for _, ident := range statement.CondIdents {
+		if statement.Cond != ident {
+			if id := scope.Resolve(ident); id != 0 {
+				b.add(semantic.Read(id))
+			}
+			continue
+		}
+		b.readIdent(ident, scope, statement.Span, reported)
+	}
+}
+
+// readIdent emits the read of a name that resolves through the scope chain
+// and reports exactly one UnknownRead per unresolved name at the read span
+// (D-01, the RFC-003 §14 analogue on the read side). ReadBeforeInitialization
+// stays reserved for resolved bindings lacking definite initialization, and
+// the assignment path is untouched. reported dedupes repeated names within
+// one statement; nil works for single-name sites.
+func (b *builder) readIdent(name string, scope *semantic.Scope, span parser.Span, reported map[string]bool) {
+	if serr := scope.Read(name); serr != nil {
+		if !reported[name] {
+			if reported != nil {
+				reported[name] = true
+			}
+			b.report(serr.Category, span)
+		}
+		return
+	}
+	b.add(semantic.Read(scope.Resolve(name)))
 }
 
 // analyzeClosure models a closure body as its own CFG whose entry facts are
