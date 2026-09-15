@@ -220,10 +220,13 @@ func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.S
 		}
 		mutators := b.analyzeClosure(value.Closure, scope)
 		if index < len(targets) {
-			b.closureMutates[targets[index]] = mutators
+			// Решение 1 (2026-09-16): union across all assignments of the
+			// binding — a later closure must not erase an earlier mutator.
+			b.closureMutates[targets[index]] = unionBindings(b.closureMutates[targets[index]], mutators)
 		}
 		index++
 	}
+	b.propagateMutators(statement, scope, targets)
 }
 
 func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
@@ -524,6 +527,46 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) []se
 	b.diagnostics = append(b.diagnostics, cb.diagnostics...)
 	b.diagnostics = append(b.diagnostics, cb.analyze().Diagnostics...)
 	return mutators
+}
+
+// propagateMutators implements Решение 2 (2026-09-16): assigning a closure
+// value held by another binding propagates its mutator set to the target
+// (`var c2 = clear; c2()` invalidates the narrowing). Only the unambiguous
+// single-target bare-identifier form propagates; call values, navigation
+// chains and compound values are not aliasing sources.
+func (b *builder) propagateMutators(statement *parser.Statement, scope *semantic.Scope, targets []semantic.BindingID) {
+	if len(statement.Values) != 1 || len(targets) != 1 {
+		return
+	}
+	value := statement.Values[0]
+	if value.Closure != nil || value.Navigation != nil || len(value.Idents) != 1 || value.Text != value.Idents[0] {
+		return
+	}
+	source := scope.Resolve(value.Idents[0])
+	if source == 0 || source == targets[0] {
+		return
+	}
+	if mutators := b.closureMutates[source]; len(mutators) > 0 {
+		b.closureMutates[targets[0]] = unionBindings(b.closureMutates[targets[0]], mutators)
+	}
+}
+
+func unionBindings(existing, added []semantic.BindingID) []semantic.BindingID {
+	seen := make(map[semantic.BindingID]bool, len(existing)+len(added))
+	out := make([]semantic.BindingID, 0, len(existing)+len(added))
+	for _, id := range existing {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, id := range added {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // emitCall lowers a call statement: the bare callee is a binding read, and
