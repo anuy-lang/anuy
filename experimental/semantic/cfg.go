@@ -22,6 +22,8 @@ const (
 	DeclareOperation OperationKind = iota
 	AssignOperation
 	ReadOperation
+	AssumeOperation
+	DerefOperation
 )
 
 type Operation struct {
@@ -33,11 +35,23 @@ func Declare(binding BindingID) Operation { return Operation{Kind: DeclareOperat
 func Assign(binding BindingID) Operation  { return Operation{Kind: AssignOperation, Binding: binding} }
 func Read(binding BindingID) Operation    { return Operation{Kind: ReadOperation, Binding: binding} }
 
+// Assume establishes the non-nil narrowing fact for a binding: the lowering
+// of a proven `x != nil` predicate (RFC-002 §22, story 05 CONTRACTS §1).
+func Assume(binding BindingID) Operation { return Operation{Kind: AssumeOperation, Binding: binding} }
+
+// Deref reads an ordinary member of a binding: it requires the non-nil
+// narrowing fact and reports UnsafeMemberAccess when the proof is absent.
+func Deref(binding BindingID) Operation { return Operation{Kind: DerefOperation, Binding: binding} }
+
 type DiagnosticCategory string
 
 const (
 	ReadBeforeInitialization   DiagnosticCategory = "ReadBeforeInitialization"
 	PackageInitializerRequired DiagnosticCategory = "PackageInitializerRequired"
+	// UnsafeMemberAccess is the experimental category for an ordinary member
+	// access on a binding whose non-nil narrowing is not proven (story 05);
+	// final naming and text belong to RFC-011.
+	UnsafeMemberAccess DiagnosticCategory = "UnsafeMemberAccess"
 )
 
 type SourceSpan struct {
@@ -104,9 +118,16 @@ func (facts FactSet) Assign(binding BindingID) { facts[binding] = Initialized }
 func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 	in := make(map[BlockID]FactSet)
 	in[1] = NewFactSet()
+	// Non-nil narrowing (story 05): a second fact dimension tracked in the
+	// same fixpoint. Transfer functions stay constant-per-binding, so the
+	// chaotic iteration remains monotone over a finite lattice and
+	// converges on loop back edges.
+	nonNil := make(map[BlockID]FactSet)
+	nonNil[1] = NewFactSet()
 	changed := true
 	result := AnalysisResult{}
 	reported := make(map[BlockID]map[BindingID]bool)
+	reportedUnsafe := make(map[BlockID]map[BindingID]bool)
 	for changed {
 		changed = false
 		for id, block := range cfg.blocks {
@@ -115,12 +136,17 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 				continue
 			}
 			out := cloneFacts(facts)
+			nonNilOut := cloneFacts(nonNil[id])
 			for _, op := range block.Operations {
 				switch op.Kind {
 				case DeclareOperation:
 					out[op.Binding] = Uninitialized
+					nonNilOut[op.Binding] = Uninitialized
 				case AssignOperation:
 					out.Assign(op.Binding)
+					// RFC-002 §25: assignment invalidates narrowing; the
+					// experimental layer has no RHS types to re-establish.
+					nonNilOut[op.Binding] = Uninitialized
 				case ReadOperation:
 					if out.State(op.Binding) != Initialized {
 						if reported[id] == nil {
@@ -131,6 +157,18 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 							reported[id][op.Binding] = true
 						}
 					}
+				case AssumeOperation:
+					nonNilOut.Assign(op.Binding)
+				case DerefOperation:
+					if nonNilOut.State(op.Binding) != Initialized {
+						if reportedUnsafe[id] == nil {
+							reportedUnsafe[id] = make(map[BindingID]bool)
+						}
+						if !reportedUnsafe[id][op.Binding] {
+							result.Diagnostics = append(result.Diagnostics, Diagnostic{Category: UnsafeMemberAccess, Binding: op.Binding})
+							reportedUnsafe[id][op.Binding] = true
+						}
+					}
 				}
 			}
 			for _, next := range cfg.edges[id] {
@@ -138,6 +176,12 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 					in[next] = cloneFacts(out)
 					changed = true
 				} else if mergeFacts(old, out) {
+					changed = true
+				}
+				if _, exists := nonNil[next]; !exists {
+					nonNil[next] = cloneFacts(nonNilOut)
+					changed = true
+				} else if mergeFacts(nonNil[next], nonNilOut) {
 					changed = true
 				}
 			}
