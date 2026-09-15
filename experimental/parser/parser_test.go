@@ -861,3 +861,60 @@ func TestParseRejectsElseIfConditionViolations(t *testing.T) {
 		requireCategory(t, err, tc.category)
 	}
 }
+
+func TestParseAcceptsCallStatements(t *testing.T) {
+	// Story 05 variant A (owner decision 2026-09-16): zero-argument call
+	// statements — the effectful statement form used by the normative
+	// RFC-002 §22/§85 and RFC-003 §85 examples.
+	bare, err := Parse("clear()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.Statements[0].Kind != Call {
+		t.Fatalf("bare call kind = %v", bare.Statements[0].Kind)
+	}
+	call := bare.Statements[0].Call
+	if call == nil || call.Receiver != "clear" || len(call.Segments) != 0 {
+		t.Fatalf("bare call = %#v", call)
+	}
+	navigation, err := Parse("user.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call = navigation.Statements[0].Call
+	if navigation.Statements[0].Kind != Call || call == nil || call.Receiver != "user" ||
+		len(call.Segments) != 1 || call.Segments[0].Name != "save" || !call.Segments[0].Call {
+		t.Fatalf("navigation call = %#v", call)
+	}
+	chain, err := Parse("a.b.c()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call = chain.Statements[0].Call
+	if call == nil || len(call.Segments) != 2 || call.Segments[0].Call || !call.Segments[1].Call {
+		t.Fatalf("chain call = %#v", call)
+	}
+}
+
+func TestParseRejectsCallStatementEdges(t *testing.T) {
+	cases := []struct {
+		source   string
+		category ErrorCategory
+	}{
+		{source: "clear(x)\n", category: UnsupportedSyntax},
+		{source: "user.save(x)\n", category: UnsupportedSyntax},
+		{source: "_()\n", category: BlankIdentifierRead},
+		{source: "clear().field\n", category: UnsupportedSyntax},
+		{source: "a.b().c\n", category: UnsupportedSyntax},
+		{source: "user?.save()\n", category: UnsupportedSyntax},
+		{source: "nil()\n", category: UnsupportedSyntax},
+		{source: "func() {\n}\n", category: UnsupportedSyntax},
+	}
+	for _, tc := range cases {
+		_, err := Parse(tc.source)
+		if err == nil {
+			t.Fatalf("Parse(%q) accepted invalid call statement", tc.source)
+		}
+		requireCategory(t, err, tc.category)
+	}
+}
