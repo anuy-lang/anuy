@@ -92,6 +92,7 @@ const (
 	Break
 	Continue
 	Block
+	Call
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -166,6 +167,11 @@ type Statement struct {
 	Body []Statement
 	Else []Statement
 	Span Span
+	// Call is non-nil for a call statement (story 05 variant A, zero-
+	// argument): Receiver is the called binding or navigation root, Segments
+	// the ordinary member chain whose last segment carries the call. The
+	// call value is discarded; the method name is not a binding read.
+	Call *NavigationExpr
 }
 
 // A Loop statement reuses fields by loop form (spec 1-3-1-1): condition form
@@ -292,6 +298,12 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 	case tokens[0].kind == tokenBlank && len(tokens) == 1:
 		// A bare `_` is a read position: the blank identifier holds no value.
 		return Statement{}, &Error{Category: BlankIdentifierRead, Offset: tokens[0].start, Message: "_ does not hold a value"}
+	case tokens[0].kind == tokenBlank && len(tokens) >= 3 && isPunct(tokens[1], "("):
+		// `_()` — the blank identifier is not callable (GB-3: `_` holds no
+		// value, so it cannot be read as a callee either).
+		return Statement{}, &Error{Category: BlankIdentifierRead, Offset: tokens[0].start, Message: "_ does not hold a value"}
+	case isCallStatementStart(tokens):
+		return lp.parseCallStatement(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "else":
 		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "unexpected else"}
 	case len(tokens) == 1 && tokens[0].kind == tokenIdent:
@@ -304,6 +316,62 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 	default:
 		return lp.parseAssign(tokens, line)
 	}
+}
+
+// isCallStatementStart reports a line beginning with `identifier(` or
+// `identifier.` — a call statement candidate (story 05 variant A). Closure
+// literals (`func (`) are rejected inside parseCallStatement.
+func isCallStatementStart(tokens []token) bool {
+	return len(tokens) >= 3 &&
+		tokens[0].kind == tokenIdent && !reservedWords[tokens[0].text] &&
+		(isPunct(tokens[1], "(") || isPunct(tokens[1], "."))
+}
+
+// parseCallStatement parses the zero-argument call statement forms
+// `identifier()` and `identifier.segment…()` (story 05 variant A): exactly
+// one ordinary call at the end of the chain, no arguments, value discarded.
+func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (Statement, error) {
+	if isClosureStart(tokens, 0) {
+		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "closure literal is not a statement"}
+	}
+	if isPunct(tokens[1], "(") {
+		_, args, err := consumeCall(tokens, 1)
+		if err != nil {
+			return Statement{}, err
+		}
+		if len(args) > 0 {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: args[0].start, Message: "call statements are zero-argument"}
+		}
+		if len(tokens) != 3 {
+			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[3].start, Message: "unexpected token after call"}
+		}
+		lp.pos++
+		return Statement{
+			Kind: Call,
+			Call: &NavigationExpr{Receiver: tokens[0].text},
+			Span: Span{Start: line.offset, End: line.offset + len(line.text)},
+		}, nil
+	}
+	navigation, _, recognized, navErr := navigationMetadata(tokens)
+	if navErr != nil {
+		return Statement{}, navErr
+	}
+	last := navigation.Segments[len(navigation.Segments)-1]
+	if !recognized || !last.Call || last.Safe {
+		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "call statement must end with an ordinary call"}
+	}
+	if !isPunct(tokens[len(tokens)-1], ")") {
+		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "unexpected token after call"}
+	}
+	if !isPunct(tokens[len(tokens)-2], "(") {
+		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[len(tokens)-2].start, Message: "call statements are zero-argument"}
+	}
+	lp.pos++
+	return Statement{
+		Kind: Call,
+		Call: navigation,
+		Span: Span{Start: line.offset, End: line.offset + len(line.text)},
+	}, nil
 }
 
 // parseIf parses `if <expression> {` plus its block and an optional
