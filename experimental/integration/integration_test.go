@@ -180,6 +180,20 @@ func TestAnalyzeSourceAcceptsWriteOnlyCaptureOfUninitializedBinding(t *testing.T
 	}
 }
 
+func TestAnalyzeSourceAcceptsCaptureReadAfterDominatingAssignment(t *testing.T) {
+	// D-02/P-26 (F-17): the capture needs definite initialization at closure
+	// creation only on a path that reads it before a dominating assignment in
+	// the closure body, so `x = 1; x` is valid even though the outer x was
+	// uninitialized at creation (RFC-001 §48, RFC-003 §83).
+	result, err := AnalyzeSource("var x int\nvar init = func() {\nx = 1\nx\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result)
+	}
+}
+
 func TestAnalyzeSourceClosureBodyLocalsFollowInitializationRules(t *testing.T) {
 	result, err := AnalyzeSource("var f = func() {\nvar count int\ncount\n}\n")
 	if err != nil {
