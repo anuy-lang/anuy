@@ -33,6 +33,35 @@ func TestAnalyzeSourceReportsSameScopeRedeclaration(t *testing.T) {
 	assertSingleDiagnostic(t, result, "SameScopeRedeclaration")
 }
 
+func TestAnalyzeSourceReportsUnknownRead(t *testing.T) {
+	// D-01/P-25: a bare identifier that resolves through no scope reports
+	// exactly one UnknownRead at the read span.
+	result, err := AnalyzeSource("x\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownRead")
+	if result.Diagnostics[0].Span.Start != 0 || result.Diagnostics[0].Span.End != 1 {
+		t.Fatalf("span = %#v, want the read span 0..1", result.Diagnostics[0].Span)
+	}
+}
+
+func TestAnalyzeSourceReportsUnknownReadInIfCondition(t *testing.T) {
+	result, err := AnalyzeSource("if ready {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownRead")
+}
+
+func TestAnalyzeSourceReportsUnknownReadInLoopCondition(t *testing.T) {
+	result, err := AnalyzeSource("for ready {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownRead")
+}
+
 func TestAnalyzeSourceDoesNotTreatNavigationMembersAsBindingReads(t *testing.T) {
 	result, err := AnalyzeSource("var user int = 1\nvar address int\nvar city = user.address?.city\n")
 	if err != nil {
