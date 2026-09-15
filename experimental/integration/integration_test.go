@@ -558,3 +558,34 @@ func TestAnalyzeSourceReportsUnknownCalleeStatement(t *testing.T) {
 	}
 	assertSingleDiagnostic(t, result, "UnknownRead")
 }
+
+func TestAnalyzeSourceUnionMutatorsAcrossReassignment(t *testing.T) {
+	// Решение 1 (2026-09-16): the mutator registry unions across all
+	// assignments of a binding — a later read-only rebinding must not erase
+	// the earlier mutator, whatever the order.
+	result, err := AnalyzeSource("var user User? = findUser()\nvar clear = func() {\nuser = nil\n}\nclear = func() {\nuser\n}\nif user != nil {\nclear()\nuser.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourcePropagatesMutatorsThroughAliasing(t *testing.T) {
+	// Решение 2: `var c2 = clear` propagates the mutator set to c2, so the
+	// aliased call still invalidates the narrowing.
+	result, err := AnalyzeSource("var user User? = findUser()\nvar clear = func() {\nuser = nil\n}\nvar c2 = clear\nif user != nil {\nc2()\nuser.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceReadonlyAliasingDoesNotInvalidate(t *testing.T) {
+	result, err := AnalyzeSource("var user User? = findUser()\nvar clear = func() {\nuser\n}\nvar c2 = clear\nif user != nil {\nc2()\nuser.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
