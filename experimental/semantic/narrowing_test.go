@@ -121,3 +121,52 @@ func TestNarrowConvergesWithLoopBackEdge(t *testing.T) {
 		t.Fatalf("loop narrowing = %#v, want only ReadBeforeInitialization", result.Diagnostics)
 	}
 }
+
+func TestCallInvalidatesNonNilOfMutatedBindings(t *testing.T) {
+	// RFC-003 §85: calling a closure that assigns a captured binding
+	// invalidates that binding's non-nil narrowing; unrelated bindings and
+	// read-only calls leave it untouched.
+	withMutation := NewCFG(
+		Block{ID: 1, Operations: []Operation{Assume(3), Call(3), Deref(3)}},
+	)
+	if got := (Analyzer{}).Analyze(withMutation); len(got.Diagnostics) != 1 || got.Diagnostics[0].Category != UnsafeMemberAccess {
+		t.Fatalf("mutating call = %#v, want UnsafeMemberAccess", got.Diagnostics)
+	}
+	withoutMutation := NewCFG(
+		Block{ID: 1, Operations: []Operation{Assume(3), Call(), Call(4), Deref(3)}},
+	)
+	if got := (Analyzer{}).Analyze(withoutMutation); len(got.Diagnostics) != 0 {
+		t.Fatalf("read-only call = %#v, want no diagnostics", got.Diagnostics)
+	}
+}
+
+func TestCallDoesNotProveInitialization(t *testing.T) {
+	// RFC-003 §84: a closure call never establishes caller-local
+	// initialization - the call operation touches only the non-nil
+	// dimension.
+	cfg := NewCFG(
+		Block{ID: 1, Operations: []Operation{Assume(3), Call(3), Read(3)}},
+	)
+	result := (Analyzer{}).Analyze(cfg)
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Category != ReadBeforeInitialization {
+		t.Fatalf("call then read = %#v, want ReadBeforeInitialization", result.Diagnostics)
+	}
+}
+
+func TestCapturedNonNilSeedingPattern(t *testing.T) {
+	// CONTRACTS §1.5: the closure body starts from the creation-point
+	// non-nil fact; the integration emits the entry ops, the kernel proves
+	// them.
+	seeded := NewCFG(
+		Block{ID: 1, Operations: []Operation{Declare(3), Assign(3), Assume(3), Deref(3)}},
+	)
+	if got := (Analyzer{}).Analyze(seeded); len(got.Diagnostics) != 0 {
+		t.Fatalf("seeded capture = %#v, want no diagnostics", got.Diagnostics)
+	}
+	unseeded := NewCFG(
+		Block{ID: 1, Operations: []Operation{Declare(3), Assign(3), Deref(3)}},
+	)
+	if got := (Analyzer{}).Analyze(unseeded); len(got.Diagnostics) != 1 || got.Diagnostics[0].Category != UnsafeMemberAccess {
+		t.Fatalf("unseeded capture = %#v, want UnsafeMemberAccess", got.Diagnostics)
+	}
+}

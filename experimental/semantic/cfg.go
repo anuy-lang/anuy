@@ -24,11 +24,15 @@ const (
 	ReadOperation
 	AssumeOperation
 	DerefOperation
+	CallOperation
 )
 
 type Operation struct {
 	Kind    OperationKind
 	Binding BindingID
+	// Mutates lists the bindings whose non-nil narrowing the call
+	// invalidates; used only by CallOperation.
+	Mutates []BindingID
 }
 
 func Declare(binding BindingID) Operation { return Operation{Kind: DeclareOperation, Binding: binding} }
@@ -42,6 +46,13 @@ func Assume(binding BindingID) Operation { return Operation{Kind: AssumeOperatio
 // Deref reads an ordinary member of a binding: it requires the non-nil
 // narrowing fact and reports UnsafeMemberAccess when the proof is absent.
 func Deref(binding BindingID) Operation { return Operation{Kind: DerefOperation, Binding: binding} }
+
+// Call invokes a closure binding: it invalidates the non-nil narrowing of
+// every binding the closure mutates (RFC-003 §85) and never establishes
+// caller-local initialization (RFC-003 §84).
+func Call(mutates ...BindingID) Operation {
+	return Operation{Kind: CallOperation, Mutates: mutates}
+}
 
 type DiagnosticCategory string
 
@@ -168,6 +179,13 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 							result.Diagnostics = append(result.Diagnostics, Diagnostic{Category: UnsafeMemberAccess, Binding: op.Binding})
 							reportedUnsafe[id][op.Binding] = true
 						}
+					}
+				case CallOperation:
+					// RFC-003 §85: the call of a mutating closure invalidates
+					// its captured bindings' narrowing; §84 keeps the
+					// initialization dimension untouched.
+					for _, mutated := range op.Mutates {
+						nonNilOut[mutated] = Uninitialized
 					}
 				}
 			}
