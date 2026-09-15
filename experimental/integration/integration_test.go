@@ -72,7 +72,7 @@ func TestAnalyzeSourceAcceptsMultipleDeclarationWithInitializer(t *testing.T) {
 }
 
 func TestAnalyzeSourceAcceptsIfElseInitializingBothBranches(t *testing.T) {
-	result, err := AnalyzeSource("var x int\nif ready {\nx = 1\n} else {\nx = 2\n}\nx\n")
+	result, err := AnalyzeSource("var x int\nvar ready int = 1\nif ready {\nx = 1\n} else {\nx = 2\n}\nx\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestAnalyzeSourceAcceptsIfElseInitializingBothBranches(t *testing.T) {
 }
 
 func TestAnalyzeSourceReportsBranchMissingAssignment(t *testing.T) {
-	result, err := AnalyzeSource("var x int\nif ready {\nx = 1\n}\nx\n")
+	result, err := AnalyzeSource("var x int\nvar ready int = 1\nif ready {\nx = 1\n}\nx\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestAnalyzeSourceReportsUninitializedConditionRead(t *testing.T) {
 }
 
 func TestAnalyzeSourceScopesBranchLocals(t *testing.T) {
-	result, err := AnalyzeSource("if ready {\nvar t int\n}\nt = 1\n")
+	result, err := AnalyzeSource("var ready int = 1\nif ready {\nvar t int\n}\nt = 1\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestAnalyzeSourceScopesBranchLocals(t *testing.T) {
 }
 
 func TestAnalyzeSourceAcceptsBranchShadowing(t *testing.T) {
-	result, err := AnalyzeSource("var x int = 1\nif ready {\nvar x int\nx = 2\n}\nx\n")
+	result, err := AnalyzeSource("var x int = 1\nvar ready int = 1\nif ready {\nvar x int\nx = 2\n}\nx\n")
 	if err != nil {
 		t.Fatal(err)
 	}
