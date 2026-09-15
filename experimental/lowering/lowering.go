@@ -96,6 +96,16 @@ func lowerStatements(body *strings.Builder, statements []parser.Statement) (stri
 				}
 				body.WriteString("\t}\n")
 			}
+		case parser.Call:
+			// Story 05: the effectful statement form - the call value is
+			// discarded by statement semantics, so no blank discard is
+			// appended and nothing feeds the trailing `_ =` line.
+			expr := statement.Call.Receiver
+			for _, segment := range statement.Call.Segments {
+				expr += "." + segment.Name
+			}
+			fmt.Fprintf(body, "\t%s()\n", expr)
+			last = ""
 		case parser.Break:
 			body.WriteString("\tbreak\n")
 		case parser.Continue:

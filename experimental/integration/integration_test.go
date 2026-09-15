@@ -469,3 +469,92 @@ func TestAnalyzeSourceElseIfChainJoinsAllBranches(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result)
 	}
 }
+
+func TestAnalyzeSourceReportsClosureMutationInvalidatingNarrowing(t *testing.T) {
+	// RFC-003 §85 end-to-end: clear() may assign the same binding the
+	// compiler proved non-nil, so the subsequent user.save() is rejected.
+	result, err := AnalyzeSource("var user User? = findUser()\nvar clear = func() {\nuser = nil\n}\nif user != nil {\nclear()\nuser.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceAcceptsMemberAccessAfterNilNarrowing(t *testing.T) {
+	// RFC-002 §22: inside the proven branch the ordinary member access is safe.
+	result, err := AnalyzeSource("var user User? = findUser()\nif user != nil {\nuser.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceAssignmentInvalidatesNarrowing(t *testing.T) {
+	// RFC-002 §25 at source level: an assignment inside the proven branch
+	// invalidates the narrowing (conservative - the experimental layer has
+	// no RHS types, so RFC-002 §26 establishment is out of slice).
+	result, err := AnalyzeSource("var user User? = findUser()\nif user != nil {\nuser = findUser()\nuser.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceReadonlyCaptureDoesNotInvalidateNarrowing(t *testing.T) {
+	result, err := AnalyzeSource("var user User? = findUser()\nvar clear = func() {\nuser\n}\nif user != nil {\nclear()\nuser.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceSeedsCapturedNonNilAtClosureCreation(t *testing.T) {
+	result, err := AnalyzeSource("var user User? = findUser()\nif user != nil {\nvar f = func() {\nuser.save()\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceBodyAssignmentInvalidatesCapturedNarrowing(t *testing.T) {
+	result, err := AnalyzeSource("var user User? = findUser()\nif user != nil {\nvar f = func() {\nuser = nil\nuser.save()\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceDerefWithoutNarrowingReports(t *testing.T) {
+	result, err := AnalyzeSource("var user User? = findUser()\nvar f = func() {\nuser.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceNonNullableReceiverNeedsNoNarrowing(t *testing.T) {
+	// The non-nil requirement attaches to declared `T?` receivers only; a
+	// non-nullable declared type can never be nil.
+	result, err := AnalyzeSource("var user User = getUser()\nuser.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceReportsUnknownCalleeStatement(t *testing.T) {
+	// A bare call callee is a binding read (proposal variant A, D-01).
+	result, err := AnalyzeSource("findUser()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownRead")
+}

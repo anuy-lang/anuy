@@ -119,3 +119,17 @@ func TestLowerBlankDiscardToGo(t *testing.T) {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
 }
+
+func TestLowerCallStatementsToGo(t *testing.T) {
+	// Story 05: call statements are the effectful statement form; the call
+	// value is discarded by statement semantics, so no blank discard line
+	// follows and none feeds the trailing `_ =`.
+	got, err := Lower("var user User = getUser()\nclear()\nuser.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\nfunc Run() {\n\tvar user User = getUser()\n\tclear()\n\tuser.save()\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
