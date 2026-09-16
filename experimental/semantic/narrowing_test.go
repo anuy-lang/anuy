@@ -170,3 +170,82 @@ func TestCapturedNonNilSeedingPattern(t *testing.T) {
 		t.Fatalf("unseeded capture = %#v, want UnsafeMemberAccess", got.Diagnostics)
 	}
 }
+
+func TestCascadeDerefFoldsIntoReadPrimary(t *testing.T) {
+	// Решение 4 / CONTRACTS §2: one block, one binding, both dimensions —
+	// the deref fires before the read yet nests into the
+	// ReadBeforeInitialization primary and is not published standalone.
+	cfg := NewCFG(
+		Block{ID: 1, Operations: []Operation{Deref(3), Read(3)}},
+	)
+	result := (Analyzer{}).Analyze(cfg)
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("cascade = %#v, want one primary diagnostic", result.Diagnostics)
+	}
+	primary := result.Diagnostics[0]
+	if primary.Category != ReadBeforeInitialization || primary.Code != "ANUY3001" {
+		t.Fatalf("primary = (%s, %s), want ReadBeforeInitialization (ANUY3001)", primary.Category, primary.Code)
+	}
+	if len(primary.Related) != 1 || primary.Related[0].Category != UnsafeMemberAccess || primary.Related[0].Code != "ANUY4001" {
+		t.Fatalf("related = %#v, want one UnsafeMemberAccess (ANUY4001)", primary.Related)
+	}
+}
+
+func TestCascadeReadPrimaryAttachesLaterDeref(t *testing.T) {
+	// CONTRACTS §2: the read-first order yields the same primary+related
+	// shape without a standalone duplicate.
+	cfg := NewCFG(
+		Block{ID: 1, Operations: []Operation{Read(3), Deref(3)}},
+	)
+	result := (Analyzer{}).Analyze(cfg)
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("cascade = %#v, want one primary diagnostic", result.Diagnostics)
+	}
+	primary := result.Diagnostics[0]
+	if primary.Category != ReadBeforeInitialization {
+		t.Fatalf("primary = %s, want ReadBeforeInitialization", primary.Category)
+	}
+	if len(primary.Related) != 1 || primary.Related[0].Category != UnsafeMemberAccess {
+		t.Fatalf("related = %#v, want one UnsafeMemberAccess", primary.Related)
+	}
+}
+
+func TestSoloDerefAndReadStayStandalone(t *testing.T) {
+	// CONTRACTS §2.3: outside the cascade both rules publish independently,
+	// with no related information.
+	soloDeref := NewCFG(
+		Block{ID: 1, Operations: []Operation{Deref(3)}},
+	)
+	got := (Analyzer{}).Analyze(soloDeref)
+	if len(got.Diagnostics) != 1 || got.Diagnostics[0].Category != UnsafeMemberAccess || len(got.Diagnostics[0].Related) != 0 {
+		t.Fatalf("solo deref = %#v, want one standalone UnsafeMemberAccess", got.Diagnostics)
+	}
+	soloRead := NewCFG(
+		Block{ID: 1, Operations: []Operation{Read(3)}},
+	)
+	got = (Analyzer{}).Analyze(soloRead)
+	if len(got.Diagnostics) != 1 || got.Diagnostics[0].Category != ReadBeforeInitialization || len(got.Diagnostics[0].Related) != 0 {
+		t.Fatalf("solo read = %#v, want one standalone ReadBeforeInitialization", got.Diagnostics)
+	}
+}
+
+func TestCascadeDoesNotCrossBlocks(t *testing.T) {
+	// CONTRACTS §2.1: the cascade is per (block, binding) - a read primary
+	// in one block and a deref in another stay standalone.
+	cfg := NewCFG(
+		Block{ID: 1},
+		Block{ID: 2, Operations: []Operation{Read(3)}},
+		Block{ID: 3, Operations: []Operation{Deref(3)}},
+	)
+	cfg.AddEdge(1, 2)
+	cfg.AddEdge(1, 3)
+	got := (Analyzer{}).Analyze(cfg)
+	if len(got.Diagnostics) != 2 {
+		t.Fatalf("cross-block = %#v, want two standalone diagnostics", got.Diagnostics)
+	}
+	for _, d := range got.Diagnostics {
+		if len(d.Related) != 0 {
+			t.Fatalf("%s carries related %#v, want none across blocks", d.Category, d.Related)
+		}
+	}
+}
