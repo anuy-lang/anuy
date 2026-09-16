@@ -4,7 +4,7 @@ import "testing"
 
 func TestDiagnosticRetainsPrimarySourceSpan(t *testing.T) {
 	span := SourceSpan{File: "case.anuy", Start: 3, End: 4}
-	got := NewDiagnostic(UnknownAssignment, 1, span)
+	got := NewDiagnostic(UnknownAssignmentDescriptor, 1, span)
 	if got.Category != UnknownAssignment || got.Span != span {
 		t.Fatalf("diagnostic = %#v", got)
 	}

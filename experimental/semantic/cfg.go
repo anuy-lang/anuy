@@ -72,19 +72,31 @@ type SourceSpan struct {
 
 type Diagnostic struct {
 	Category DiagnosticCategory
+	Code     Code
+	Severity Severity
 	Binding  BindingID
 	Span     SourceSpan
 }
 
-func NewDiagnostic(category DiagnosticCategory, binding BindingID, span SourceSpan) Diagnostic {
-	return Diagnostic{Category: category, Binding: binding, Span: span}
+// NewDiagnostic stamps a diagnostic from a registry descriptor: the code
+// and severity come from the registry, never from the call site
+// (CONTRACTS §1.2).
+func NewDiagnostic(desc Descriptor, binding BindingID, span SourceSpan) Diagnostic {
+	return Diagnostic{
+		Category: desc.Category(),
+		Code:     desc.Code(),
+		Severity: desc.Severity(),
+		Binding:  binding,
+		Span:     span,
+	}
 }
 
 func ValidatePackageBinding(hasInitializer bool) *Diagnostic {
 	if hasInitializer {
 		return nil
 	}
-	return &Diagnostic{Category: PackageInitializerRequired}
+	d := NewDiagnostic(PackageInitializerRequiredDescriptor, 0, SourceSpan{})
+	return &d
 }
 
 type AnalysisResult struct{ Diagnostics []Diagnostic }
@@ -164,7 +176,7 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 							reported[id] = make(map[BindingID]bool)
 						}
 						if !reported[id][op.Binding] {
-							result.Diagnostics = append(result.Diagnostics, Diagnostic{Category: ReadBeforeInitialization, Binding: op.Binding})
+							result.Diagnostics = append(result.Diagnostics, NewDiagnostic(ReadBeforeInitializationDescriptor, op.Binding, SourceSpan{}))
 							reported[id][op.Binding] = true
 						}
 					}
@@ -176,7 +188,7 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 							reportedUnsafe[id] = make(map[BindingID]bool)
 						}
 						if !reportedUnsafe[id][op.Binding] {
-							result.Diagnostics = append(result.Diagnostics, Diagnostic{Category: UnsafeMemberAccess, Binding: op.Binding})
+							result.Diagnostics = append(result.Diagnostics, NewDiagnostic(UnsafeMemberAccessDescriptor, op.Binding, SourceSpan{}))
 							reportedUnsafe[id][op.Binding] = true
 						}
 					}
