@@ -76,6 +76,9 @@ type Diagnostic struct {
 	Severity Severity
 	Binding  BindingID
 	Span     SourceSpan
+	// Related carries co-firing diagnostics suppressed as a cascade
+	// (CONTRACTS §2, decision 4; RFC-011 §14 RelatedInformation).
+	Related []Diagnostic
 }
 
 // NewDiagnostic stamps a diagnostic from a registry descriptor: the code
@@ -151,6 +154,16 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 	result := AnalysisResult{}
 	reported := make(map[BlockID]map[BindingID]bool)
 	reportedUnsafe := make(map[BlockID]map[BindingID]bool)
+	// Cascade suppression (CONTRACTS §2, decision 4): per (block, binding),
+	// the position of the block's ReadBeforeInitialization primary in the
+	// result, plus derefs that fired before their block's read — they wait
+	// to fold into the primary instead of standing alone.
+	rbInitAt := make(map[BlockID]map[BindingID]int)
+	type pendingDeref struct {
+		binding BindingID
+		diag    Diagnostic
+	}
+	pendingUnsafe := make(map[BlockID][]pendingDeref)
 	for changed {
 		changed = false
 		for id, block := range cfg.blocks {
@@ -178,6 +191,18 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 						if !reported[id][op.Binding] {
 							result.Diagnostics = append(result.Diagnostics, NewDiagnostic(ReadBeforeInitializationDescriptor, op.Binding, SourceSpan{}))
 							reported[id][op.Binding] = true
+							if rbInitAt[id] == nil {
+								rbInitAt[id] = make(map[BindingID]int)
+							}
+							primary := len(result.Diagnostics) - 1
+							rbInitAt[id][op.Binding] = primary
+							for i, p := range pendingUnsafe[id] {
+								if p.binding == op.Binding {
+									result.Diagnostics[primary].Related = append(result.Diagnostics[primary].Related, p.diag)
+									pendingUnsafe[id] = append(pendingUnsafe[id][:i], pendingUnsafe[id][i+1:]...)
+									break
+								}
+							}
 						}
 					}
 				case AssumeOperation:
@@ -188,8 +213,18 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 							reportedUnsafe[id] = make(map[BindingID]bool)
 						}
 						if !reportedUnsafe[id][op.Binding] {
-							result.Diagnostics = append(result.Diagnostics, NewDiagnostic(UnsafeMemberAccessDescriptor, op.Binding, SourceSpan{}))
+							uma := NewDiagnostic(UnsafeMemberAccessDescriptor, op.Binding, SourceSpan{})
 							reportedUnsafe[id][op.Binding] = true
+							if primary, coFired := rbInitAt[id][op.Binding]; coFired {
+								// The read already fired in this block: the
+								// deref nests into it (CONTRACTS §2).
+								result.Diagnostics[primary].Related = append(result.Diagnostics[primary].Related, uma)
+							} else {
+								// Deferred: the block's read may still fire
+								// later and fold it in; block end publishes
+								// leftovers standalone.
+								pendingUnsafe[id] = append(pendingUnsafe[id], pendingDeref{binding: op.Binding, diag: uma})
+							}
 						}
 					}
 				case CallOperation:
@@ -201,6 +236,10 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 					}
 				}
 			}
+			for _, p := range pendingUnsafe[id] {
+				result.Diagnostics = append(result.Diagnostics, p.diag)
+			}
+			pendingUnsafe[id] = nil
 			for _, next := range cfg.edges[id] {
 				if old, exists := in[next]; !exists {
 					in[next] = cloneFacts(out)

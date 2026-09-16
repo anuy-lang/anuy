@@ -44,20 +44,20 @@ func TestAnalyzeSourceUnsafeMemberAccessCarriesCode(t *testing.T) {
 func TestAnalyzeSourceCascadePairCarriesBothCodes(t *testing.T) {
 	// Решение 4 reproducer: one access site hits both dimensions — the
 	// uninitialized captured binding is read and derefed inside the closure
-	// body. Until the cascade suppression (1-6-2-1) both report
-	// independently; this pins their codes on the pair.
+	// body. The deref nests into the ReadBeforeInitialization primary
+	// (CONTRACTS §2): one published diagnostic, codes on primary+related.
 	result, err := AnalyzeSource("var user User?\nvar f = func() {\nuser.save()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Diagnostics) != 2 {
-		t.Fatalf("result = %#v, want the ReadBeforeInitialization + UnsafeMemberAccess pair", result.Diagnostics)
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("result = %#v, want one ReadBeforeInitialization primary", result.Diagnostics)
 	}
-	codes := map[semantic.Code]bool{}
-	for _, d := range result.Diagnostics {
-		codes[d.Code] = true
+	primary := result.Diagnostics[0]
+	if primary.Code != "ANUY3001" || primary.Severity != semantic.SeverityError {
+		t.Fatalf("primary = (%s, %s), want (ANUY3001, Error)", primary.Code, primary.Severity)
 	}
-	if !codes["ANUY3001"] || !codes["ANUY4001"] {
-		t.Fatalf("codes = %v, want ANUY3001 + ANUY4001", codes)
+	if len(primary.Related) != 1 || primary.Related[0].Code != "ANUY4001" || primary.Related[0].Severity != semantic.SeverityError {
+		t.Fatalf("related = %#v, want one (ANUY4001, Error)", primary.Related)
 	}
 }
