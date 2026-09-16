@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/san-smith/anuy/experimental/parser"
@@ -30,7 +31,30 @@ func AnalyzeSource(source string) (Result, error) {
 	result := Result{}
 	result.Diagnostics = append(result.Diagnostics, b.diagnostics...)
 	result.Diagnostics = append(result.Diagnostics, b.analyze().Diagnostics...)
+	result.Diagnostics = append(result.Diagnostics, b.uncheckedErrors()...)
 	return result, nil
+}
+
+// uncheckedErrors implements the R1 lint (CONTRACTS §3): a declared
+// `error?` binding read nowhere yields exactly one Warning at its
+// declaration span. Any read anywhere lifts it, assignments do not
+// re-arm it (errcheck semantics), `_`-discards create no binding at all
+// (GB-3), and nothing outside declared `error?` is checked. The order
+// follows the declaration order (binding ids grow monotonically).
+func (b *builder) uncheckedErrors() []semantic.Diagnostic {
+	ids := make([]semantic.BindingID, 0, len(b.errSpans))
+	for id := range b.errSpans {
+		if !b.reads[id] {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := make([]semantic.Diagnostic, 0, len(ids))
+	for _, id := range ids {
+		span := b.errSpans[id]
+		out = append(out, semantic.NewDiagnostic(semantic.UncheckedErrorDescriptor, id, semantic.SourceSpan{Start: span.Start, End: span.End}))
+	}
+	return out
 }
 
 type edge struct{ from, to semantic.BlockID }
@@ -65,6 +89,11 @@ type builder struct {
 	// declared/assigned feed the mutator computation for closure bodies.
 	declared map[semantic.BindingID]bool
 	assigned map[semantic.BindingID]bool
+	// errSpans records the declaration span of every declared `error?`
+	// binding (R1 lint, CONTRACTS §3); reads tracks every binding read
+	// anywhere in the flow (flow-insensitive "read somewhere" is enough).
+	errSpans map[semantic.BindingID]parser.Span
+	reads    map[semantic.BindingID]bool
 }
 
 func newBuilder() *builder {
@@ -77,6 +106,8 @@ func newBuilder() *builder {
 		closureMutates: map[semantic.BindingID][]semantic.BindingID{},
 		declared:       map[semantic.BindingID]bool{},
 		assigned:       map[semantic.BindingID]bool{},
+		errSpans:       map[semantic.BindingID]parser.Span{},
+		reads:          map[semantic.BindingID]bool{},
 	}
 }
 
@@ -89,6 +120,12 @@ func (b *builder) appendBlock() {
 }
 
 func (b *builder) add(op semantic.Operation) {
+	switch op.Kind {
+	case semantic.ReadOperation, semantic.DerefOperation:
+		// Both operations read the binding's value: any of them lifts the
+		// UncheckedError lint (CONTRACTS §3.3).
+		b.reads[op.Binding] = true
+	}
 	b.blocks[b.cur].Operations = append(b.blocks[b.cur].Operations, op)
 }
 
@@ -164,6 +201,9 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			b.declare(id)
 			if statement.TypeExpr != nil && statement.TypeExpr.Nullable {
 				b.nilable[id] = true
+				if statement.TypeExpr.Name == "error" {
+					b.errSpans[id] = statement.Span
+				}
 			}
 		}
 		if statement.Values != nil {
@@ -516,8 +556,19 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) []se
 		nilable:     b.nilable,
 		declared:    map[semantic.BindingID]bool{},
 		assigned:    map[semantic.BindingID]bool{},
+		errSpans:    map[semantic.BindingID]parser.Span{},
+		reads:       map[semantic.BindingID]bool{},
 	}
 	cb.emit(cl.Body, bodyScope)
+	// Closure bodies participate in the same lint and read accounting:
+	// a read anywhere lifts the warning, a closure-local `error?`
+	// declaration is linted with the rest (CONTRACTS §3).
+	for id := range cb.reads {
+		b.reads[id] = true
+	}
+	for id, span := range cb.errSpans {
+		b.errSpans[id] = span
+	}
 	var mutators []semantic.BindingID
 	for id := range cb.assigned {
 		if !cb.declared[id] {
