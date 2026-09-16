@@ -1,0 +1,3 @@
+users.forEach(func(user User) {
+print(user)
+})
