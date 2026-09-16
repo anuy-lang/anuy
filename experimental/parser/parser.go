@@ -4,6 +4,8 @@ package parser
 import (
 	"fmt"
 	"strings"
+
+	"github.com/san-smith/anuy/experimental/semantic"
 )
 
 type Span struct{ Start, End int }
@@ -109,15 +111,30 @@ const (
 	BlankIdentifierRead       ErrorCategory = "BlankIdentifierRead"
 )
 
-// Error reports a parse-level reject with its category and byte offset.
+// Error reports a parse-level reject with its registry code, severity and
+// byte offset (CONTRACTS §1.6: codes come from the same registry as the
+// semantic diagnostics).
 type Error struct {
 	Category ErrorCategory
+	Code     semantic.Code
+	Severity semantic.Severity
 	Offset   int
 	Message  string
 }
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("experimental parser: %s at %d", e.Message, e.Offset)
+}
+
+// newError stamps a parse reject with the registry code and severity of
+// its category (CONTRACTS §1.6); an unregistered category is a
+// programming error, never a codeless diagnostic.
+func newError(category ErrorCategory, offset int, message string) *Error {
+	desc, ok := semantic.DescriptorFor(semantic.DiagnosticCategory(category))
+	if !ok {
+		panic("parser: unregistered error category " + category)
+	}
+	return &Error{Category: category, Code: desc.Code(), Severity: desc.Severity(), Offset: offset, Message: message}
 }
 
 // Value is one right-hand side expression of a declaration or assignment.
@@ -228,7 +245,7 @@ func (lp *lineParser) parseStatements() ([]Statement, error) {
 			continue
 		}
 		if line.text == "}" {
-			return nil, &Error{Category: UnsupportedSyntax, Offset: line.offset, Message: "unexpected }"}
+			return nil, newError(UnsupportedSyntax, line.offset, "unexpected }")
 		}
 		statement, err := lp.parseStatement(line)
 		if err != nil {
@@ -246,7 +263,7 @@ func (lp *lineParser) parseBlock() ([]Statement, error) {
 	var out []Statement
 	for {
 		if lp.pos >= len(lp.lines) {
-			return nil, &Error{Category: UnsupportedSyntax, Offset: lp.lines[len(lp.lines)-1].offset, Message: "missing closing }"}
+			return nil, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
 		}
 		line := lp.lines[lp.pos]
 		if line.text == "" {
@@ -286,7 +303,7 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return lp.parseJump(tokens, line)
 	case tokens[0].kind == tokenPunct && tokens[0].text == "{":
 		if len(tokens) != 1 {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[1].start, Message: "unexpected token after {"}
+			return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "unexpected token after {")
 		}
 		start := line.offset
 		lp.pos++
@@ -297,15 +314,15 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return Statement{Kind: Block, Body: body, Span: Span{Start: start, End: line.offset + len(line.text)}}, nil
 	case tokens[0].kind == tokenBlank && len(tokens) == 1:
 		// A bare `_` is a read position: the blank identifier holds no value.
-		return Statement{}, &Error{Category: BlankIdentifierRead, Offset: tokens[0].start, Message: "_ does not hold a value"}
+		return Statement{}, newError(BlankIdentifierRead, tokens[0].start, "_ does not hold a value")
 	case tokens[0].kind == tokenBlank && len(tokens) >= 3 && isPunct(tokens[1], "("):
 		// `_()` — the blank identifier is not callable (GB-3: `_` holds no
 		// value, so it cannot be read as a callee either).
-		return Statement{}, &Error{Category: BlankIdentifierRead, Offset: tokens[0].start, Message: "_ does not hold a value"}
+		return Statement{}, newError(BlankIdentifierRead, tokens[0].start, "_ does not hold a value")
 	case isCallStatementStart(tokens):
 		return lp.parseCallStatement(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "else":
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "unexpected else"}
+		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "unexpected else")
 	case len(tokens) == 1 && tokens[0].kind == tokenIdent:
 		lp.pos++
 		return Statement{
@@ -332,7 +349,7 @@ func isCallStatementStart(tokens []token) bool {
 // one ordinary call at the end of the chain, no arguments, value discarded.
 func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (Statement, error) {
 	if isClosureStart(tokens, 0) {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "closure literal is not a statement"}
+		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "closure literal is not a statement")
 	}
 	if isPunct(tokens[1], "(") {
 		_, args, err := consumeCall(tokens, 1)
@@ -340,10 +357,10 @@ func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (State
 			return Statement{}, err
 		}
 		if len(args) > 0 {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: args[0].start, Message: "call statements are zero-argument"}
+			return Statement{}, newError(UnsupportedSyntax, args[0].start, "call statements are zero-argument")
 		}
 		if len(tokens) != 3 {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[3].start, Message: "unexpected token after call"}
+			return Statement{}, newError(UnsupportedSyntax, tokens[3].start, "unexpected token after call")
 		}
 		lp.pos++
 		return Statement{
@@ -358,13 +375,13 @@ func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (State
 	}
 	last := navigation.Segments[len(navigation.Segments)-1]
 	if !recognized || !last.Call || last.Safe {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "call statement must end with an ordinary call"}
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "call statement must end with an ordinary call")
 	}
 	if !isPunct(tokens[len(tokens)-1], ")") {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "unexpected token after call"}
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "unexpected token after call")
 	}
 	if !isPunct(tokens[len(tokens)-2], "(") {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[len(tokens)-2].start, Message: "call statements are zero-argument"}
+		return Statement{}, newError(UnsupportedSyntax, tokens[len(tokens)-2].start, "call statements are zero-argument")
 	}
 	lp.pos++
 	return Statement{
@@ -379,11 +396,11 @@ func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (State
 func (lp *lineParser) parseIf(tokens []token, line sourceLine) (Statement, error) {
 	last := tokens[len(tokens)-1]
 	if len(tokens) < 3 || last.kind != tokenPunct || last.text != "{" {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "if requires a block"}
+		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "if requires a block")
 	}
 	condition := tokens[1 : len(tokens)-1]
 	if condition[0].kind == tokenIdent && condition[0].text == "func" {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: condition[0].start, Message: "closure literal is not allowed in a condition"}
+		return Statement{}, newError(UnsupportedSyntax, condition[0].start, "closure literal is not allowed in a condition")
 	}
 	if conditionErr := validateConditionTokens(condition); conditionErr != nil {
 		return Statement{}, conditionErr
@@ -452,7 +469,7 @@ func (lp *lineParser) parseIf(tokens []token, line sourceLine) (Statement, error
 func (lp *lineParser) parseLoop(tokens []token, line sourceLine) (Statement, error) {
 	last := tokens[len(tokens)-1]
 	if len(tokens) < 2 || last.kind != tokenPunct || last.text != "{" {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: "loop requires a block"}
+		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "loop requires a block")
 	}
 	statement := Statement{Kind: Loop, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
 	header := tokens[1 : len(tokens)-1]
@@ -460,11 +477,11 @@ func (lp *lineParser) parseLoop(tokens []token, line sourceLine) (Statement, err
 		header[0].kind == tokenIdent && !reservedWords[header[0].text] &&
 		header[1].kind == tokenIdent && header[1].text == "in" {
 		if len(header) == 2 {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: last.start, Message: "iteration requires an expression"}
+			return Statement{}, newError(UnsupportedSyntax, last.start, "iteration requires an expression")
 		}
 		collection := header[2:]
 		if collection[0].kind == tokenIdent && collection[0].text == "func" {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: collection[0].start, Message: "closure literal is not allowed in a condition"}
+			return Statement{}, newError(UnsupportedSyntax, collection[0].start, "closure literal is not allowed in a condition")
 		}
 		navigation, idents, metaErr := expressionMetadata(collection)
 		if metaErr != nil {
@@ -478,7 +495,7 @@ func (lp *lineParser) parseLoop(tokens []token, line sourceLine) (Statement, err
 		}}
 	} else if len(header) > 0 {
 		if header[0].kind == tokenIdent && header[0].text == "func" {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: header[0].start, Message: "closure literal is not allowed in a condition"}
+			return Statement{}, newError(UnsupportedSyntax, header[0].start, "closure literal is not allowed in a condition")
 		}
 		if condErr := validateConditionTokens(header); condErr != nil {
 			return Statement{}, condErr
@@ -509,10 +526,10 @@ func (lp *lineParser) parseLoop(tokens []token, line sourceLine) (Statement, err
 func (lp *lineParser) parseJump(tokens []token, line sourceLine) (Statement, error) {
 	jump := tokens[0].text
 	if len(tokens) > 1 {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[1].start, Message: jump + " accepts no label"}
+		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, jump+" accepts no label")
 	}
 	if lp.loopDepth == 0 {
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[0].start, Message: jump + " outside loop"}
+		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, jump+" outside loop")
 	}
 	lp.pos++
 	kind := Break
@@ -621,23 +638,23 @@ func tokenize(line string, base int) ([]token, *Error) {
 				j++
 			}
 			if j >= len(line) {
-				return nil, &Error{Category: UnsupportedSyntax, Offset: base + i, Message: "unterminated string literal"}
+				return nil, newError(UnsupportedSyntax, base+i, "unterminated string literal")
 			}
 			j++
 			tokens = append(tokens, token{kind: tokenString, text: line[i:j], start: base + i, end: base + j})
 			i = j
 		case c == ':':
 			if i+1 < len(line) && line[i+1] == '=' {
-				return nil, &Error{Category: ShortDeclaration, Offset: base + i, Message: ":= is a syntax error"}
+				return nil, newError(ShortDeclaration, base+i, ":= is a syntax error")
 			}
-			return nil, &Error{Category: UnsupportedSyntax, Offset: base + i, Message: fmt.Sprintf("unexpected character %q", c)}
+			return nil, newError(UnsupportedSyntax, base+i, fmt.Sprintf("unexpected character %q", c))
 		case c == '!':
 			if i+1 < len(line) && line[i+1] == '=' {
 				tokens = append(tokens, token{kind: tokenPunct, text: "!=", start: base + i, end: base + i + 2})
 				i += 2
 				continue
 			}
-			return nil, &Error{Category: UnsupportedSyntax, Offset: base + i, Message: "force unwrap is not part of the language"}
+			return nil, newError(UnsupportedSyntax, base+i, "force unwrap is not part of the language")
 		case strings.ContainsRune("=,.?()[]*+-{}", rune(c)):
 			if c == '=' && i+1 < len(line) && line[i+1] == '=' {
 				tokens = append(tokens, token{kind: tokenPunct, text: "==", start: base + i, end: base + i + 2})
@@ -647,7 +664,7 @@ func tokenize(line string, base int) ([]token, *Error) {
 			tokens = append(tokens, token{kind: tokenPunct, text: string(c), start: base + i, end: base + i + 1})
 			i++
 		default:
-			return nil, &Error{Category: UnsupportedSyntax, Offset: base + i, Message: fmt.Sprintf("unexpected character %q", c)}
+			return nil, newError(UnsupportedSyntax, base+i, fmt.Sprintf("unexpected character %q", c))
 		}
 	}
 	return tokens, nil
@@ -670,10 +687,10 @@ func parseNameList(tokens []token, start int) ([]string, int, *Error) {
 	i := start
 	for {
 		if i >= len(tokens) {
-			return nil, 0, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "expected identifier"}
+			return nil, 0, newError(UnsupportedSyntax, listEnd(tokens), "expected identifier")
 		}
 		if tokens[i].kind != tokenIdent && tokens[i].kind != tokenBlank {
-			return nil, 0, &Error{Category: UnsupportedSyntax, Offset: tokens[i].start, Message: "expected identifier"}
+			return nil, 0, newError(UnsupportedSyntax, tokens[i].start, "expected identifier")
 		}
 		// GB-3 variant A: `_` is accepted in name lists as a write-only
 		// discard; it stays in the name list for arity but the kernel
@@ -793,7 +810,7 @@ func (p *typeParser) errorAtCurrent(message string) *Error {
 	} else if len(p.tokens) > 0 {
 		offset = p.tokens[len(p.tokens)-1].end
 	}
-	return &Error{Category: UnsupportedSyntax, Offset: offset, Message: message}
+	return newError(UnsupportedSyntax, offset, message)
 }
 
 func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, error) {
@@ -807,7 +824,7 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 		i++
 	}
 	if len(names) > 1 && typeStart < i {
-		return Statement{}, &Error{Category: TypedMultipleDeclaration, Offset: tokens[typeStart].start, Message: "typed multiple declaration is excluded from the confirmed grammar"}
+		return Statement{}, newError(TypedMultipleDeclaration, tokens[typeStart].start, "typed multiple declaration is excluded from the confirmed grammar")
 	}
 	if typeStart < i {
 		typeExpr, typeErr := parseType(tokens[typeStart:i])
@@ -817,12 +834,12 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 		statement.Type = line.raw[tokens[typeStart].start-line.offset : tokens[i-1].end-line.offset]
 		statement.TypeExpr = typeExpr
 	} else if i >= len(tokens) {
-		return Statement{}, &Error{Category: BareDeclaration, Offset: tokens[0].start, Message: "declaration requires a type or an initializer"}
+		return Statement{}, newError(BareDeclaration, tokens[0].start, "declaration requires a type or an initializer")
 	}
 	if i < len(tokens) {
 		if isClosureStart(tokens, i+1) {
 			if len(names) != 1 {
-				return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[i+1].start, Message: "closure initializer requires a single binding"}
+				return Statement{}, newError(UnsupportedSyntax, tokens[i+1].start, "closure initializer requires a single binding")
 			}
 			cl, cerr := lp.parseClosure(tokens, i+1, line)
 			if cerr != nil {
@@ -849,14 +866,14 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 	}
 	if i >= len(tokens) || !isAssign(tokens[i]) {
 		if offset, hasSafeTarget := safeNavigationTargetOffset(tokens, i); hasSafeTarget {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: offset, Message: "safe navigation is not an assignment target"}
+			return Statement{}, newError(UnsupportedSyntax, offset, "safe navigation is not an assignment target")
 		}
-		return Statement{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "assignment requires ="}
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "assignment requires =")
 	}
 	var values []Value
 	if isClosureStart(tokens, i+1) {
 		if len(names) != 1 {
-			return Statement{}, &Error{Category: UnsupportedSyntax, Offset: tokens[i+1].start, Message: "closure initializer requires a single binding"}
+			return Statement{}, newError(UnsupportedSyntax, tokens[i+1].start, "closure initializer requires a single binding")
 		}
 		cl, cerr := lp.parseClosure(tokens, i+1, line)
 		if cerr != nil {
@@ -872,7 +889,7 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 		values = rest
 	}
 	if len(values) > 1 && len(values) != len(names) {
-		return Statement{}, &Error{Category: ArityMismatch, Offset: tokens[0].start, Message: "assignment arity mismatch"}
+		return Statement{}, newError(ArityMismatch, tokens[0].start, "assignment arity mismatch")
 	}
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
@@ -882,7 +899,7 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 			continue
 		}
 		if seen[name] {
-			return Statement{}, &Error{Category: DuplicateAssignmentTarget, Offset: tokens[0].start, Message: fmt.Sprintf("duplicate assignment target %q", name)}
+			return Statement{}, newError(DuplicateAssignmentTarget, tokens[0].start, fmt.Sprintf("duplicate assignment target %q", name))
 		}
 		seen[name] = true
 	}
@@ -913,7 +930,7 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine) (
 	cur := []token{}
 	for ; ; i++ {
 		if i >= len(tokens) {
-			return Closure{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "unterminated closure parameter list"}
+			return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "unterminated closure parameter list")
 		}
 		t := tokens[i]
 		if t.kind == tokenPunct && (t.text == "(" || t.text == "[") {
@@ -943,10 +960,10 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine) (
 	var params []Param
 	for _, g := range groups {
 		if g[0].kind != tokenIdent || g[0].text == "_" || reservedWords[g[0].text] {
-			return Closure{}, &Error{Category: UnsupportedSyntax, Offset: g[0].start, Message: "expected parameter name"}
+			return Closure{}, newError(UnsupportedSyntax, g[0].start, "expected parameter name")
 		}
 		if len(g) < 2 {
-			return Closure{}, &Error{Category: UnsupportedSyntax, Offset: g[0].start, Message: "closure parameter requires a type"}
+			return Closure{}, newError(UnsupportedSyntax, g[0].start, "closure parameter requires a type")
 		}
 		typeExpr, typeErr := parseType(g[1:])
 		if typeErr != nil {
@@ -959,7 +976,7 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine) (
 		})
 	}
 	if i >= len(tokens) || tokens[i].kind != tokenPunct || tokens[i].text != "{" {
-		return Closure{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "closure requires a block"}
+		return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
 	}
 	cl := Closure{Params: params, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
 	lp.pos++
@@ -999,28 +1016,28 @@ func validateConditionTokens(tokens []token) *Error {
 	for i, t := range tokens {
 		switch {
 		case t.kind == tokenBlank:
-			return &Error{Category: BlankIdentifierRead, Offset: t.start, Message: "_ does not hold a value"}
+			return newError(BlankIdentifierRead, t.start, "_ does not hold a value")
 		case t.kind == tokenIdent && isStatementKeyword(t.text):
-			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in condition", t.text)}
+			return newError(UnsupportedSyntax, t.start, fmt.Sprintf("unexpected keyword %q in condition", t.text))
 		case isPunct(t, "(") || isPunct(t, "["):
 			isCall := isPunct(t, "(") && i > 0 && isCallCallee(tokens[i-1])
 			delimiters = append(delimiters, isCall)
 		case isPunct(t, ")") || isPunct(t, "]"):
 			if len(delimiters) == 0 {
-				return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unbalanced brackets"}
+				return newError(UnsupportedSyntax, t.start, "unbalanced brackets")
 			}
 			delimiters = delimiters[:len(delimiters)-1]
 		case isPunct(t, ","):
 			if len(delimiters) > 0 && delimiters[len(delimiters)-1] {
 				continue
 			}
-			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected token %q in condition", t.text)}
+			return newError(UnsupportedSyntax, t.start, fmt.Sprintf("unexpected token %q in condition", t.text))
 		case !isValueToken(t):
-			return &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected token %q in condition", t.text)}
+			return newError(UnsupportedSyntax, t.start, fmt.Sprintf("unexpected token %q in condition", t.text))
 		}
 	}
 	if len(delimiters) != 0 {
-		return &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "unbalanced brackets"}
+		return newError(UnsupportedSyntax, listEnd(tokens), "unbalanced brackets")
 	}
 	return nil
 }
@@ -1091,14 +1108,14 @@ func navigationSuffix(tokens []token, pos int, receiver string, initial []Naviga
 		case isPunct(tokens[pos], "."):
 			operator = tokens[pos]
 			if safeTail {
-				return nil, nil, true, &Error{Category: UnsupportedSyntax, Offset: operator.start, Message: "ordinary selector cannot follow safe navigation"}
+				return nil, nil, true, newError(UnsupportedSyntax, operator.start, "ordinary selector cannot follow safe navigation")
 			}
 			pos++
 		default:
 			return nil, nil, false, nil
 		}
 		if pos >= len(tokens) || tokens[pos].kind != tokenIdent || reservedWords[tokens[pos].text] {
-			return nil, nil, true, &Error{Category: UnsupportedSyntax, Offset: operator.start, Message: "navigation operator requires a member name"}
+			return nil, nil, true, newError(UnsupportedSyntax, operator.start, "navigation operator requires a member name")
 		}
 		member := tokens[pos]
 		segments = append(segments, NavigationSegment{
@@ -1155,11 +1172,11 @@ func consumeCall(tokens []token, start int) (int, []token, *Error) {
 				return i + 1, tokens[start+1 : i], nil
 			}
 			if depth < 0 {
-				return 0, nil, &Error{Category: UnsupportedSyntax, Offset: tokens[i].start, Message: "unbalanced navigation call"}
+				return 0, nil, newError(UnsupportedSyntax, tokens[i].start, "unbalanced navigation call")
 			}
 		}
 	}
-	return 0, nil, &Error{Category: UnsupportedSyntax, Offset: tokens[start].start, Message: "unterminated navigation call"}
+	return 0, nil, newError(UnsupportedSyntax, tokens[start].start, "unterminated navigation call")
 }
 
 func navigationArgumentIdents(tokens []token) ([]string, *Error) {
@@ -1176,11 +1193,11 @@ func navigationArgumentIdents(tokens []token) ([]string, *Error) {
 		case isPunct(t, ")") || isPunct(t, "]"):
 			depth--
 			if depth < 0 {
-				return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unbalanced navigation arguments"}
+				return nil, newError(UnsupportedSyntax, t.start, "unbalanced navigation arguments")
 			}
 		case isPunct(t, ",") && depth == 0:
 			if i == groupStart {
-				return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "missing navigation argument"}
+				return nil, newError(UnsupportedSyntax, t.start, "missing navigation argument")
 			}
 			groupIdents, err := navigationArgumentGroupIdents(tokens[groupStart:i])
 			if err != nil {
@@ -1191,10 +1208,10 @@ func navigationArgumentIdents(tokens []token) ([]string, *Error) {
 		}
 	}
 	if depth != 0 {
-		return nil, &Error{Category: UnsupportedSyntax, Offset: tokens[len(tokens)-1].end, Message: "unbalanced navigation arguments"}
+		return nil, newError(UnsupportedSyntax, tokens[len(tokens)-1].end, "unbalanced navigation arguments")
 	}
 	if groupStart == len(tokens) {
-		return nil, &Error{Category: UnsupportedSyntax, Offset: tokens[len(tokens)-1].end, Message: "missing navigation argument"}
+		return nil, newError(UnsupportedSyntax, tokens[len(tokens)-1].end, "missing navigation argument")
 	}
 	groupIdents, err := navigationArgumentGroupIdents(tokens[groupStart:])
 	if err != nil {
@@ -1224,7 +1241,7 @@ func valueIdents(tokens []token) ([]string, *Error) {
 			continue
 		}
 		if isStatementKeyword(t.text) {
-			return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected keyword %q in expression", t.text)}
+			return nil, newError(UnsupportedSyntax, t.start, fmt.Sprintf("unexpected keyword %q in expression", t.text))
 		}
 		if !reservedWords[t.text] {
 			idents = append(idents, t.text)
@@ -1250,7 +1267,7 @@ func safeNavigationTargetOffset(tokens []token, start int) (int, bool) {
 // expressions and keeps each expression as raw source text.
 func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error) {
 	if start >= len(tokens) {
-		return nil, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "missing expression"}
+		return nil, newError(UnsupportedSyntax, listEnd(tokens), "missing expression")
 	}
 	var values []Value
 	groupStart := start
@@ -1264,7 +1281,7 @@ func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error)
 			delimiters = append(delimiters, isCall)
 		case t.kind == tokenPunct && (t.text == ")" || t.text == "]"):
 			if len(delimiters) == 0 {
-				return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unbalanced brackets"}
+				return nil, newError(UnsupportedSyntax, t.start, "unbalanced brackets")
 			}
 			delimiters = delimiters[:len(delimiters)-1]
 		case t.kind == tokenPunct && t.text == ",":
@@ -1272,7 +1289,7 @@ func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error)
 				if delimiters[len(delimiters)-1] {
 					continue
 				}
-				return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unexpected comma in expression"}
+				return nil, newError(UnsupportedSyntax, t.start, "unexpected comma in expression")
 			}
 			value, gerr := valueGroup(tokens, groupStart, i, line)
 			if gerr != nil {
@@ -1281,15 +1298,15 @@ func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error)
 			values = append(values, value)
 			groupStart = i + 1
 		case t.kind == tokenPunct && (t.text == "=" || t.text == "=="):
-			return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: "unexpected = in expression"}
+			return nil, newError(UnsupportedSyntax, t.start, "unexpected = in expression")
 		case t.kind == tokenBlank:
-			return nil, &Error{Category: BlankIdentifierRead, Offset: t.start, Message: "_ does not hold a value"}
+			return nil, newError(BlankIdentifierRead, t.start, "_ does not hold a value")
 		case !isValueToken(t):
-			return nil, &Error{Category: UnsupportedSyntax, Offset: t.start, Message: fmt.Sprintf("unexpected token %q in expression", t.text)}
+			return nil, newError(UnsupportedSyntax, t.start, fmt.Sprintf("unexpected token %q in expression", t.text))
 		}
 	}
 	if len(delimiters) != 0 {
-		return nil, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "unbalanced brackets"}
+		return nil, newError(UnsupportedSyntax, listEnd(tokens), "unbalanced brackets")
 	}
 	value, gerr := valueGroup(tokens, groupStart, i, line)
 	if gerr != nil {
@@ -1301,7 +1318,7 @@ func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error)
 
 func valueGroup(tokens []token, lo, hi int, line sourceLine) (Value, *Error) {
 	if lo >= hi {
-		return Value{}, &Error{Category: UnsupportedSyntax, Offset: listEnd(tokens), Message: "missing expression"}
+		return Value{}, newError(UnsupportedSyntax, listEnd(tokens), "missing expression")
 	}
 	group := tokens[lo:hi]
 	navigation, idents, recognized, navErr := navigationMetadata(group)

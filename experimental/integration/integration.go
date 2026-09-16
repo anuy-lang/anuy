@@ -663,5 +663,9 @@ func intersectFacts(a, b map[semantic.BindingID]bool) map[semantic.BindingID]boo
 }
 
 func (b *builder) report(category semantic.DiagnosticCategory, span parser.Span) {
-	b.diagnostics = append(b.diagnostics, semantic.NewDiagnostic(category, 0, semantic.SourceSpan{Start: span.Start, End: span.End}))
+	desc, ok := semantic.DescriptorFor(category)
+	if !ok {
+		panic("integration: unregistered diagnostic category " + category)
+	}
+	b.diagnostics = append(b.diagnostics, semantic.NewDiagnostic(desc, 0, semantic.SourceSpan{Start: span.Start, End: span.End}))
 }
