@@ -94,6 +94,10 @@ type builder struct {
 	// anywhere in the flow (flow-insensitive "read somewhere" is enough).
 	errSpans map[semantic.BindingID]parser.Span
 	reads    map[semantic.BindingID]bool
+	// pure records declared functions annotated `//anuy:pure` (story 07
+	// effects proposal): a trusted contract - their calls apply no
+	// mutator set.
+	pure map[semantic.BindingID]bool
 }
 
 func newBuilder() *builder {
@@ -108,6 +112,7 @@ func newBuilder() *builder {
 		assigned:       map[semantic.BindingID]bool{},
 		errSpans:       map[semantic.BindingID]parser.Span{},
 		reads:          map[semantic.BindingID]bool{},
+		pure:           map[semantic.BindingID]bool{},
 	}
 }
 
@@ -233,6 +238,10 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		b.readIdent(statement.Names[0], scope, statement.Span, nil)
 	case parser.Call:
 		b.emitCall(statement, scope)
+	case parser.Function:
+		b.emitFunction(statement, scope)
+	case parser.Return:
+		b.emitReturn()
 	case parser.If:
 		b.emitIf(statement, scope)
 	case parser.Loop:
@@ -558,6 +567,7 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) []se
 		assigned:    map[semantic.BindingID]bool{},
 		errSpans:    map[semantic.BindingID]parser.Span{},
 		reads:       map[semantic.BindingID]bool{},
+		pure:        b.pure,
 	}
 	cb.emit(cl.Body, bodyScope)
 	// Closure bodies participate in the same lint and read accounting:
@@ -620,13 +630,31 @@ func unionBindings(existing, added []semantic.BindingID) []semantic.BindingID {
 	return out
 }
 
-// emitCall lowers a call statement: the bare callee is a binding read, and
-// the call of a known mutating closure invalidates the non-nil narrowing of
-// its captured bindings (RFC-003 §85). A navigation call requires the
-// non-nil proof for its ordinary prefix; its method name is never a binding
-// read (F-G3 boundary).
+// emitCall lowers a call statement: arguments evaluate first (RFC-003 §61),
+// the bare callee is a binding read, and the call of a declared function or
+// closure applies its mutator set (RFC-003 §85). A navigation call requires
+// the non-nil proof for its ordinary prefix and invalidates the receiver's
+// narrowing after the call (story 07, решение 3b — the Rust &mut self
+// analogue); its method name is never a binding read (F-G3 boundary). An
+// annotated `//anuy:pure` callee applies no mutator set (trusted contract).
 func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 	call := statement.Call
+	// A bare-identifier argument is a read (D-01): unresolved, it reports
+	// exactly one UnknownRead per name. Compound and navigation arguments
+	// keep the readIdents tolerance - unresolved idents there stay invisible
+	// (recorded conformance sources pin them as accepted).
+	reported := map[string]bool{}
+	for _, value := range statement.Values {
+		if value.Navigation != nil || value.Closure != nil || len(value.Idents) != 1 || value.Text != value.Idents[0] {
+			continue
+		}
+		if serr := scope.Read(value.Idents[0]); serr != nil && !reported[value.Idents[0]] {
+			reported[value.Idents[0]] = true
+			b.report(serr.Category, statement.Span)
+		}
+	}
+	b.readIdents(statement, scope)
+	b.analyzeClosures(statement, scope, nil)
 	id := scope.Resolve(call.Receiver)
 	if id == 0 {
 		if len(call.Segments) == 0 {
@@ -639,11 +667,45 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 		if !call.Segments[0].Safe && b.nilable[id] {
 			b.add(semantic.Deref(id))
 		}
+		// Решение 3b: the proof is required at the call point (the Deref
+		// above) and dropped after it - chained calls need re-proof.
+		b.add(semantic.Call(id))
 		return
 	}
-	if mutators := b.closureMutates[id]; len(mutators) > 0 {
+	if mutators := b.closureMutates[id]; len(mutators) > 0 && !b.pure[id] {
 		b.add(semantic.Call(mutators...))
 	}
+}
+
+// emitFunction lowers a story 07 function declaration: the declared name
+// binds a closure value, so the body is analyzed at the creation point like
+// a closure literal - self-recursion resolves through the scope, and the
+// body's mutated captures register in the mutator registry (CONTRACTS
+// story 07 §1). `//anuy:pure` marks the trusted no-writes contract.
+func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scope) {
+	if serr := scope.Declare(statement.Names[0]); serr != nil {
+		b.report(serr.Category, statement.Span)
+		return
+	}
+	id := scope.Resolve(statement.Names[0])
+	b.declare(id)
+	b.initialize(id)
+	mutators := b.analyzeClosure(statement.Closure, scope)
+	b.closureMutates[id] = unionBindings(b.closureMutates[id], mutators)
+	if statement.Pure {
+		b.pure[id] = true
+	}
+}
+
+// emitReturn lowers the bare `return` statement (story 07): the flow of the
+// enclosing function terminates here. Following statements start a fresh
+// block with no incoming edges - the analyzer skips unreachable blocks, so
+// their reads report nothing.
+func (b *builder) emitReturn() {
+	cur := b.cur
+	b.appendBlock()
+	b.facts[b.cur] = copyFacts(b.facts[cur])
+	b.nonNil[b.cur] = copyFacts(b.nonNil[cur])
 }
 
 // condNarrowTarget resolves the binding narrowed by a bare `x != nil`

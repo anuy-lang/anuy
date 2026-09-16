@@ -155,3 +155,14 @@ func TestParseRejectsFunctionDeclarationWithoutParameterList(t *testing.T) {
 		t.Fatalf("error = (%s, %s), want UnsupportedSyntax Error", perr.Category, perr.Severity)
 	}
 }
+
+func TestParseFunctionDeclarationPureAnnotation(t *testing.T) {
+	program := parseSource(t, "//anuy:pure\nfunc noop() {\n}\n")
+	if !program.Statements[0].Pure {
+		t.Fatalf("statement = %#v, want Pure for the annotated declaration", program.Statements[0])
+	}
+	plain := parseSource(t, "func noop() {\n}\n")
+	if plain.Statements[0].Pure {
+		t.Fatalf("statement = %#v, want no Pure without the annotation", plain.Statements[0])
+	}
+}

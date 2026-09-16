@@ -188,8 +188,12 @@ type Statement struct {
 	Span Span
 	// Closure is non-nil for a FunctionDecl statement (story 07): the
 	// declared function's parameters and body, parsed with the closure
-	// grammar. Names[0] is the declared name.
+	// grammar. Names[0] is the declared name. Pure records an `//anuy:pure`
+	// annotation on the line before the declaration (story 07 effects
+	// proposal): the author's trusted contract that the function performs no
+	// observable writes.
 	Closure *Closure
+	Pure    bool
 	// Call is non-nil for a call statement (story 05 variant A): Receiver is
 	// the called binding or navigation root, Segments the ordinary member
 	// chain whose last segment carries the call. The call value is discarded;
@@ -253,6 +257,10 @@ func (lp *lineParser) parseStatements() ([]Statement, error) {
 			lp.pos++
 			continue
 		}
+		if strings.HasPrefix(line.text, "//") {
+			lp.pos++
+			continue
+		}
 		if line.text == "}" {
 			return nil, newError(UnsupportedSyntax, line.offset, "unexpected }")
 		}
@@ -286,6 +294,10 @@ func (lp *lineParser) parseBlock() ([]Statement, error) {
 		if lp.isElseHeader(line) || lp.isElseIfHeader(line) {
 			return out, nil
 		}
+		if strings.HasPrefix(line.text, "//") {
+			lp.pos++
+			continue
+		}
 		statement, err := lp.parseStatement(line)
 		if err != nil {
 			return nil, err
@@ -306,6 +318,10 @@ func (lp *lineParser) parseBlockWithSuffix() ([]Statement, []token, sourceLine, 
 		}
 		line := lp.lines[lp.pos]
 		if line.text == "" {
+			lp.pos++
+			continue
+		}
+		if strings.HasPrefix(line.text, "//") {
 			lp.pos++
 			continue
 		}
@@ -411,6 +427,7 @@ func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statem
 	if len(tokens) < 3 || !isPunct(tokens[2], "(") {
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "function declaration requires a parameter list")
 	}
+	pure := lp.pos > 0 && lp.lines[lp.pos-1].text == "//anuy:pure"
 	// Reuse the closure parser on the token slice without the name: token
 	// offsets are absolute, so parameter types keep their source spelling.
 	shifted := make([]token, 0, len(tokens)-1)
@@ -424,6 +441,7 @@ func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statem
 		Kind:    Function,
 		Names:   []string{name.text},
 		Closure: &cl,
+		Pure:    pure,
 		Span:    Span{Start: line.offset, End: line.offset + len(line.text)},
 	}, nil
 }
