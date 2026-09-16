@@ -894,6 +894,17 @@ func TestParseAcceptsCallStatements(t *testing.T) {
 	if call == nil || len(call.Segments) != 2 || call.Segments[0].Call || !call.Segments[1].Call {
 		t.Fatalf("chain call = %#v", call)
 	}
+	// Story 07: call statements carry arguments (owner decision 2026-09-17);
+	// `clear(x)`/`user.save(x)` flipped from the story 05 rejects.
+	withArgs, err := Parse("user.save(x)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call = withArgs.Statements[0].Call
+	if call == nil || len(call.Segments) != 1 || len(withArgs.Statements[0].Values) != 1 ||
+		len(withArgs.Statements[0].Values[0].Idents) != 1 || withArgs.Statements[0].Values[0].Idents[0] != "x" {
+		t.Fatalf("call with arguments = %#v / %#v", call, withArgs.Statements[0].Values)
+	}
 }
 
 func TestParseRejectsCallStatementEdges(t *testing.T) {
@@ -901,8 +912,6 @@ func TestParseRejectsCallStatementEdges(t *testing.T) {
 		source   string
 		category ErrorCategory
 	}{
-		{source: "clear(x)\n", category: UnsupportedSyntax},
-		{source: "user.save(x)\n", category: UnsupportedSyntax},
 		{source: "_()\n", category: BlankIdentifierRead},
 		{source: "clear().field\n", category: UnsupportedSyntax},
 		{source: "a.b().c\n", category: UnsupportedSyntax},

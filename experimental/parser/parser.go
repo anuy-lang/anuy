@@ -95,6 +95,8 @@ const (
 	Continue
 	Block
 	Call
+	Function
+	Return
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -184,10 +186,17 @@ type Statement struct {
 	Body []Statement
 	Else []Statement
 	Span Span
-	// Call is non-nil for a call statement (story 05 variant A, zero-
-	// argument): Receiver is the called binding or navigation root, Segments
-	// the ordinary member chain whose last segment carries the call. The
-	// call value is discarded; the method name is not a binding read.
+	// Closure is non-nil for a FunctionDecl statement (story 07): the
+	// declared function's parameters and body, parsed with the closure
+	// grammar. Names[0] is the declared name.
+	Closure *Closure
+	// Call is non-nil for a call statement (story 05 variant A): Receiver is
+	// the called binding or navigation root, Segments the ordinary member
+	// chain whose last segment carries the call. The call value is discarded;
+	// the method name is not a binding read. Since story 07 the call carries
+	// comma-separated arguments in Values (story 07 grammar, owner decision
+	// 2026-09-17); a closure argument may span lines and close its
+	// parenthesis on the block closer line.
 	Call *NavigationExpr
 }
 
@@ -285,6 +294,44 @@ func (lp *lineParser) parseBlock() ([]Statement, error) {
 	}
 }
 
+// parseBlockWithSuffix parses statements like parseBlock, but the closing
+// line may carry tokens after `}`: a call argument closes its parenthesis on
+// the block closer line (story 07, RFC-003 §41 — `})`). It returns the block
+// statements, the closer line's trailing tokens, and the closer line itself.
+func (lp *lineParser) parseBlockWithSuffix() ([]Statement, []token, sourceLine, error) {
+	var out []Statement
+	for {
+		if lp.pos >= len(lp.lines) {
+			return nil, nil, sourceLine{}, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
+		}
+		line := lp.lines[lp.pos]
+		if line.text == "" {
+			lp.pos++
+			continue
+		}
+		if line.text == "}" {
+			lp.pos++
+			return out, nil, line, nil
+		}
+		if strings.HasPrefix(line.text, "}") && !lp.isElseHeader(line) && !lp.isElseIfHeader(line) {
+			lp.pos++
+			tokens, terr := tokenize(line.raw, line.offset)
+			if terr != nil {
+				return nil, nil, sourceLine{}, terr
+			}
+			return out, tokens[1:], line, nil
+		}
+		if lp.isElseHeader(line) || lp.isElseIfHeader(line) {
+			return out, nil, line, nil
+		}
+		statement, err := lp.parseStatement(line)
+		if err != nil {
+			return nil, nil, sourceLine{}, err
+		}
+		out = append(out, statement)
+	}
+}
+
 // parseStatement dispatches one line. Statement parsers advance lp.pos past
 // every line they consume, including multi-line if and closure statements.
 func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
@@ -301,6 +348,15 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return lp.parseLoop(tokens, line)
 	case tokens[0].kind == tokenIdent && (tokens[0].text == "break" || tokens[0].text == "continue"):
 		return lp.parseJump(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "func" && len(tokens) >= 2 && tokens[1].kind == tokenIdent:
+		// `func name(params) {` — the story 07 declaration form. `func (`
+		// without a name stays a closure literal and is rejected below by
+		// the call-statement path.
+		return lp.parseFunctionDecl(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "return":
+		// `return` is a contextual keyword in statement position (the `in`
+		// precedent, story 03).
+		return lp.parseReturn(tokens, line)
 	case tokens[0].kind == tokenPunct && tokens[0].text == "{":
 		if len(tokens) != 1 {
 			return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "unexpected token after {")
@@ -344,31 +400,172 @@ func isCallStatementStart(tokens []token) bool {
 		(isPunct(tokens[1], "(") || isPunct(tokens[1], "."))
 }
 
-// parseCallStatement parses the zero-argument call statement forms
-// `identifier()` and `identifier.segment…()` (story 05 variant A): exactly
-// one ordinary call at the end of the chain, no arguments, value discarded.
+// parseFunctionDecl parses the story 07 declaration form `func name(params)
+// { body }` (owner decision 2026-09-17, task-1-7-1-1): the declared name
+// binds a closure value; parameters and body reuse the closure grammar.
+func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statement, error) {
+	name := tokens[1]
+	if name.text == "_" || reservedWords[name.text] {
+		return Statement{}, newError(UnsupportedSyntax, name.start, "invalid function name")
+	}
+	if len(tokens) < 3 || !isPunct(tokens[2], "(") {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "function declaration requires a parameter list")
+	}
+	// Reuse the closure parser on the token slice without the name: token
+	// offsets are absolute, so parameter types keep their source spelling.
+	shifted := make([]token, 0, len(tokens)-1)
+	shifted = append(shifted, tokens[0])
+	shifted = append(shifted, tokens[2:]...)
+	cl, cerr := lp.parseClosure(shifted, 0, line)
+	if cerr != nil {
+		return Statement{}, cerr
+	}
+	return Statement{
+		Kind:    Function,
+		Names:   []string{name.text},
+		Closure: &cl,
+		Span:    Span{Start: line.offset, End: line.offset + len(line.text)},
+	}, nil
+}
+
+// parseReturn parses the bare `return` statement (story 07, owner decision
+// 2026-09-17): an early exit of the enclosing function. A value form waits
+// for the typed slice.
+func (lp *lineParser) parseReturn(tokens []token, line sourceLine) (Statement, error) {
+	if len(tokens) != 1 {
+		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return takes no value")
+	}
+	lp.pos++
+	return Statement{
+		Kind: Return,
+		Span: Span{Start: line.offset, End: line.offset + len(line.text)},
+	}, nil
+}
+
+// parseCallStatement parses the call statement forms `identifier(args…)`
+// and `identifier.segment…(args…)` (story 05 variant A, arguments added in
+// story 07): exactly one ordinary call at the end of the chain, value
+// discarded. Arguments are comma-separated values of the existing value
+// grammar; a closure argument may span lines and close its parenthesis on
+// the block closer line (RFC-003 §41, owner decision 2026-09-17).
 func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (Statement, error) {
 	if isClosureStart(tokens, 0) {
 		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "closure literal is not a statement")
 	}
+	var segments []NavigationSegment
+	callOpen := -1
 	if isPunct(tokens[1], "(") {
-		_, args, err := consumeCall(tokens, 1)
-		if err != nil {
-			return Statement{}, err
+		callOpen = 1
+	} else {
+		var scanErr *Error
+		segments, callOpen, scanErr = callChainScan(tokens)
+		if scanErr != nil {
+			return Statement{}, scanErr
 		}
-		if len(args) > 0 {
-			return Statement{}, newError(UnsupportedSyntax, args[0].start, "call statements are zero-argument")
+		if callOpen < 0 {
+			// Not a terminated call chain on this line: the legacy path
+			// produces the story 05 errors (`a.b` without a call, safe
+			// tails, unbalanced chains).
+			return lp.parseNavigationCall(tokens, line)
 		}
-		if len(tokens) != 3 {
-			return Statement{}, newError(UnsupportedSyntax, tokens[3].start, "unexpected token after call")
-		}
-		lp.pos++
-		return Statement{
-			Kind: Call,
-			Call: &NavigationExpr{Receiver: tokens[0].text},
-			Span: Span{Start: line.offset, End: line.offset + len(line.text)},
-		}, nil
 	}
+	if !callClosesOnLine(tokens, callOpen) {
+		return lp.parseMultilineCallArguments(tokens, callOpen, line, segments)
+	}
+	next, inner, err := consumeCall(tokens, callOpen)
+	if err != nil {
+		return Statement{}, err
+	}
+	if next != len(tokens) {
+		return Statement{}, newError(UnsupportedSyntax, tokens[next].start, "unexpected token after call")
+	}
+	args, aerr := parseCallArgumentList(inner, line)
+	if aerr != nil {
+		return Statement{}, aerr
+	}
+	lp.pos++
+	return Statement{
+		Kind:   Call,
+		Call:   &NavigationExpr{Receiver: tokens[0].text, Segments: segments},
+		Values: args,
+		Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
+	}, nil
+}
+
+// callChainScan parses the `identifier { (`. | `?.` identifier }` chain of a
+// navigation call and reports the index of the call's opening parenthesis.
+// callOpen < 0 means the line does not carry a terminated or unterminated
+// call chain and the caller falls back to the legacy navigation path.
+func callChainScan(tokens []token) ([]NavigationSegment, int, *Error) {
+	segments := []NavigationSegment{}
+	pos := 1
+	safeTail := false
+	for {
+		if pos >= len(tokens) {
+			return segments, -1, nil
+		}
+		safe := false
+		switch {
+		case isPunct(tokens[pos], "?"):
+			if pos+1 >= len(tokens) || !isPunct(tokens[pos+1], ".") {
+				return segments, -1, nil
+			}
+			safe = true
+			pos += 2
+		case isPunct(tokens[pos], "."):
+			if safeTail {
+				return nil, -1, newError(UnsupportedSyntax, tokens[pos].start, "ordinary selector cannot follow safe navigation")
+			}
+			pos++
+		default:
+			return segments, -1, nil
+		}
+		if pos >= len(tokens) || tokens[pos].kind != tokenIdent || reservedWords[tokens[pos].text] {
+			return nil, -1, newError(UnsupportedSyntax, tokens[pos].start, "navigation operator requires a member name")
+		}
+		member := tokens[pos]
+		segments = append(segments, NavigationSegment{
+			Name: member.text,
+			Safe: safe,
+			Span: Span{Start: tokens[pos-1].start, End: member.end},
+		})
+		if safe {
+			safeTail = true
+		}
+		pos++
+		if pos < len(tokens) && isPunct(tokens[pos], "(") {
+			if safeTail {
+				return nil, -1, newError(UnsupportedSyntax, tokens[pos].start, "call statement must end with an ordinary call")
+			}
+			segments[len(segments)-1].Call = true
+			return segments, pos, nil
+		}
+		if len(segments) > 0 {
+			segments[len(segments)-1].Call = false
+		}
+	}
+}
+
+// callClosesOnLine reports whether the call opened at callOpen closes within
+// the same token slice (parenthesis balancing).
+func callClosesOnLine(tokens []token, callOpen int) bool {
+	depth := 0
+	for i := callOpen; i < len(tokens); i++ {
+		if isPunct(tokens[i], "(") {
+			depth++
+		} else if isPunct(tokens[i], ")") {
+			depth--
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parseNavigationCall is the story 05 legacy path for lines that are not a
+// terminated call chain: it keeps the original errors and rejects.
+func (lp *lineParser) parseNavigationCall(tokens []token, line sourceLine) (Statement, error) {
 	navigation, _, recognized, navErr := navigationMetadata(tokens)
 	if navErr != nil {
 		return Statement{}, navErr
@@ -388,6 +585,67 @@ func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (State
 		Kind: Call,
 		Call: navigation,
 		Span: Span{Start: line.offset, End: line.offset + len(line.text)},
+	}, nil
+}
+
+// parseCallArgumentList parses the comma-separated argument values from the
+// tokens between a call's parentheses. Empty parentheses carry no arguments.
+func parseCallArgumentList(inner []token, line sourceLine) ([]Value, error) {
+	if len(inner) == 0 {
+		return nil, nil
+	}
+	return parseValueList(inner, 0, line)
+}
+
+// parseMultilineCallArguments parses a call whose argument list continues on
+// following lines. Story 07 supports exactly the RFC-003 §41 shape: the
+// first argument is a closure whose header closes on the statement line, and
+// the remaining arguments continue after the block closer line and end with
+// the call's `)`.
+func (lp *lineParser) parseMultilineCallArguments(tokens []token, callOpen int, line sourceLine, segments []NavigationSegment) (Statement, error) {
+	fi := callOpen + 1
+	if fi+1 >= len(tokens) || tokens[fi].kind != tokenIdent || tokens[fi].text != "func" || !isPunct(tokens[fi+1], "(") {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "unterminated navigation call")
+	}
+	closeIdx, params, perr := parseClosureParamGroups(tokens, fi+1, line)
+	if perr != nil {
+		return Statement{}, perr
+	}
+	if closeIdx != len(tokens)-1 || !isPunct(tokens[len(tokens)-1], "{") {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
+	}
+	cl := Closure{Params: params, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
+	lp.pos++
+	// A closure body is a function boundary: loop depth does not carry in.
+	savedDepth := lp.loopDepth
+	lp.loopDepth = 0
+	body, suffix, closerLine, berr := lp.parseBlockWithSuffix()
+	lp.loopDepth = savedDepth
+	if berr != nil {
+		return Statement{}, berr
+	}
+	cl.Body = body
+	args := []Value{{Closure: &cl}}
+	rest := suffix
+	if len(rest) > 0 && isPunct(rest[0], ",") {
+		if len(rest) < 2 || !isPunct(rest[len(rest)-1], ")") {
+			return Statement{}, newError(UnsupportedSyntax, closerLine.offset, "unterminated navigation call")
+		}
+		more, verr := parseValueList(rest[1:len(rest)-1], 0, closerLine)
+		if verr != nil {
+			return Statement{}, verr
+		}
+		args = append(args, more...)
+		rest = rest[len(rest)-1:]
+	}
+	if len(rest) != 1 || !isPunct(rest[0], ")") {
+		return Statement{}, newError(UnsupportedSyntax, closerLine.offset, "unterminated navigation call")
+	}
+	return Statement{
+		Kind:   Call,
+		Call:   &NavigationExpr{Receiver: tokens[0].text, Segments: segments},
+		Values: args,
+		Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
 	}, nil
 }
 
@@ -587,7 +845,7 @@ type token struct {
 	start, end int // absolute byte offsets
 }
 
-var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true}
+var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true}
 
 // isStatementKeyword reports words rejected in expression and condition
 // positions. `in` is contextual: it is only recognized in a loop header
@@ -924,13 +1182,38 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 // parseClosure parses `func(Params) {` plus its block. lp.pos is advanced
 // past every consumed line.
 func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine) (Closure, *Error) {
-	i := start + 2
+	i, params, err := parseClosureParamGroups(tokens, start+1, line)
+	if err != nil {
+		return Closure{}, err
+	}
+	if i >= len(tokens) || tokens[i].kind != tokenPunct || tokens[i].text != "{" {
+		return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
+	}
+	cl := Closure{Params: params, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
+	lp.pos++
+	// A closure body is a function boundary: loop depth does not carry in.
+	savedDepth := lp.loopDepth
+	lp.loopDepth = 0
+	body, berr := lp.parseBlock()
+	lp.loopDepth = savedDepth
+	if berr != nil {
+		return Closure{}, berr.(*Error)
+	}
+	cl.Body = body
+	return cl, nil
+}
+
+// parseClosureParamGroups parses the parenthesized parameter list of a
+// closure literal whose opening `(` is at index start. It returns the index
+// just after the closing `)` and the parameters in declaration order.
+func parseClosureParamGroups(tokens []token, start int, line sourceLine) (int, []Param, *Error) {
 	depth := 1
+	i := start + 1
 	var groups [][]token
 	cur := []token{}
 	for ; ; i++ {
 		if i >= len(tokens) {
-			return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "unterminated closure parameter list")
+			return 0, nil, newError(UnsupportedSyntax, listEnd(tokens), "unterminated closure parameter list")
 		}
 		t := tokens[i]
 		if t.kind == tokenPunct && (t.text == "(" || t.text == "[") {
@@ -960,14 +1243,14 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine) (
 	var params []Param
 	for _, g := range groups {
 		if g[0].kind != tokenIdent || g[0].text == "_" || reservedWords[g[0].text] {
-			return Closure{}, newError(UnsupportedSyntax, g[0].start, "expected parameter name")
+			return 0, nil, newError(UnsupportedSyntax, g[0].start, "expected parameter name")
 		}
 		if len(g) < 2 {
-			return Closure{}, newError(UnsupportedSyntax, g[0].start, "closure parameter requires a type")
+			return 0, nil, newError(UnsupportedSyntax, g[0].start, "closure parameter requires a type")
 		}
 		typeExpr, typeErr := parseType(g[1:])
 		if typeErr != nil {
-			return Closure{}, typeErr
+			return 0, nil, typeErr
 		}
 		params = append(params, Param{
 			Name:     g[0].text,
@@ -975,21 +1258,7 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine) (
 			TypeExpr: typeExpr,
 		})
 	}
-	if i >= len(tokens) || tokens[i].kind != tokenPunct || tokens[i].text != "{" {
-		return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
-	}
-	cl := Closure{Params: params, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
-	lp.pos++
-	// A closure body is a function boundary: loop depth does not carry in.
-	savedDepth := lp.loopDepth
-	lp.loopDepth = 0
-	body, err := lp.parseBlock()
-	lp.loopDepth = savedDepth
-	if err != nil {
-		return Closure{}, err.(*Error)
-	}
-	cl.Body = body
-	return cl, nil
+	return i, params, nil
 }
 
 func isValueToken(t token) bool {
