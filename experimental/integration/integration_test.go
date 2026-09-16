@@ -1,6 +1,10 @@
 package integration
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/san-smith/anuy/experimental/semantic"
+)
 
 func assertSingleDiagnostic(t *testing.T, result Result, want string) {
 	t.Helper()
@@ -587,5 +591,96 @@ func TestAnalyzeSourceReadonlyAliasingDoesNotInvalidate(t *testing.T) {
 	}
 	if len(result.Diagnostics) != 0 {
 		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceReportsUncheckedError(t *testing.T) {
+	// R1 / CONTRACTS §3: a declared `error?` binding read nowhere yields
+	// exactly one Warning at the declaration span.
+	result, err := AnalyzeSource("var err error? = f()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("result = %#v, want one UncheckedError", result.Diagnostics)
+	}
+	d := result.Diagnostics[0]
+	if d.Category != "UncheckedError" || d.Code != "ANUY5001" || d.Severity != semantic.SeverityWarning {
+		t.Fatalf("diagnostic = (%s, %s, %s), want (UncheckedError, ANUY5001, Warning)", d.Category, d.Code, d.Severity)
+	}
+	if d.Span.Start != 0 || d.Span.End != len("var err error? = f()") {
+		t.Fatalf("span = %v, want the declaration statement span", d.Span)
+	}
+}
+
+func TestAnalyzeSourceUncheckedErrorReadLifts(t *testing.T) {
+	result, err := AnalyzeSource("var err error? = f()\nvar logged = err\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics once the binding is read", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceUncheckedErrorConditionReadLifts(t *testing.T) {
+	result, err := AnalyzeSource("var err error? = f()\nvar v int = 1\nif err != nil {\nv\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics: the nil condition is a read", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceUncheckedErrorAssignmentDoesNotReArm(t *testing.T) {
+	// errcheck semantics: assignments without a read neither lift the
+	// warning nor add a second one.
+	result, err := AnalyzeSource("var err error? = f()\nerr = g()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "ANUY5001" {
+		t.Fatalf("result = %#v, want exactly one UncheckedError", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceBlankErrorDiscardExempt(t *testing.T) {
+	// GB-3: `_` creates no binding, so there is nothing to lint.
+	result, err := AnalyzeSource("var _ error? = f()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics for the blank discard", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceNonErrorTypesNotLinted(t *testing.T) {
+	// CONTRACTS §3.4: nothing outside declared `error?` is checked - plain
+	// and nilable non-error bindings stay out of the lint.
+	result, err := AnalyzeSource("var v int = 1\nvar u User? = get()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics for non-error bindings", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceTwoUncheckedErrorsReportEachOnce(t *testing.T) {
+	// One Warning per declaration, in declaration order.
+	result, err := AnalyzeSource("var a error? = f()\nvar b error? = g()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 2 {
+		t.Fatalf("result = %#v, want one UncheckedError per binding", result.Diagnostics)
+	}
+	for i, want := range []string{"a", "b"} {
+		_ = want
+		if d := result.Diagnostics[i]; d.Code != "ANUY5001" || d.Binding != semantic.BindingID(i+1) {
+			t.Fatalf("diagnostic %d = (%s, binding %d), want (ANUY5001, binding %d)", i, d.Code, d.Binding, i+1)
+		}
 	}
 }
