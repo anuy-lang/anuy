@@ -3,6 +3,7 @@ package integration
 import (
 	"testing"
 
+	"github.com/san-smith/anuy/experimental/parser"
 	"github.com/san-smith/anuy/experimental/semantic"
 )
 
@@ -682,5 +683,216 @@ func TestAnalyzeSourceTwoUncheckedErrorsReportEachOnce(t *testing.T) {
 		if d := result.Diagnostics[i]; d.Code != "ANUY5001" || d.Binding != semantic.BindingID(i+1) {
 			t.Fatalf("diagnostic %d = (%s, binding %d), want (ANUY5001, binding %d)", i, d.Code, d.Binding, i+1)
 		}
+	}
+}
+
+func TestAnalyzeSourceAssignLiteralEstablishesNonNull(t *testing.T) {
+	// §26 (story 08): a non-nil literal RHS re-establishes the narrowing
+	// after the §25 invalidation - the deref is proven again.
+	result, err := AnalyzeSource("var u User? = find()\nif u != nil {\nu = 42\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceAssignDeclaredNonNullEstablishes(t *testing.T) {
+	// §26: a declared non-null binding as RHS establishes the fact.
+	result, err := AnalyzeSource("var u User? = find()\nvar nn User = make()\nif u != nil {\nu = nn\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceAssignProvenBindingEstablishes(t *testing.T) {
+	// §26: a nilable binding with a live non-nil fact (proven on this path)
+	// classifies non-null and re-establishes the target.
+	result, err := AnalyzeSource("var u User? = find()\nvar p User? = find()\nif p != nil {\nif u != nil {\nu = p\nu.save()\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceAssignInferredNonNullEstablishes(t *testing.T) {
+	// Inference (§4): an untyped declaration classifies by its RHS; a
+	// non-null-classified binding re-establishes the target.
+	result, err := AnalyzeSource("var n = 42\nvar u User? = find()\nif u != nil {\nu = n\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceAssignNullThenNonNullEstablishes(t *testing.T) {
+	// §25 then §26, in order: the null assignment clears, the following
+	// non-null assignment re-establishes.
+	result, err := AnalyzeSource("var u User? = find()\nvar nn User = make()\nif u != nil {\nu = nil\nu = nn\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceAssignEstablishDoesNotSurviveJoin(t *testing.T) {
+	// Established on the then-path only (no outer proof): the join
+	// downgrades to unknown and the deref after the join stays unproven.
+	result, err := AnalyzeSource("var u User? = find()\nvar nn User = make()\nvar c bool = true\nif c {\nu = nn\n}\nu.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceAssignEstablishInvalidatedByFollowingUnknown(t *testing.T) {
+	// §25 first: an unknown call after the establishment clears it again.
+	result, err := AnalyzeSource("var u User? = find()\nvar nn User = make()\nif u != nil {\nu = nn\nu = find()\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceAssignNilDoesNotEstablish(t *testing.T) {
+	// Negative control: `nil` never establishes.
+	result, err := AnalyzeSource("var u User? = find()\nif u != nil {\nu = nil\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceAssignUnknownCallDoesNotEstablish(t *testing.T) {
+	// Negative control (RFC-002 §26 reproducer without result types): an
+	// unknown call stays unknown - nothing is established.
+	result, err := AnalyzeSource("var u User? = findUser()\nif u != nil {\nu = createUser()\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceAssignNavigationDoesNotEstablish(t *testing.T) {
+	// Negative control: navigation RHS is unknown (no field model, §28).
+	result, err := AnalyzeSource("var u User? = find()\nvar a Account? = find()\nif a != nil {\nif u != nil {\nu = a.owner\nu.save()\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceDeclarationDoesNotEstablish(t *testing.T) {
+	// §26 is about assignments; a declared nilable binding with a non-null
+	// initializer keeps its declared class - the deref stays unproven
+	// (RFC-001 §13: initialization is separate from nullability).
+	result, err := AnalyzeSource("var u User? = 42\nu.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceInferredNullableRequiresProof(t *testing.T) {
+	// Inference (Q2-A): an untyped binding initialized from a nullable value
+	// classifies nullable - the deref requires the proof.
+	result, err := AnalyzeSource("var u User? = find()\nvar x = u\nx.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceInferredNilRequiresProof(t *testing.T) {
+	// Inference: `var x = nil` is nullable - the deref requires the proof.
+	result, err := AnalyzeSource("var x = nil\nx.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceInferredNullableNarrowingLiftsProof(t *testing.T) {
+	// The inferred-nullable binding narrows like a declared one: inside the
+	// proven branch the deref is fine.
+	result, err := AnalyzeSource("var u User? = find()\nvar x = u\nif x != nil {\nx.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceInferredUnknownCallIsPlatformFree(t *testing.T) {
+	// Unknown keeps platform semantics (Kotlin T!): the deref stays free
+	// and nothing is established.
+	result, err := AnalyzeSource("var x = find()\nx.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceInferredLiteralIsFree(t *testing.T) {
+	result, err := AnalyzeSource("var x = 42\nx.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceNullableClosureParamRequiresProof(t *testing.T) {
+	// Declared `T?` parameters carry the nullable class (§27 stable
+	// bindings): the ordinary deref on the parameter requires the proof.
+	result, err := AnalyzeSource("var h = func(p User?) {\np.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAssignNullRecordsFlowNullableFact(t *testing.T) {
+	// Q3-A (story 08 types proposal): a null-classified assignment records
+	// the flow-nullable fact. No v1 consumer - the write is the seed for
+	// future flow-sensitive lints (CONTRACTS §2.4: tests reference facts).
+	program, err := parser.Parse("var u User? = find()\nu = nil\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := semantic.NewScope()
+	b := newBuilder()
+	b.emit(program.Statements, scope)
+	id := scope.Resolve("u")
+	if id == 0 {
+		t.Fatal("binding u not resolved")
+	}
+	if !b.flowNullable[id] {
+		t.Fatalf("flowNullable[%d] = false, want true after `u = nil`", id)
+	}
+	// A non-null-classified assignment does not record the fact.
+	program, err = parser.Parse("var u User? = find()\nu = 42\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope = semantic.NewScope()
+	b = newBuilder()
+	b.emit(program.Statements, scope)
+	if b.flowNullable[scope.Resolve("u")] {
+		t.Fatalf("flowNullable after `u = 42` = true, want false")
 	}
 }

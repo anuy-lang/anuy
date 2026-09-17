@@ -3,6 +3,7 @@ package integration
 import (
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/san-smith/anuy/experimental/parser"
 	"github.com/san-smith/anuy/experimental/semantic"
@@ -83,6 +84,17 @@ type builder struct {
 	// nilable marks bindings declared with a nullable `T?` type - the only
 	// nilability evidence in the type-free experimental layer.
 	nilable map[semantic.BindingID]bool
+	// classes carries the static nullability class per binding (story 08,
+	// G1 decision): declared named types classify by their `?`, untyped
+	// declarations infer from the RHS (§4). The class is set once at the
+	// declaration site and never changes with the flow; unknown is the
+	// zero value and keeps platform semantics.
+	classes map[semantic.BindingID]semantic.Nullability
+	// flowNullable records bindings whose latest assignment classified
+	// null (`x = nil`, Q3-A of the story 08 types proposal). No v1
+	// consumer - the seed for future flow-sensitive lints; consumers bring
+	// their own join plumbing.
+	flowNullable map[semantic.BindingID]bool
 	// closureMutates registers, per closure binding, the captured bindings
 	// its body assigns (RFC-003 §85 invalidation).
 	closureMutates map[semantic.BindingID][]semantic.BindingID
@@ -107,6 +119,8 @@ func newBuilder() *builder {
 		nonNil:         []map[semantic.BindingID]bool{{}},
 		nextBlockID:    1,
 		nilable:        map[semantic.BindingID]bool{},
+		classes:        map[semantic.BindingID]semantic.Nullability{},
+		flowNullable:   map[semantic.BindingID]bool{},
 		closureMutates: map[semantic.BindingID][]semantic.BindingID{},
 		declared:       map[semantic.BindingID]bool{},
 		assigned:       map[semantic.BindingID]bool{},
@@ -144,8 +158,9 @@ func (b *builder) declare(id semantic.BindingID) {
 func (b *builder) initialize(id semantic.BindingID) {
 	b.add(semantic.Assign(id))
 	b.facts[b.cur][id] = true
-	// RFC-002 §25: assignment invalidates narrowing; without RHS types the
-	// layer cannot re-establish it (§26 is out of slice).
+	// RFC-002 §25: assignment invalidates narrowing. Re-establishment (§26)
+	// is the caller's move - the assignment path classifies the RHS and
+	// emits the Assume after this invalidation (story 08).
 	b.nonNil[b.cur][id] = false
 	b.assigned[id] = true
 }
@@ -155,6 +170,77 @@ func (b *builder) initialize(id semantic.BindingID) {
 func (b *builder) assume(id semantic.BindingID) {
 	b.add(semantic.Assume(id))
 	b.nonNil[b.cur][id] = true
+}
+
+// needsNonNilProof reports whether an ordinary member access on the binding
+// requires the non-nil proof: a declared `T?` (story 05 nilable set) or an
+// inferred-nullable class (story 08 inference, Q2-A). Unknown classes keep
+// the platform semantics - dereference free, nothing established.
+func (b *builder) needsNonNilProof(id semantic.BindingID) bool {
+	return b.nilable[id] || b.classes[id] == semantic.NullabilityNullable
+}
+
+// classifyValue assigns the nullability class of an RHS value per the
+// accepted classification (story 08 types proposal §3): non-nil literals,
+// declared non-null bindings, live non-nil facts and non-null-classified
+// bindings are non-null; `nil` and unproven nullable bindings are null;
+// calls (no signatures in this slice), navigation, composite raw text and
+// closures are unknown and never establish (CONTRACTS §2.1).
+func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) semantic.Nullability {
+	if value == nil || value.Closure != nil || value.Navigation != nil {
+		return semantic.NullabilityUnknown
+	}
+	if value.Text == "nil" {
+		return semantic.NullabilityNullable
+	}
+	if len(value.Idents) == 1 && value.Text == value.Idents[0] {
+		id := scope.Resolve(value.Idents[0])
+		if id == 0 {
+			return semantic.NullabilityUnknown
+		}
+		if b.nilable[id] {
+			if b.nonNil[b.cur][id] {
+				return semantic.NullabilityNonNull
+			}
+			return semantic.NullabilityNullable
+		}
+		return b.classes[id]
+	}
+	if len(value.Idents) == 0 && value.Text != "" {
+		return semantic.NullabilityNonNull
+	}
+	return semantic.NullabilityUnknown
+}
+
+// establish applies §26 after the §25 invalidation of an assignment: a
+// non-null-classified RHS re-establishes the narrowing (the Assume after
+// the Assign), a null RHS records the flow-nullable fact (Q3-A, no
+// consumers in v1), unknown changes nothing.
+func (b *builder) establish(id semantic.BindingID, value *parser.Value, scope *semantic.Scope) {
+	switch b.classifyValue(value, scope) {
+	case semantic.NullabilityNonNull:
+		b.assume(id)
+	case semantic.NullabilityNullable:
+		b.flowNullable[id] = true
+	}
+}
+
+// establishAssignments pairs assignment targets with their RHS values by
+// index and applies §26 (story 08). A name/value count mismatch leaves the
+// extra targets unestablished - the tuple evaluation order is not modeled.
+func (b *builder) establishAssignments(statement *parser.Statement, scope *semantic.Scope) {
+	for i := range statement.Values {
+		if i >= len(statement.Names) {
+			return
+		}
+		name := statement.Names[i]
+		if name == "_" {
+			continue
+		}
+		if id := scope.Resolve(name); id != 0 {
+			b.establish(id, &statement.Values[i], scope)
+		}
+	}
 }
 
 func (b *builder) isNonNil(id semantic.BindingID) bool {
@@ -190,11 +276,18 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		b.readIdents(statement, scope)
 		declared := make([]string, 0, len(statement.Names))
 		targets := make([]semantic.BindingID, 0, len(statement.Names))
-		for _, name := range statement.Names {
+		for i, name := range statement.Names {
 			if name == "_" {
 				// GB-3 variant A: the blank identifier receives a value but
 				// creates no binding (RFC-003 §65).
 				continue
+			}
+			// Inference (§4, story 08) reads the RHS class before the
+			// declaration enters its own scope - matching readIdents, which
+			// resolves initializer idents before the declaration (RFC-003 §36).
+			var inferred semantic.Nullability
+			if statement.TypeExpr == nil && i < len(statement.Values) {
+				inferred = b.classifyValue(&statement.Values[i], scope)
 			}
 			if serr := scope.Declare(name); serr != nil {
 				b.report(serr.Category, statement.Span)
@@ -204,11 +297,25 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			id := scope.Resolve(name)
 			targets = append(targets, id)
 			b.declare(id)
-			if statement.TypeExpr != nil && statement.TypeExpr.Nullable {
-				b.nilable[id] = true
-				if statement.TypeExpr.Name == "error" {
-					b.errSpans[id] = statement.Span
+			if statement.TypeExpr != nil {
+				if statement.TypeExpr.Nullable {
+					b.nilable[id] = true
+					if statement.TypeExpr.Name == "error" {
+						b.errSpans[id] = statement.Span
+					}
 				}
+				// Declared class (story 08, G1): a named type is non-null or
+				// nullable by its `?`; composite spellings stay unknown -
+				// their nullability binding is outside the slice.
+				if statement.TypeExpr.Kind == parser.NamedType {
+					if statement.TypeExpr.Nullable {
+						b.classes[id] = semantic.NullabilityNullable
+					} else {
+						b.classes[id] = semantic.NullabilityNonNull
+					}
+				}
+			} else {
+				b.classes[id] = inferred
 			}
 		}
 		if statement.Values != nil {
@@ -233,6 +340,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			targets = append(targets, scope.Resolve(name))
 			b.initialize(scope.Resolve(name))
 		}
+		b.establishAssignments(statement, scope)
 		b.analyzeClosures(statement, scope, targets)
 	case parser.Read:
 		b.readIdent(statement.Names[0], scope, statement.Span, nil)
@@ -469,7 +577,7 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 		// SafeNavigate). Unresolved receivers stay in the F-G3 tolerance
 		// zone.
 		if value.Navigation != nil && len(value.Navigation.Segments) > 0 && !value.Navigation.Segments[0].Safe {
-			if id := scope.Resolve(value.Navigation.Receiver); id != 0 && b.nilable[id] {
+			if id := scope.Resolve(value.Navigation.Receiver); id != 0 && b.needsNonNilProof(id) {
 				b.add(semantic.Deref(id))
 			}
 		}
@@ -540,6 +648,9 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) []se
 		}
 		id := bodyScope.Resolve(p.Name)
 		paramIDs[id] = true
+		// §27 stable bindings: parameter types carry the declared class
+		// (story 08) - a `T?` parameter gates ordinary member access.
+		b.classes[id] = nullabilityOfParam(p)
 		entry = append(entry, semantic.Declare(id), semantic.Assign(id))
 	}
 	seen := map[semantic.BindingID]bool{}
@@ -558,16 +669,18 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) []se
 		}
 	}
 	cb := &builder{
-		blocks:      []semantic.Block{{ID: 1, Operations: entry}},
-		facts:       []map[semantic.BindingID]bool{{}},
-		nonNil:      []map[semantic.BindingID]bool{{}},
-		nextBlockID: 1,
-		nilable:     b.nilable,
-		declared:    map[semantic.BindingID]bool{},
-		assigned:    map[semantic.BindingID]bool{},
-		errSpans:    map[semantic.BindingID]parser.Span{},
-		reads:       map[semantic.BindingID]bool{},
-		pure:        b.pure,
+		blocks:       []semantic.Block{{ID: 1, Operations: entry}},
+		facts:        []map[semantic.BindingID]bool{{}},
+		nonNil:       []map[semantic.BindingID]bool{{}},
+		nextBlockID:  1,
+		nilable:      b.nilable,
+		classes:      b.classes,
+		flowNullable: b.flowNullable,
+		declared:     map[semantic.BindingID]bool{},
+		assigned:     map[semantic.BindingID]bool{},
+		errSpans:     map[semantic.BindingID]parser.Span{},
+		reads:        map[semantic.BindingID]bool{},
+		pure:         b.pure,
 	}
 	cb.emit(cl.Body, bodyScope)
 	// Closure bodies participate in the same lint and read accounting:
@@ -664,7 +777,7 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 	}
 	b.add(semantic.Read(id))
 	if len(call.Segments) > 0 {
-		if !call.Segments[0].Safe && b.nilable[id] {
+		if !call.Segments[0].Safe && b.needsNonNilProof(id) {
 			b.add(semantic.Deref(id))
 		}
 		// Решение 3b: the proof is required at the call point (the Deref
@@ -781,4 +894,49 @@ func (b *builder) report(category semantic.DiagnosticCategory, span parser.Span)
 		panic("integration: unregistered diagnostic category " + category)
 	}
 	b.diagnostics = append(b.diagnostics, semantic.NewDiagnostic(desc, 0, semantic.SourceSpan{Start: span.Start, End: span.End}))
+}
+
+// nullabilityOfParam classifies a declared parameter type (story 08): a
+// named type is non-null or nullable by its `?`; composite spellings stay
+// unknown - their nullability binding is outside the slice.
+func nullabilityOfParam(p parser.Param) semantic.Nullability {
+	if p.TypeExpr != nil {
+		if p.TypeExpr.Kind == parser.NamedType {
+			if p.TypeExpr.Nullable {
+				return semantic.NullabilityNullable
+			}
+			return semantic.NullabilityNonNull
+		}
+		return semantic.NullabilityUnknown
+	}
+	return nullabilityOfTypeName(p.Type)
+}
+
+// nullabilityOfTypeName classifies a raw type-name spelling: a simple name
+// is non-null, the same with a trailing `?` is nullable, everything else
+// (slice/map/pointer composites) stays unknown.
+func nullabilityOfTypeName(t string) semantic.Nullability {
+	base := strings.TrimSuffix(t, "?")
+	if base == t {
+		if isSimpleTypeName(t) {
+			return semantic.NullabilityNonNull
+		}
+		return semantic.NullabilityUnknown
+	}
+	if isSimpleTypeName(base) {
+		return semantic.NullabilityNullable
+	}
+	return semantic.NullabilityUnknown
+}
+
+func isSimpleTypeName(t string) bool {
+	if t == "" {
+		return false
+	}
+	for i, r := range t {
+		if !unicode.IsLetter(r) && r != '_' && (i == 0 || !unicode.IsDigit(r)) {
+			return false
+		}
+	}
+	return true
 }
