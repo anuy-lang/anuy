@@ -896,3 +896,135 @@ func TestAssignNullRecordsFlowNullableFact(t *testing.T) {
 		t.Fatalf("flowNullable after `u = 42` = true, want false")
 	}
 }
+
+func TestAnalyzeSourcePureMethodKeepsReceiverNarrowing(t *testing.T) {
+	// F-C2 / Q2-A: a `//anuy:pure` method opts out of the receiver
+	// invalidation (3b) - the proof survives the call.
+	result, err := AnalyzeSource("//anuy:pure\nfunc T.m() {\n}\nvar u User? = find()\nif u != nil {\nu.m()\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceMethodMutatorsInvalidateCaptures(t *testing.T) {
+	// 3a for methods (Q1-A composition): the call invalidates the narrowing
+	// of the bindings the method body assigns.
+	result, err := AnalyzeSource("var u User? = find()\nvar c User? = find()\nfunc T.m() {\nc = nil\n}\nif u != nil {\nif c != nil {\nu.m()\nc.save()\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceDuplicateMethodReports(t *testing.T) {
+	// Q1-A: the flat method namespace - a duplicate method name rejects.
+	result, err := AnalyzeSource("func T.m() {\n}\nfunc U.m() {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "SameScopeRedeclaration")
+}
+
+func TestAnalyzeSourceMethodNameCollisionWithFunctionReports(t *testing.T) {
+	// Q1-A: one flat namespace - a method name colliding with a declared
+	// function rejects, in both orders.
+	result, err := AnalyzeSource("func f() {\n}\nfunc T.f() {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "SameScopeRedeclaration")
+	result, err = AnalyzeSource("func T.g() {\n}\nfunc g() {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "SameScopeRedeclaration")
+}
+
+func TestAnalyzeSourceBareMethodNameIsUnknownRead(t *testing.T) {
+	// Q1-A: methods bind no scope name - the bare call stays an unresolved
+	// callee (D-01), not a function call.
+	result, err := AnalyzeSource("func T.m() {\n}\nm()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownRead")
+}
+
+func TestAnalyzeSourceSafeCallNeedsNoProof(t *testing.T) {
+	// §33: the safe call requires no receiver proof; the call itself still
+	// invalidates the narrowing (the method may write).
+	result, err := AnalyzeSource("var u User? = find()\nfunc T.m() {\n}\nu?.m()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceSafeCallInvalidatesReceiverNarrowing(t *testing.T) {
+	// §33 desugaring: the call happens on the taken path, so the narrowing
+	// is dropped afterwards (3b applies to the safe form too).
+	result, err := AnalyzeSource("var u User? = find()\nfunc T.m() {\n}\nif u != nil {\nu?.m()\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceKnownNonNullCallResultEstablishes(t *testing.T) {
+	// §26 full reproducer (Q4-A): `createUser() -> User` classifies the RHS
+	// non-null and re-establishes the narrowing.
+	result, err := AnalyzeSource("func createUser() User {\nreturn make()\n}\nvar u User? = find()\nif u != nil {\nu = createUser()\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceKnownNullableCallResultDoesNotEstablish(t *testing.T) {
+	// A `T?` result classifies null - the assignment stays unproven.
+	result, err := AnalyzeSource("func findUser() User? {\nreturn make()\n}\nvar u User? = find()\nif u != nil {\nu = findUser()\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceVoidCallResultDoesNotEstablish(t *testing.T) {
+	// A void call has no result value - unknown, nothing establishes.
+	result, err := AnalyzeSource("func run() {\n}\nvar u User? = find()\nif u != nil {\nu = run()\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceMethodResultClassifiesRHS(t *testing.T) {
+	// A declared method's result type feeds the call-shape classification:
+	// `c = c.clone()` with `func T.clone() User` re-establishes.
+	result, err := AnalyzeSource("var c User? = find()\nfunc T.clone() User {\nreturn make()\n}\nif c != nil {\nc = c.clone()\nc.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceReturnValueReadLiftsUncheckedErrorLint(t *testing.T) {
+	// `return expr` reads participate in the flow: the read lifts the R1
+	// lint on the returned binding.
+	result, err := AnalyzeSource("var err error? = make()\nfunc find() error? {\nreturn err\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}

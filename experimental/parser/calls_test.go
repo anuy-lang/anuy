@@ -142,11 +142,14 @@ func TestParseRejectsTrailingCommaArgument(t *testing.T) {
 }
 
 func TestParseRejectsSafeCallStatement(t *testing.T) {
-	// Story 05 deferred-reject: the safe-call statement stays rejected.
-	perr := parseReject(t, "user?.save()\n")
-	if perr.Category != UnsupportedSyntax {
-		t.Fatalf("error = %s, want UnsupportedSyntax", perr.Category)
+	// Story 08 Q3-A (RFC-002 §33/§42) flips the story 05 deferred-reject:
+	// the safe-call statement parses; ordinary-after-safe stays rejected
+	// (§49). The acceptance path is pinned in TestParseSafeCallStatement.
+	_, err := Parse("user?.save.address()")
+	if err == nil {
+		t.Fatal("ordinary selector after safe selector accepted in a call statement")
 	}
+	requireCategory(t, err, UnsupportedSyntax)
 }
 
 func TestParseRejectsFunctionDeclarationWithoutParameterList(t *testing.T) {
