@@ -157,6 +157,10 @@ type Closure struct {
 	Params []Param
 	Body   []Statement
 	Span   Span
+	// HasResult/ResultNullable mirror the declaration-form result type
+	// (story 08); closures-as-values stay result-less.
+	HasResult      bool
+	ResultNullable bool
 }
 
 // Param is a closure parameter. Type preserves source spelling; TypeExpr is
@@ -194,6 +198,17 @@ type Statement struct {
 	// observable writes.
 	Closure *Closure
 	Pure    bool
+	// Method is non-empty for a method declaration (story 08, owner
+	// decision 2026-09-17, task-1-8-1-2): the receiver type name as written
+	// (`User` in `func User.age() int`). The declared name is Names[0];
+	// methods bind no scope name - resolution goes through the flat method
+	// table.
+	Method string
+	// HasResult records a declared result type (`func f() User`, RFC-002
+	// §40 spelling): `return expr` is valid only inside such a declaration.
+	HasResult bool
+	// ResultNullable records a declared nullable result type (`T?`).
+	ResultNullable bool
 	// Call is non-nil for a call statement (story 05 variant A): Receiver is
 	// the called binding or navigation root, Segments the ordinary member
 	// chain whose last segment carries the call. The call value is discarded;
@@ -247,6 +262,12 @@ type lineParser struct {
 	// It resets to zero inside closure literals: a jump never crosses a
 	// function boundary.
 	loopDepth int
+	// funcStack tracks declared result types of the enclosing
+	// function/method bodies (story 08): `return expr` is valid only when
+	// the top frame carries a result. Closure-literal frames push false,
+	// so a `return expr` binds to the nearest declaration, never to an
+	// outer one.
+	funcStack []bool
 }
 
 func (lp *lineParser) parseStatements() ([]Statement, error) {
@@ -411,52 +432,99 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 // `identifier.` — a call statement candidate (story 05 variant A). Closure
 // literals (`func (`) are rejected inside parseCallStatement.
 func isCallStatementStart(tokens []token) bool {
-	return len(tokens) >= 3 &&
-		tokens[0].kind == tokenIdent && !reservedWords[tokens[0].text] &&
-		(isPunct(tokens[1], "(") || isPunct(tokens[1], "."))
+	if len(tokens) < 3 || tokens[0].kind != tokenIdent || reservedWords[tokens[0].text] {
+		return false
+	}
+	if isPunct(tokens[1], "(") || isPunct(tokens[1], ".") {
+		return true
+	}
+	if isPunct(tokens[1], "?") {
+		// A safe-tail call statement (story 08 Q3-A): `u?.m()`. Lines that
+		// carry an assignment keep the assignment errors - the safe-
+		// navigation target rejection preserves its offset.
+		for _, t := range tokens {
+			if isAssign(t) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // parseFunctionDecl parses the story 07 declaration form `func name(params)
-// { body }` (owner decision 2026-09-17, task-1-7-1-1): the declared name
-// binds a closure value; parameters and body reuse the closure grammar.
+// { body }` and the story 08 extensions (owner decision 2026-09-17,
+// task-1-8-1-2): the method form `func T.name(params) [ret] { body }`
+// (RFC-002 §40) and the result type after the parameter list. The declared
+// name binds a closure value; parameters and body reuse the closure grammar.
 func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statement, error) {
 	name := tokens[1]
 	if name.text == "_" || reservedWords[name.text] {
 		return Statement{}, newError(UnsupportedSyntax, name.start, "invalid function name")
 	}
-	if len(tokens) < 3 || !isPunct(tokens[2], "(") {
+	method := ""
+	params := 2
+	if len(tokens) >= 4 && isPunct(tokens[2], ".") {
+		// `func T.name(params) …` - the method form; the receiver type stays
+		// raw text (the flat method table resolves by name alone).
+		m := tokens[3]
+		if m.kind != tokenIdent || m.text == "_" || reservedWords[m.text] {
+			return Statement{}, newError(UnsupportedSyntax, m.start, "invalid method name")
+		}
+		method, name, params = tokens[1].text, m, 4
+	}
+	if params >= len(tokens) || !isPunct(tokens[params], "(") {
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "function declaration requires a parameter list")
 	}
 	pure := lp.pos > 0 && lp.lines[lp.pos-1].text == "//anuy:pure"
 	// Reuse the closure parser on the token slice without the name: token
 	// offsets are absolute, so parameter types keep their source spelling.
-	shifted := make([]token, 0, len(tokens)-1)
+	shifted := make([]token, 0, len(tokens)-params+1)
 	shifted = append(shifted, tokens[0])
-	shifted = append(shifted, tokens[2:]...)
-	cl, cerr := lp.parseClosure(shifted, 0, line)
+	shifted = append(shifted, tokens[params:]...)
+	cl, cerr := lp.parseClosure(shifted, 0, line, true)
 	if cerr != nil {
 		return Statement{}, cerr
 	}
 	return Statement{
-		Kind:    Function,
-		Names:   []string{name.text},
-		Closure: &cl,
-		Pure:    pure,
-		Span:    Span{Start: line.offset, End: line.offset + len(line.text)},
+		Kind:           Function,
+		Names:          []string{name.text},
+		Method:         method,
+		HasResult:      cl.HasResult,
+		ResultNullable: cl.ResultNullable,
+		Closure:        &cl,
+		Pure:           pure,
+		Span:           Span{Start: line.offset, End: line.offset + len(line.text)},
 	}, nil
 }
 
-// parseReturn parses the bare `return` statement (story 07, owner decision
-// 2026-09-17): an early exit of the enclosing function. A value form waits
-// for the typed slice.
+// parseReturn parses the `return` statement. The bare form is an early
+// exit of the enclosing function (story 07); `return expr` (story 08) is
+// valid only inside a declaration with a declared result type - the
+// funcStack frame of the nearest closure/function boundary decides.
 func (lp *lineParser) parseReturn(tokens []token, line sourceLine) (Statement, error) {
-	if len(tokens) != 1 {
+	if len(tokens) == 1 {
+		lp.pos++
+		return Statement{
+			Kind: Return,
+			Span: Span{Start: line.offset, End: line.offset + len(line.text)},
+		}, nil
+	}
+	if len(lp.funcStack) == 0 || !lp.funcStack[len(lp.funcStack)-1] {
 		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return takes no value")
+	}
+	values, verr := parseValueList(tokens, 1, line)
+	if verr != nil {
+		return Statement{}, verr
+	}
+	if len(values) != 1 {
+		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return takes a single value")
 	}
 	lp.pos++
 	return Statement{
-		Kind: Return,
-		Span: Span{Start: line.offset, End: line.offset + len(line.text)},
+		Kind:   Return,
+		Values: values,
+		Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
 	}, nil
 }
 
@@ -552,9 +620,8 @@ func callChainScan(tokens []token) ([]NavigationSegment, int, *Error) {
 		}
 		pos++
 		if pos < len(tokens) && isPunct(tokens[pos], "(") {
-			if safeTail {
-				return nil, -1, newError(UnsupportedSyntax, tokens[pos].start, "call statement must end with an ordinary call")
-			}
+			// A call on a safe tail is a valid statement (story 08 Q3-A,
+			// RFC-002 §33/§42); ordinary-after-safe stays rejected above.
 			segments[len(segments)-1].Call = true
 			return segments, pos, nil
 		}
@@ -587,6 +654,9 @@ func (lp *lineParser) parseNavigationCall(tokens []token, line sourceLine) (Stat
 	navigation, _, recognized, navErr := navigationMetadata(tokens)
 	if navErr != nil {
 		return Statement{}, navErr
+	}
+	if navigation == nil || len(navigation.Segments) == 0 {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "call statement must end with an ordinary call")
 	}
 	last := navigation.Segments[len(navigation.Segments)-1]
 	if !recognized || !last.Call || last.Safe {
@@ -1117,7 +1187,7 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 			if len(names) != 1 {
 				return Statement{}, newError(UnsupportedSyntax, tokens[i+1].start, "closure initializer requires a single binding")
 			}
-			cl, cerr := lp.parseClosure(tokens, i+1, line)
+			cl, cerr := lp.parseClosure(tokens, i+1, line, false)
 			if cerr != nil {
 				return Statement{}, cerr
 			}
@@ -1151,7 +1221,7 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 		if len(names) != 1 {
 			return Statement{}, newError(UnsupportedSyntax, tokens[i+1].start, "closure initializer requires a single binding")
 		}
-		cl, cerr := lp.parseClosure(tokens, i+1, line)
+		cl, cerr := lp.parseClosure(tokens, i+1, line, false)
 		if cerr != nil {
 			return Statement{}, cerr
 		}
@@ -1199,20 +1269,45 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 
 // parseClosure parses `func(Params) {` plus its block. lp.pos is advanced
 // past every consumed line.
-func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine) (Closure, *Error) {
+func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine, allowResult bool) (Closure, *Error) {
 	i, params, err := parseClosureParamGroups(tokens, start+1, line)
 	if err != nil {
 		return Closure{}, err
 	}
+	hasResult, resultNullable := false, false
+	if i < len(tokens) && !(tokens[i].kind == tokenPunct && tokens[i].text == "{") {
+		// An optional result type before the block (story 08 Q4-A, RFC-002
+		// §40 spelling: `func f() User? {`). Types carry no braces in this
+		// grammar, so the block opener terminates the type.
+		if !allowResult {
+			return Closure{}, newError(UnsupportedSyntax, tokens[i].start, "closure literal takes no result type")
+		}
+		j := i
+		for j < len(tokens) && !(tokens[j].kind == tokenPunct && tokens[j].text == "{") {
+			j++
+		}
+		if j >= len(tokens) {
+			return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
+		}
+		typeExpr, typeErr := parseType(tokens[i:j])
+		if typeErr != nil {
+			return Closure{}, typeErr
+		}
+		hasResult, resultNullable = true, typeExpr.Nullable
+		i = j
+	}
 	if i >= len(tokens) || tokens[i].kind != tokenPunct || tokens[i].text != "{" {
 		return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
 	}
-	cl := Closure{Params: params, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
+	cl := Closure{Params: params, HasResult: hasResult, ResultNullable: resultNullable, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
 	lp.pos++
-	// A closure body is a function boundary: loop depth does not carry in.
+	// A closure body is a function boundary: loop depth does not carry in,
+	// and the result-type frame scopes `return expr` (story 08).
 	savedDepth := lp.loopDepth
 	lp.loopDepth = 0
+	lp.funcStack = append(lp.funcStack, hasResult)
 	body, berr := lp.parseBlock()
+	lp.funcStack = lp.funcStack[:len(lp.funcStack)-1]
 	lp.loopDepth = savedDepth
 	if berr != nil {
 		return Closure{}, berr.(*Error)

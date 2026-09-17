@@ -72,6 +72,21 @@ type loopContext struct {
 	exitNN    map[semantic.BindingID]bool
 }
 
+// methodInfo is the flat-table entry of a declared method (story 08):
+// result nullability feeds the call-shape classification, purity opts the
+// call out of both effects (3a+3b).
+type methodInfo struct {
+	hasResult      bool
+	resultNullable bool
+	pure           bool
+}
+
+// declResult mirrors a declared function result type (story 08 Q4-A).
+type declResult struct {
+	hasResult      bool
+	resultNullable bool
+}
+
 type builder struct {
 	blocks      []semantic.Block
 	facts       []map[semantic.BindingID]bool // initialization facts at the end of each block
@@ -110,6 +125,16 @@ type builder struct {
 	// effects proposal): a trusted contract - their calls apply no
 	// mutator set.
 	pure map[semantic.BindingID]bool
+	// methods is the flat method table (story 08 Q1-A): methods bind no
+	// scope names and resolve by unique name; duplicates and collisions
+	// with scope names reject.
+	methods map[string]methodInfo
+	// methodMutates registers, per method name, the captured bindings its
+	// body assigns - the 3a half of the method-call effect.
+	methodMutates map[string][]semantic.BindingID
+	// funcResults records declared function result types (story 08 Q4-A)
+	// for the RHS call-shape classification (§26 establishment).
+	funcResults map[string]declResult
 }
 
 func newBuilder() *builder {
@@ -127,6 +152,9 @@ func newBuilder() *builder {
 		errSpans:       map[semantic.BindingID]parser.Span{},
 		reads:          map[semantic.BindingID]bool{},
 		pure:           map[semantic.BindingID]bool{},
+		methods:        map[string]methodInfo{},
+		methodMutates:  map[string][]semantic.BindingID{},
+		funcResults:    map[string]declResult{},
 	}
 }
 
@@ -187,8 +215,11 @@ func (b *builder) needsNonNilProof(id semantic.BindingID) bool {
 // calls (no signatures in this slice), navigation, composite raw text and
 // closures are unknown and never establish (CONTRACTS §2.1).
 func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) semantic.Nullability {
-	if value == nil || value.Closure != nil || value.Navigation != nil {
+	if value == nil || value.Closure != nil {
 		return semantic.NullabilityUnknown
+	}
+	if value.Navigation != nil {
+		return b.classifyNavigationValue(value.Navigation)
 	}
 	if value.Text == "nil" {
 		return semantic.NullabilityNullable
@@ -209,7 +240,59 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 	if len(value.Idents) == 0 && value.Text != "" {
 		return semantic.NullabilityNonNull
 	}
+	if strings.HasSuffix(value.Text, "()") {
+		// A raw call shape (`name()`, `a.b()`): a declared result type
+		// classifies the value (story 08 Q4-A); unresolved and void calls
+		// stay unknown (CONTRACTS §2.1).
+		return b.classifyCallShape(strings.TrimSuffix(value.Text, "()"))
+	}
 	return semantic.NullabilityUnknown
+}
+
+// classifyNavigationValue classifies a selector-chain value: a plain
+// member read has no model (no fields, §28) and stays unknown; a resolved
+// method call carries its declared result (story 08 Q4-A), lifted to
+// nullable through safe navigation (RFC-002 §38).
+func (b *builder) classifyNavigationValue(nav *parser.NavigationExpr) semantic.Nullability {
+	last := nav.Segments[len(nav.Segments)-1]
+	if !last.Call {
+		return semantic.NullabilityUnknown
+	}
+	info, ok := b.methods[last.Name]
+	if !ok || !info.hasResult {
+		return semantic.NullabilityUnknown
+	}
+	if last.Safe || info.resultNullable {
+		return semantic.NullabilityNullable
+	}
+	return semantic.NullabilityNonNull
+}
+
+// classifyCallShape resolves a raw `name()` / `a.b()` RHS call shape
+// against the declared functions and the flat method table (story 08
+// Q4-A): a known non-null result classifies non-null, a nullable result -
+// null; void and unresolved shapes stay unknown and never establish.
+func (b *builder) classifyCallShape(prefix string) semantic.Nullability {
+	if i := strings.LastIndex(prefix, "."); i >= 0 {
+		if info, ok := b.methods[prefix[i+1:]]; ok {
+			return classifyDeclResult(info.hasResult, info.resultNullable)
+		}
+		return semantic.NullabilityUnknown
+	}
+	if res, ok := b.funcResults[prefix]; ok {
+		return classifyDeclResult(res.hasResult, res.resultNullable)
+	}
+	return semantic.NullabilityUnknown
+}
+
+func classifyDeclResult(hasResult, resultNullable bool) semantic.Nullability {
+	if !hasResult {
+		return semantic.NullabilityUnknown
+	}
+	if resultNullable {
+		return semantic.NullabilityNullable
+	}
+	return semantic.NullabilityNonNull
 }
 
 // establish applies §26 after the §25 invalidation of an assignment: a
@@ -349,7 +432,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 	case parser.Function:
 		b.emitFunction(statement, scope)
 	case parser.Return:
-		b.emitReturn()
+		b.emitReturn(statement, scope)
 	case parser.If:
 		b.emitIf(statement, scope)
 	case parser.Loop:
@@ -780,8 +863,19 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 		if !call.Segments[0].Safe && b.needsNonNilProof(id) {
 			b.add(semantic.Deref(id))
 		}
-		// Решение 3b: the proof is required at the call point (the Deref
-		// above) and dropped after it - chained calls need re-proof.
+		// A resolved method (story 08): purity opts out of both effects
+		// (Q2-A) - no receiver invalidation (3b), no capture mutators (3a);
+		// otherwise the call invalidates the receiver and the method's
+		// mutated captures.
+		if info, ok := b.methods[call.Segments[len(call.Segments)-1].Name]; ok {
+			if !info.pure {
+				mutators := append([]semantic.BindingID{id}, b.methodMutates[call.Segments[len(call.Segments)-1].Name]...)
+				b.add(semantic.Call(mutators...))
+			}
+			return
+		}
+		// Unresolved member call: the conservative receiver invalidation
+		// stays (story 07, решение 3b - the Rust &mut self analogue).
 		b.add(semantic.Call(id))
 		return
 	}
@@ -794,13 +888,26 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 // binds a closure value, so the body is analyzed at the creation point like
 // a closure literal - self-recursion resolves through the scope, and the
 // body's mutated captures register in the mutator registry (CONTRACTS
-// story 07 §1). `//anuy:pure` marks the trusted no-writes contract.
+// story 07 §1). `//anuy:pure` marks the trusted no-writes contract. The
+// declared result type (story 08 Q4-A) feeds the RHS call-shape
+// classification. The method form dispatches to emitMethod.
 func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scope) {
-	if serr := scope.Declare(statement.Names[0]); serr != nil {
+	if statement.Method != "" {
+		b.emitMethod(statement, scope)
+		return
+	}
+	name := statement.Names[0]
+	// One flat namespace (story 08 Q1-A): a function name colliding with a
+	// declared method rejects.
+	if _, exists := b.methods[name]; exists {
+		b.report(semantic.SameScopeRedeclaration, statement.Span)
+		return
+	}
+	if serr := scope.Declare(name); serr != nil {
 		b.report(serr.Category, statement.Span)
 		return
 	}
-	id := scope.Resolve(statement.Names[0])
+	id := scope.Resolve(name)
 	b.declare(id)
 	b.initialize(id)
 	mutators := b.analyzeClosure(statement.Closure, scope)
@@ -808,13 +915,48 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	if statement.Pure {
 		b.pure[id] = true
 	}
+	b.funcResults[name] = declResult{hasResult: statement.HasResult, resultNullable: statement.ResultNullable}
 }
 
-// emitReturn lowers the bare `return` statement (story 07): the flow of the
-// enclosing function terminates here. Following statements start a fresh
-// block with no incoming edges - the analyzer skips unreachable blocks, so
-// their reads report nothing.
-func (b *builder) emitReturn() {
+// emitMethod lowers a story 08 method declaration (RFC-002 §40 form):
+// methods bind no scope name - the flat table resolves calls by unique
+// name; duplicates and collisions with scope names reject (Q1-A). The body
+// analyzes through the closure path (receiver access is not modeled in
+// v1); its mutated captures register as the method's 3a mutator set.
+// `//anuy:pure` opts the method out of both call effects (Q2-A, F-C2).
+func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope) {
+	name := statement.Names[0]
+	if _, exists := b.methods[name]; exists {
+		b.report(semantic.SameScopeRedeclaration, statement.Span)
+		return
+	}
+	if scope.Resolve(name) != 0 {
+		b.report(semantic.SameScopeRedeclaration, statement.Span)
+		return
+	}
+	b.methods[name] = methodInfo{
+		hasResult:      statement.HasResult,
+		resultNullable: statement.ResultNullable,
+		pure:           statement.Pure,
+	}
+	// Registered before the body: a self-recursive call resolves like a
+	// function's self-recursion (story 07 precedent; the mutator set the
+	// self-call sees stays the one known at that point).
+	mutators := b.analyzeClosure(statement.Closure, scope)
+	b.methodMutates[name] = unionBindings(nil, mutators)
+}
+
+// emitReturn lowers the `return` statement: the flow of the enclosing
+// function terminates here. A `return expr` value (story 08) evaluates
+// before the exit - its reads join the flow (they lift the R1 lint and
+// carry deref gating), closure values analyze at the return point.
+// Following statements start a fresh block with no incoming edges - the
+// analyzer skips unreachable blocks, so their reads report nothing.
+func (b *builder) emitReturn(statement *parser.Statement, scope *semantic.Scope) {
+	if len(statement.Values) > 0 {
+		b.readIdents(statement, scope)
+		b.analyzeClosures(statement, scope, nil)
+	}
 	cur := b.cur
 	b.appendBlock()
 	b.facts[b.cur] = copyFacts(b.facts[cur])

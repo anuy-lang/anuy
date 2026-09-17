@@ -915,7 +915,8 @@ func TestParseRejectsCallStatementEdges(t *testing.T) {
 		{source: "_()\n", category: BlankIdentifierRead},
 		{source: "clear().field\n", category: UnsupportedSyntax},
 		{source: "a.b().c\n", category: UnsupportedSyntax},
-		{source: "user?.save()\n", category: UnsupportedSyntax},
+		// `user?.save()` flipped to accept in story 08 (Q3-A, RFC-002
+		// §33/§42) - pinned by TestParseSafeCallStatement.
 		{source: "nil()\n", category: UnsupportedSyntax},
 		{source: "func() {\n}\n", category: UnsupportedSyntax},
 	}
@@ -925,5 +926,140 @@ func TestParseRejectsCallStatementEdges(t *testing.T) {
 			t.Fatalf("Parse(%q) accepted invalid call statement", tc.source)
 		}
 		requireCategory(t, err, tc.category)
+	}
+}
+
+func TestParseMethodDeclaration(t *testing.T) {
+	program, err := Parse("func User.age() int {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(program.Statements) != 1 {
+		t.Fatalf("statements = %d, want 1", len(program.Statements))
+	}
+	s := program.Statements[0]
+	if s.Kind != Function || len(s.Names) != 1 || s.Names[0] != "age" {
+		t.Fatalf("statement = %#v, want a Function declaration of age", s)
+	}
+	if s.Method != "User" {
+		t.Fatalf("Method = %q, want %q", s.Method, "User")
+	}
+	if !s.HasResult || s.ResultNullable {
+		t.Fatalf("HasResult/ResultNullable = %v/%v, want true/false", s.HasResult, s.ResultNullable)
+	}
+}
+
+func TestParseMethodDeclarationNullableResult(t *testing.T) {
+	program, err := Parse("func User.manager() User? {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[0]
+	if !s.HasResult || !s.ResultNullable {
+		t.Fatalf("HasResult/ResultNullable = %v/%v, want true/true", s.HasResult, s.ResultNullable)
+	}
+}
+
+func TestParseMethodWithArguments(t *testing.T) {
+	program, err := Parse("func User.deposit(x int) {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[0]
+	if s.Kind != Function || s.Method != "User" || s.Names[0] != "deposit" {
+		t.Fatalf("statement = %#v, want the deposit method on User", s)
+	}
+	if s.Closure == nil || len(s.Closure.Params) != 1 || s.Closure.Params[0].Name != "x" {
+		t.Fatalf("params = %#v, want one parameter x", s.Closure)
+	}
+}
+
+func TestParseFunctionDeclarationResultType(t *testing.T) {
+	program, err := Parse("func find() User? {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[0]
+	if s.Kind != Function || s.Names[0] != "find" || s.Method != "" {
+		t.Fatalf("statement = %#v, want the find function", s)
+	}
+	if !s.HasResult || !s.ResultNullable {
+		t.Fatalf("HasResult/ResultNullable = %v/%v, want true/true", s.HasResult, s.ResultNullable)
+	}
+}
+
+func TestParseRejectsResultTypeOnClosureValue(t *testing.T) {
+	// Result types belong to the declaration forms (story 08 Q4-A); a
+	// closure literal stays result-less.
+	_, err := Parse("var f = func() User {\n}\n")
+	if err == nil {
+		t.Fatal("closure literal accepted a result type")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseReturnWithValueInResultDeclaration(t *testing.T) {
+	program, err := Parse("func find() User {\nreturn u\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[0]
+	if s.Kind != Function || len(s.Closure.Body) != 1 {
+		t.Fatalf("statement = %#v, want a function with one body statement", s)
+	}
+	ret := s.Closure.Body[0]
+	if ret.Kind != Return || len(ret.Values) != 1 || ret.Values[0].Text != "u" {
+		t.Fatalf("return = %#v, want one value u", ret)
+	}
+}
+
+func TestParseBareReturnInResultDeclaration(t *testing.T) {
+	program, err := Parse("func find() int {\nreturn\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret := program.Statements[0].Closure.Body[0]
+	if ret.Kind != Return || len(ret.Values) != 0 {
+		t.Fatalf("return = %#v, want the bare form", ret)
+	}
+}
+
+func TestParseRejectsReturnValueWithoutResult(t *testing.T) {
+	_, err := Parse("func f() {\nreturn x\n}\n")
+	if err == nil {
+		t.Fatal("void declaration accepted `return x`")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseRejectsReturnValueTopLevel(t *testing.T) {
+	_, err := Parse("return x\n")
+	if err == nil {
+		t.Fatal("top level accepted `return x`")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseRejectsReturnValueInClosure(t *testing.T) {
+	_, err := Parse("var f = func() {\nreturn x\n}\n")
+	if err == nil {
+		t.Fatal("closure accepted `return x`")
+	}
+	requireCategory(t, err, UnsupportedSyntax)
+}
+
+func TestParseSafeCallStatement(t *testing.T) {
+	// RFC-002 §33/§42: a safe method call is a valid statement (story 08
+	// Q3-A).
+	program, err := Parse("u?.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[0]
+	if s.Kind != Call || s.Call == nil || len(s.Call.Segments) != 1 {
+		t.Fatalf("statement = %#v, want one safe call segment", s)
+	}
+	if !s.Call.Segments[0].Safe || !s.Call.Segments[0].Call {
+		t.Fatalf("segment = %#v, want a safe call", s.Call.Segments[0])
 	}
 }
