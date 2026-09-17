@@ -249,3 +249,35 @@ func TestCascadeDoesNotCrossBlocks(t *testing.T) {
 		}
 	}
 }
+
+func TestAssignmentThenEstablishKeepsNonNil(t *testing.T) {
+	// RFC-002 §26 (story 08): assignment invalidates (§25) and the non-null
+	// RHS re-establishes - the integration lowers it as Assign+Assume in
+	// exactly this order.
+	cfg := NewCFG(
+		Block{ID: 1, Operations: []Operation{Assign(3), Assume(3), Deref(3)}},
+	)
+	result := (Analyzer{}).Analyze(cfg)
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("established deref = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestEstablishJoinsWithUnprovenPathToUnknown(t *testing.T) {
+	// The §26 fact joins by intersection: established on one incoming path
+	// only, the deref after the join stays unproven.
+	cfg := NewCFG(
+		Block{ID: 1},
+		Block{ID: 2, Operations: []Operation{Assign(3), Assume(3)}},
+		Block{ID: 3},
+		Block{ID: 4, Operations: []Operation{Deref(3)}},
+	)
+	cfg.AddEdge(1, 2)
+	cfg.AddEdge(1, 3)
+	cfg.AddEdge(2, 4)
+	cfg.AddEdge(3, 4)
+	result := (Analyzer{}).Analyze(cfg)
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Category != UnsafeMemberAccess {
+		t.Fatalf("joined deref = %#v, want one UnsafeMemberAccess", result.Diagnostics)
+	}
+}
