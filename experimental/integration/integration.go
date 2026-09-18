@@ -405,6 +405,11 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			for _, name := range declared {
 				b.initialize(scope.Resolve(name))
 			}
+			// ADR-0001 (RFC-003 §13.8: first initialization uses ordinary
+			// `=`): the initializer classifies like an assignment RHS, so a
+			// non-null value re-establishes after the §25 invalidation of
+			// initialize (§6.3.5).
+			b.establishAssignments(statement, scope)
 		}
 		b.analyzeClosures(statement, scope, targets)
 	case parser.Assign:

@@ -792,15 +792,58 @@ func TestAnalyzeSourceAssignNavigationDoesNotEstablish(t *testing.T) {
 	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
 }
 
-func TestAnalyzeSourceDeclarationDoesNotEstablish(t *testing.T) {
-	// §26 is about assignments; a declared nilable binding with a non-null
-	// initializer keeps its declared class - the deref stays unproven
-	// (RFC-001 §13: initialization is separate from nullability).
+func TestAnalyzeSourceDeclarationEstablishes(t *testing.T) {
+	// ADR-0001 (RFC-003 §13.8: first initialization uses ordinary `=`):
+	// a non-null initializer establishes per §6.3.5 - the literal
+	// classifies non-null, so the deref is proven without narrowing.
 	result, err := AnalyzeSource("var u User? = 42\nu.save()\n")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceDeclarationUnknownCallDoesNotEstablish(t *testing.T) {
+	// Declaration-path negative control: an unknown call initializer stays
+	// unknown - nothing is established.
+	result, err := AnalyzeSource("var u User? = find()\nu.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
 	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceDeclarationNilDoesNotEstablish(t *testing.T) {
+	// Declaration-path negative control: `nil` never establishes.
+	result, err := AnalyzeSource("var u User? = nil\nu.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceAssignAfterDeclarationInvalidates(t *testing.T) {
+	// §25: the assignment after the established declaration invalidates;
+	// an unknown RHS does not re-establish.
+	result, err := AnalyzeSource("var u User? = 42\nu = find()\nu.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+}
+
+func TestAnalyzeSourceEstablishedCaptureSeedsClosure(t *testing.T) {
+	// The establishment at the creation point seeds the closure entry: the
+	// captured binding keeps its non-nil narrowing (CONTRACTS §1.5).
+	result, err := AnalyzeSource("var u User? = 42\nvar f = func() {\nu.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
 }
 
 func TestAnalyzeSourceInferredNullableRequiresProof(t *testing.T) {
