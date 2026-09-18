@@ -1,0 +1,4 @@
+var u User?
+if u != nil {
+u.save()
+}

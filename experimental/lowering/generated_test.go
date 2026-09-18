@@ -25,3 +25,27 @@ func TestLoweredGoCompiles(t *testing.T) {
 		t.Fatalf("generated Go failed: %v\n%s", err, out)
 	}
 }
+
+func TestLoweredNullableGoCompiles(t *testing.T) {
+	// Story 10 (ADR-0003): the tagged carrier lowers to compilable Go -
+	// Some/None conversions, carrier copies and the zero-value-is-nil
+	// declaration (RFC-009 §6.1.9 sketch). Only builtin-base types keep the
+	// fixture self-contained; every binding is read, so Go's
+	// declared-and-not-used does not fire.
+	source, err := Lower("var x int? = 42\nvar s string?\ns = \"a\"\nvar n int? = x\ns\nn\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module fixture\n\ngo 1.24\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fixture.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "test", ".")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generated Go failed: %v\n%s", err, out)
+	}
+}

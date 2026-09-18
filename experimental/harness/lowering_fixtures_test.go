@@ -1,0 +1,60 @@
+package harness
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/san-smith/anuy/experimental/lowering"
+)
+
+// TestLoweringCoreAcceptFixturesLower runs every lowering-core fixture
+// through Lower (story 10, PF-G-06 flip, ADR-0003). Each fixture pins its
+// representation marker: the tagged carrier with Some/None conversions for
+// value shapes and nullable slices (RFC-002 §6.8.2, §6.8.10–6.8.13), or the
+// native Go type without a carrier prelude for native-nil shapes (§6.8.1,
+// §6.8.6, §6.9.2). The table length doubles as the fixture counter.
+func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
+	markers := []struct {
+		file      string
+		want      string
+		noCarrier bool
+	}{
+		{"nullable-decl.anuy", "var u Nullable[User]", false},
+		{"nullable-init-some.anuy", "var x Nullable[int] = Some(42)", false},
+		{"nullable-assign-nil.anuy", "u = None[User]()", false},
+		{"nullable-copy.anuy", "var b Nullable[int] = a", false},
+		{"nullable-closure-param.anuy", "f := func(x Nullable[int])", false},
+		{"nullable-slice.anuy", "var s Nullable[[]User]", false},
+		{"slice-of-nullable.anuy", "var xs []Nullable[User]", false},
+		{"nullable-narrow-call.anuy", "if u != nil {", false},
+		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
+		{"native-nil-map.anuy", "var m map[string]User", true},
+		{"native-nil-error.anuy", "var err error", true},
+	}
+	dir := filepath.Join("..", "fixtures", "lowering-core", "accept")
+	files, err := filepath.Glob(filepath.Join(dir, "*.anuy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != len(markers) {
+		t.Fatalf("lowering-core accept fixtures = %d, table = %d - update the counter", len(files), len(markers))
+	}
+	for _, fixture := range markers {
+		source, err := os.ReadFile(filepath.Join(dir, fixture.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := lowering.Lower(string(source))
+		if err != nil {
+			t.Fatalf("%s: %v", fixture.file, err)
+		}
+		if !strings.Contains(got, fixture.want) {
+			t.Fatalf("%s: output %q misses marker %q", fixture.file, got, fixture.want)
+		}
+		if fixture.noCarrier == strings.Contains(got, "type Nullable") {
+			t.Fatalf("%s: carrier prelude presence = %v, want %v", fixture.file, !fixture.noCarrier, fixture.noCarrier)
+		}
+	}
+}
