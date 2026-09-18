@@ -16,6 +16,10 @@ Anuy is designed to:
 
 The current semantic milestone is a proposed core covering values and initialization, nullability, and variables, assignment, and scope.
 
+## Specifications
+
+Accepted RFCs are published under [specs/rfcs/](specs/rfcs/) as the canonical English texts of the language decisions. RFCs mature privately and are published here upon acceptance; section numbers inside published RFCs are stable anchors.
+
 ## What is not available yet
 
 - a compiler or build tooling;
