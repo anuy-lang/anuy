@@ -29,60 +29,36 @@ func TestLowerMultipleAssignmentToGo(t *testing.T) {
 
 func TestLowerNullableVarDeclToGo(t *testing.T) {
 	// Story 10, PF-G-06 flip (ADR-0003): a declared `T?` lowers to the
-	// tagged carrier; the prelude appears because the representation is
-	// used (RFC-002 §6.7–6.8).
+	// tagged carrier of the anuyabi support package (RFC-009 §6.1.5–6.1.9
+	// sketch), imported only when the representation is used.
 	got, err := Lower("var u User?\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + nullablePrelude + "func Run() {\n\tvar u Nullable[User]\n\t_ = u\n}\n"
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\t_ = u\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
 }
 
-func TestLowerNullablePreludeText(t *testing.T) {
-	// Pin of the emitted carrier text: struct layout and the §6.9.5 helper
-	// sketch (Some/None/Get/IsNil). The zero value is semantic nil
-	// (RFC-009 §6.1.9 sketch); the final public API stays with RFC-009.
-	const want = `// Nullable is the experimental tagged representation of a nullable value
-// type (RFC-002 §6.7–6.8): Present == false is semantic nil.
-type Nullable[T any] struct {
-	Value   T
-	Present bool
-}
-
-func Some[T any](value T) Nullable[T] {
-	return Nullable[T]{Value: value, Present: true}
-}
-
-func None[T any]() Nullable[T] {
-	return Nullable[T]{}
-}
-
-func (n Nullable[T]) Get() (T, bool) {
-	return n.Value, n.Present
-}
-
-func (n Nullable[T]) IsNil() bool {
-	return !n.Present
-}
-
-`
-	if nullablePrelude != want {
-		t.Fatalf("nullable prelude drifted:\n%s", nullablePrelude)
+func TestLowerGeneratedAnuyabiImportText(t *testing.T) {
+	// Pin of the emitted import line: generated Go depends on the support
+	// package instead of inlining a carrier declaration.
+	const want = "import \"github.com/anuy-lang/anuy/experimental/anuyabi\"\n\n"
+	if anuyabiImport != want {
+		t.Fatalf("anuyabi import line drifted:\n%s", anuyabiImport)
 	}
 }
 
-func TestLowerNoPreludeWithoutNullable(t *testing.T) {
+func TestLowerNoCarrierWithoutNullable(t *testing.T) {
 	// Emit-on-use: programs without tagged representations keep their
-	// generated output byte-identical (no carrier prelude).
+	// generated output byte-identical - no import, no declarations.
 	got, err := Lower("var x int\nx = 1\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(got, "Nullable") {
-		t.Fatalf("Lower() emitted the carrier prelude without nullable types: %q", got)
+	if strings.Contains(got, "anuyabi") {
+		t.Fatalf("Lower() emitted the carrier dependency without nullable types: %q", got)
 	}
 }
 
@@ -91,7 +67,7 @@ func TestLowerNullableInitializerWrapsSome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{"var x Nullable[int] = Some(42)", "var s Nullable[string] = Some(\"a\")"} {
+	for _, marker := range []string{"var x anuyabi.Nullable[int] = anuyabi.Some(42)", "var s anuyabi.Nullable[string] = anuyabi.Some(\"a\")"} {
 		if !strings.Contains(got, marker) {
 			t.Fatalf("Lower() = %q, misses %q", got, marker)
 		}
@@ -103,7 +79,7 @@ func TestLowerAssignNilToNullableUsesNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "\tu = None[User]()\n") {
+	if !strings.Contains(got, "	u = anuyabi.None[User]()\n") {
 		t.Fatalf("Lower() = %q, wants None conversion", got)
 	}
 }
@@ -115,7 +91,7 @@ func TestLowerNullableCopyPassesThrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "\tvar b Nullable[int] = a\n") {
+	if !strings.Contains(got, "\tvar b anuyabi.Nullable[int] = a\n") {
 		t.Fatalf("Lower() = %q, wants raw carrier copy", got)
 	}
 }
@@ -125,7 +101,7 @@ func TestLowerNullableClosureParamToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + nullablePrelude + "func Run() {\n\tf := func(x Nullable[int]) {\n}\n\t_ = f\n}\n"
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tf := func(x anuyabi.Nullable[int]) {\n}\n\t_ = f\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -137,7 +113,7 @@ func TestLowerNullableIdempotence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "\tvar v Nullable[User]\n") {
+	if !strings.Contains(got, "\tvar v anuyabi.Nullable[User]\n") {
 		t.Fatalf("Lower() = %q, wants single carrier", got)
 	}
 }
@@ -266,7 +242,7 @@ func TestLowerNullableMapStaysNative(t *testing.T) {
 	if !strings.Contains(got, "\tvar m map[string]User\n") {
 		t.Fatalf("Lower() = %q, wants native map", got)
 	}
-	if strings.Contains(got, "Nullable") {
+	if strings.Contains(got, "anuyabi") {
 		t.Fatalf("Lower() emitted the carrier for a native-nil shape: %q", got)
 	}
 }
@@ -281,7 +257,7 @@ func TestLowerNullableErrorStaysNative(t *testing.T) {
 	if !strings.Contains(got, "\tvar err error\n") {
 		t.Fatalf("Lower() = %q, wants native error", got)
 	}
-	if strings.Contains(got, "Nullable") {
+	if strings.Contains(got, "anuyabi") {
 		t.Fatalf("Lower() emitted the carrier for error?: %q", got)
 	}
 }
@@ -306,7 +282,7 @@ func TestLowerNullableSliceUsesCarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{"var s Nullable[[]User]", "var s2 Nullable[[]User]"} {
+	for _, marker := range []string{"var s anuyabi.Nullable[[]User]", "var s2 anuyabi.Nullable[[]User]"} {
 		if !strings.Contains(got, marker) {
 			t.Fatalf("Lower() = %q, misses %q", got, marker)
 		}
@@ -319,7 +295,7 @@ func TestLowerSliceOfNullableElements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "\tvar xs []Nullable[User]\n") {
+	if !strings.Contains(got, "\tvar xs []anuyabi.Nullable[User]\n") {
 		t.Fatalf("Lower() = %q, wants nullable element slice", got)
 	}
 }
@@ -334,7 +310,7 @@ func TestLowerNullableNarrowingScenarioVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + nullablePrelude + "func Run() {\n\tvar u Nullable[User]\n\tif u != nil {\n\tu.save()\n\t}\n\t_ = u\n}\n"
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\tif u != nil {\n\tu.save()\n\t}\n\t_ = u\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}

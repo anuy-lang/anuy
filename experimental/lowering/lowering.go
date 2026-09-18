@@ -7,35 +7,11 @@ import (
 	"github.com/anuy-lang/anuy/experimental/parser"
 )
 
-// nullablePrelude is emitted into generated files that use the tagged
-// carrier (ADR-0003, RFC-002 §6.7–6.8): Present == false is semantic nil and
-// the zero value represents nil (RFC-009 §6.1.9 sketch); Some/None/Get/IsNil
-// mirror the §6.9.5 helper sketch. The final support package and public API
-// stay with RFC-009/RFC-010.
-const nullablePrelude = `// Nullable is the experimental tagged representation of a nullable value
-// type (RFC-002 §6.7–6.8): Present == false is semantic nil.
-type Nullable[T any] struct {
-	Value   T
-	Present bool
-}
-
-func Some[T any](value T) Nullable[T] {
-	return Nullable[T]{Value: value, Present: true}
-}
-
-func None[T any]() Nullable[T] {
-	return Nullable[T]{}
-}
-
-func (n Nullable[T]) Get() (T, bool) {
-	return n.Value, n.Present
-}
-
-func (n Nullable[T]) IsNil() bool {
-	return !n.Present
-}
-
-`
+// anuyabiImport is the generated import line for programs that use the
+// tagged carrier (RFC-009 §6.1.5 two-contracts sketch): generated Go
+// depends on the ABI support package instead of inlining it. Programs
+// without tagged representations emit no dependency at all.
+const anuyabiImport = "import \"github.com/anuy-lang/anuy/experimental/anuyabi\"\n\n"
 
 // Lower emits deliberately minimal experimental Go for accepted narrow syntax.
 func Lower(source string) (string, error) {
@@ -55,7 +31,7 @@ func Lower(source string) (string, error) {
 	var out strings.Builder
 	out.WriteString("package fixture\n\n")
 	if l.taggedUsed {
-		out.WriteString(nullablePrelude)
+		out.WriteString(anuyabiImport)
 	}
 	out.WriteString("func Run() {\n")
 	out.WriteString(body.String())
@@ -255,7 +231,7 @@ func (l *lowerer) goType(t *parser.TypeExpr) (string, error) {
 		return text, nil
 	}
 	l.taggedUsed = true
-	return "Nullable[" + text + "]", nil
+	return "anuyabi.Nullable[" + text + "]", nil
 }
 
 // carrier reports the tagged-carrier element type of a declared type: the
@@ -275,7 +251,7 @@ func (l *lowerer) carrier(t *parser.TypeExpr) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return strings.TrimSuffix(strings.TrimPrefix(text, "Nullable["), "]"), true
+	return strings.TrimSuffix(strings.TrimPrefix(text, "anuyabi.Nullable["), "]"), true
 }
 
 // convert renders one right-hand side value for a target declared with the
@@ -293,7 +269,7 @@ func (l *lowerer) convert(value parser.Value, carrierElem string) (string, error
 	}
 	if value.Text == "nil" {
 		l.taggedUsed = true
-		return "None[" + carrierElem + "]()", nil
+		return "anuyabi.None[" + carrierElem + "]()", nil
 	}
 	if len(value.Idents) == 1 && value.Text == value.Idents[0] {
 		if _, tagged := l.carriers[value.Idents[0]]; tagged {
@@ -301,7 +277,7 @@ func (l *lowerer) convert(value parser.Value, carrierElem string) (string, error
 		}
 	}
 	l.taggedUsed = true
-	return "Some(" + text + ")", nil
+	return "anuyabi.Some(" + text + ")", nil
 }
 
 // rangeOperand restricts the iteration operand to the documented

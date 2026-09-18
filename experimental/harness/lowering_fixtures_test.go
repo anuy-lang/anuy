@@ -21,13 +21,13 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		want      string
 		noCarrier bool
 	}{
-		{"nullable-decl.anuy", "var u Nullable[User]", false},
-		{"nullable-init-some.anuy", "var x Nullable[int] = Some(42)", false},
-		{"nullable-assign-nil.anuy", "u = None[User]()", false},
-		{"nullable-copy.anuy", "var b Nullable[int] = a", false},
-		{"nullable-closure-param.anuy", "f := func(x Nullable[int])", false},
-		{"nullable-slice.anuy", "var s Nullable[[]User]", false},
-		{"slice-of-nullable.anuy", "var xs []Nullable[User]", false},
+		{"nullable-decl.anuy", "var u anuyabi.Nullable[User]", false},
+		{"nullable-init-some.anuy", "var x anuyabi.Nullable[int] = anuyabi.Some(42)", false},
+		{"nullable-assign-nil.anuy", "u = anuyabi.None[User]()", false},
+		{"nullable-copy.anuy", "var b anuyabi.Nullable[int] = a", false},
+		{"nullable-closure-param.anuy", "f := func(x anuyabi.Nullable[int])", false},
+		{"nullable-slice.anuy", "var s anuyabi.Nullable[[]User]", false},
+		{"slice-of-nullable.anuy", "var xs []anuyabi.Nullable[User]", false},
 		{"nullable-narrow-call.anuy", "if u != nil {", false},
 		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
 		{"native-nil-map.anuy", "var m map[string]User", true},
@@ -53,7 +53,7 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		if !strings.Contains(got, fixture.want) {
 			t.Fatalf("%s: output %q misses marker %q", fixture.file, got, fixture.want)
 		}
-		if fixture.noCarrier == strings.Contains(got, "type Nullable") {
+		if fixture.noCarrier == strings.Contains(got, "anuyabi") {
 			t.Fatalf("%s: carrier prelude presence = %v, want %v", fixture.file, !fixture.noCarrier, fixture.noCarrier)
 		}
 	}
