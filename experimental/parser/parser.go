@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/anuy-lang/anuy/experimental/semantic"
+	"github.com/anuy-lang/anuy/internal/semantic"
 )
 
 type Span struct{ Start, End int }

@@ -3,7 +3,7 @@ package integration
 import (
 	"testing"
 
-	"github.com/anuy-lang/anuy/experimental/semantic"
+	"github.com/anuy-lang/anuy/internal/semantic"
 )
 
 func TestAnalyzeSourceDeclaredFunctionCallResolves(t *testing.T) {

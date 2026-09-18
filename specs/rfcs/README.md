@@ -46,6 +46,15 @@ anchors: cross-references in other RFCs, decisions, and tests rely on them, so
 published texts preserve numbering and amend decisions by appending dated
 entries and incrementing the document `Version`.
 
+## Implementation status
+
+RFC adoption is validated by implementation before acceptance. The dataflow
+core of RFC-001–003 — the CFG kernel, definite-initialization and non-nil
+narrowing facts, scope resolution, and the diagnostic registry — is
+implemented and verified as an internal kernel package with conformance
+tests anchored to RFC sections. Language coverage otherwise remains an
+experimental narrow slice; no RFC is fully implemented yet.
+
 ## RFC index
 
 | RFC | Title                                  | Status   | Version | Date       |

@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/anuy-lang/anuy/experimental/parser"
-	"github.com/anuy-lang/anuy/experimental/semantic"
+	"github.com/anuy-lang/anuy/internal/semantic"
 )
 
 func assertSingleDiagnostic(t *testing.T, result Result, want string) {

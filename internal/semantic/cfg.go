@@ -1,9 +1,19 @@
-// Package semantic contains experimental compiler dataflow primitives.
+// Package semantic implements the dataflow kernel of the Anuy compiler:
+// the CFG and its operations, definite-initialization and non-nil
+// narrowing facts, scope resolution, and the diagnostic registry
+// (RFC-001–003). The semantics are settled by the accepted RFCs and
+// covered by conformance tests anchored to their sections; the exported
+// API is internal and may still change without notice.
 package semantic
 
+// BindingID identifies a lexical binding across the kernel: scopes mint
+// them, facts and operations refer to them.
 type BindingID uint32
+
+// BlockID identifies a CFG block; the entry block is always ID 1.
 type BlockID uint32
 
+// BindingState is the definite-initialization state of a binding.
 type BindingState uint8
 
 const (
@@ -11,11 +21,14 @@ const (
 	Initialized
 )
 
+// Block is a straight-line sequence of operations; control flow between
+// blocks is expressed solely by CFG edges.
 type Block struct {
 	ID         BlockID
 	Operations []Operation
 }
 
+// OperationKind enumerates the kernel operations a block may carry.
 type OperationKind uint8
 
 const (
@@ -28,6 +41,8 @@ const (
 	ReturnOperation
 )
 
+// Operation is one kernel step inside a block; most operations carry the
+// binding they act on.
 type Operation struct {
 	Kind    OperationKind
 	Binding BindingID
@@ -36,6 +51,9 @@ type Operation struct {
 	Mutates []BindingID
 }
 
+// Declare, Assign and Read are the definite-initialization trio: a
+// declaration starts a binding uninitialized, an assignment initializes
+// it, a read requires it.
 func Declare(binding BindingID) Operation { return Operation{Kind: DeclareOperation, Binding: binding} }
 func Assign(binding BindingID) Operation  { return Operation{Kind: AssignOperation, Binding: binding} }
 func Read(binding BindingID) Operation    { return Operation{Kind: ReadOperation, Binding: binding} }
@@ -74,11 +92,14 @@ const (
 	MissingReturn DiagnosticCategory = "MissingReturn"
 )
 
+// SourceSpan locates a diagnostic in the source text.
 type SourceSpan struct {
 	File       string
 	Start, End int
 }
 
+// Diagnostic is one registry-stamped finding with its code, severity and
+// span.
 type Diagnostic struct {
 	Category DiagnosticCategory
 	Code     Code
@@ -111,14 +132,21 @@ func ValidatePackageBinding(hasInitializer bool) *Diagnostic {
 	return &d
 }
 
+// AnalysisResult carries the diagnostics of one fixpoint run.
 type AnalysisResult struct{ Diagnostics []Diagnostic }
+
+// Analyzer runs the definite-initialization and narrowing fixpoint over a
+// CFG; blocks without incoming facts are unreachable and contribute
+// nothing.
 type Analyzer struct{}
 
+// CFG is the kernel control-flow graph: blocks by ID plus directed edges.
 type CFG struct {
 	blocks map[BlockID]Block
 	edges  map[BlockID][]BlockID
 }
 
+// NewCFG indexes the given blocks; the entry block is expected at ID 1.
 func NewCFG(blocks ...Block) *CFG {
 	cfg := &CFG{blocks: make(map[BlockID]Block), edges: make(map[BlockID][]BlockID)}
 	for _, block := range blocks {
@@ -127,10 +155,12 @@ func NewCFG(blocks ...Block) *CFG {
 	return cfg
 }
 
+// AddEdge wires a control-flow edge between two blocks.
 func (cfg *CFG) AddEdge(from, to BlockID) {
 	cfg.edges[from] = append(cfg.edges[from], to)
 }
 
+// Successors returns the reachable blocks wired after block.
 func (cfg *CFG) Successors(block BlockID) []Block {
 	ids := cfg.edges[block]
 	result := make([]Block, 0, len(ids))
@@ -181,12 +211,16 @@ func endsWithReturn(block Block) bool {
 	return n > 0 && block.Operations[n-1].Kind == ReturnOperation
 }
 
+// FactSet is the per-binding fact lattice shared by both fact dimensions.
 type FactSet map[BindingID]BindingState
 
+// NewFactSet returns an empty fact set.
 func NewFactSet() FactSet { return make(FactSet) }
 
+// State reports the recorded state; the zero value is Uninitialized.
 func (facts FactSet) State(binding BindingID) BindingState { return facts[binding] }
 
+// Assign records the initialized state.
 func (facts FactSet) Assign(binding BindingID) { facts[binding] = Initialized }
 
 func (Analyzer) Analyze(cfg *CFG) AnalysisResult {

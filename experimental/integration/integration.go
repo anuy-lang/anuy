@@ -6,7 +6,7 @@ import (
 	"unicode"
 
 	"github.com/anuy-lang/anuy/experimental/parser"
-	"github.com/anuy-lang/anuy/experimental/semantic"
+	"github.com/anuy-lang/anuy/internal/semantic"
 )
 
 type Result struct{ Diagnostics []semantic.Diagnostic }

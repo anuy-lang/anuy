@@ -1,5 +1,7 @@
 package semantic
 
+// Scope is a lexical scope in the parent chain: it mints the binding IDs
+// of its declarations and resolves reads through the chain.
 type Scope struct {
 	names  map[string]BindingID
 	parent *Scope
@@ -7,6 +9,7 @@ type Scope struct {
 	next   BindingID
 }
 
+// ScopeError is a scope-level reject; its category is a registry category.
 type ScopeError struct{ Category DiagnosticCategory }
 
 func (e *ScopeError) Error() string { return string(e.Category) }
@@ -17,7 +20,10 @@ const (
 	UnknownRead            DiagnosticCategory = "UnknownRead"
 )
 
+// NewScope returns the package root scope.
 func NewScope() *Scope { s := &Scope{names: make(map[string]BindingID)}; s.root = s; return s }
+
+// Child returns a nested scope whose declarations do not survive it.
 func (s *Scope) Child() *Scope {
 	return &Scope{names: make(map[string]BindingID), parent: s, root: s.root}
 }
@@ -44,6 +50,9 @@ func (s *Scope) Read(name string) *ScopeError {
 	}
 	return nil
 }
+
+// Declare mints a binding in this scope; a duplicate name in the same
+// scope rejects with SameScopeRedeclaration.
 func (s *Scope) Declare(name string) *ScopeError {
 	if _, exists := s.names[name]; exists {
 		return &ScopeError{SameScopeRedeclaration}
@@ -52,6 +61,9 @@ func (s *Scope) Declare(name string) *ScopeError {
 	s.names[name] = s.root.next
 	return nil
 }
+
+// Assign checks that an assignment target resolves through the chain;
+// unresolved targets reject with UnknownAssignment.
 func (s *Scope) Assign(name string) *ScopeError {
 	if _, exists := s.names[name]; !exists {
 		if s.parent != nil {
