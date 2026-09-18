@@ -59,6 +59,7 @@ var (
 	// Initialization dataflow block (3xxx): definite initialization.
 	ReadBeforeInitializationDescriptor   = register(ReadBeforeInitialization, "ANUY3001", SeverityError)
 	PackageInitializerRequiredDescriptor = register(PackageInitializerRequired, "ANUY3002", SeverityError)
+	MissingReturnDescriptor              = register(MissingReturn, "ANUY3003", SeverityError) // D-6: result is a binding read by the caller (RFC-001 §13.3)
 
 	// Nullability/narrowing block (4xxx).
 	UnsafeMemberAccessDescriptor = register(UnsafeMemberAccess, "ANUY4001", SeverityError) // R2
@@ -83,6 +84,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		SameScopeRedeclarationDescriptor,
 		ReadBeforeInitializationDescriptor,
 		PackageInitializerRequiredDescriptor,
+		MissingReturnDescriptor,
 		UnsafeMemberAccessDescriptor,
 		UncheckedErrorDescriptor,
 	}
@@ -127,6 +129,7 @@ var catalog = map[Code]string{
 	"ANUY2003": "redeclaration in the same scope",
 	"ANUY3001": "read before initialization",
 	"ANUY3002": "package-level binding requires an initializer",
+	"ANUY3003": "missing return: declared result is not initialized on all paths",
 	"ANUY4001": "only safe (?.) or non-null asserted calls are allowed on a nullable receiver",
 	"ANUY5001": "error value is not checked",
 }

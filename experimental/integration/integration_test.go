@@ -1071,3 +1071,97 @@ func TestAnalyzeSourceReturnValueReadLiftsUncheckedErrorLint(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceMissingReturnReported(t *testing.T) {
+	// D-6 (RFC-001 §8.2.6, ADR-0004): a declared non-null result must be
+	// initialized on all exit paths - falling off the end of the body is
+	// one Error at the declaration span.
+	result, err := AnalyzeSource("func find() User {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "MissingReturn")
+}
+
+func TestAnalyzeSourceAllPathsReturnNoDiagnostic(t *testing.T) {
+	result, err := AnalyzeSource("func find(u User) User {\nif u != nil {\nreturn u\n}\nreturn u\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceVoidFallOffAllowed(t *testing.T) {
+	// ADR-0004: void/no-result functions may fall off the end.
+	result, err := AnalyzeSource("func f() {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceNullableResultFallOffAllowed(t *testing.T) {
+	// A nullable result binding falls off to semantic nil - a valid value;
+	// only non-null results are D-6.
+	result, err := AnalyzeSource("func find() User? {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceInfiniteLoopWithoutExitTerminates(t *testing.T) {
+	// No path reaches the body end, so the result cannot fall off
+	// (Go reference: `for {}` satisfies the return requirement).
+	result, err := AnalyzeSource("func f() int {\nfor {\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceBreakMakesFallOffReachable(t *testing.T) {
+	// The break edge reaches the loop exit and the body end from there.
+	result, err := AnalyzeSource("func f() int {\nfor {\nbreak\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "MissingReturn")
+}
+
+func TestAnalyzeSourceReturnInsideLoopCoversPaths(t *testing.T) {
+	result, err := AnalyzeSource("func f() int {\nfor {\nreturn 1\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceIfWithoutElseFallsOff(t *testing.T) {
+	// The join after a condition if is reachable from the header - the
+	// zero-branch path falls off the body end.
+	result, err := AnalyzeSource("func f() int {\nvar x int = 1\nif x != nil {\nreturn 1\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "MissingReturn")
+}
+
+func TestAnalyzeSourceMethodMissingReturnReported(t *testing.T) {
+	// Methods (story 08) enforce D-6 like functions.
+	result, err := AnalyzeSource("func User.age() int {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "MissingReturn")
+}

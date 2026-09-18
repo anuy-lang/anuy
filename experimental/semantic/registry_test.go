@@ -26,6 +26,7 @@ var approvedScheme = []struct {
 	{"SameScopeRedeclaration", "ANUY2003", SeverityError},
 	{"ReadBeforeInitialization", "ANUY3001", SeverityError},
 	{"PackageInitializerRequired", "ANUY3002", SeverityError},
+	{"MissingReturn", "ANUY3003", SeverityError},
 	{"UnsafeMemberAccess", "ANUY4001", SeverityError},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }

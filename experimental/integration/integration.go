@@ -340,11 +340,16 @@ func (b *builder) connect(from, to semantic.BlockID) {
 
 // analyze runs the kernel analyzer over the built CFG.
 func (b *builder) analyze() semantic.AnalysisResult {
+	return (semantic.Analyzer{}).Analyze(b.cfg())
+}
+
+// cfg materializes the kernel CFG of the blocks and edges collected so far.
+func (b *builder) cfg() *semantic.CFG {
 	cfg := semantic.NewCFG(b.blocks...)
 	for _, e := range b.edges {
 		cfg.AddEdge(e.from, e.to)
 	}
-	return (semantic.Analyzer{}).Analyze(cfg)
+	return cfg
 }
 
 func (b *builder) emit(statements []parser.Statement, scope *semantic.Scope) {
@@ -463,7 +468,7 @@ func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.S
 		if value.Closure == nil {
 			continue
 		}
-		mutators := b.analyzeClosure(value.Closure, scope)
+		mutators, _ := b.analyzeClosure(value.Closure, scope)
 		if index < len(targets) {
 			// Решение 1 (2026-09-16): union across all assignments of the
 			// binding — a later closure must not erase an earlier mutator.
@@ -724,8 +729,10 @@ func (b *builder) readIdent(name string, scope *semantic.Scope, span parser.Span
 //   - closure operations never update caller facts (RFC-003 §84, §170.31).
 //
 // It returns the bindings the body assigns without declaring - the mutated
-// captures, for §85 call invalidation.
-func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) []semantic.BindingID {
+// captures, for §85 call invalidation - and whether the body can fall off
+// its end without a value-return (the D-6 measurement input, RFC-001
+// §13.18; meaningful only for declared non-null results).
+func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) ([]semantic.BindingID, bool) {
 	bodyScope := scope.Child()
 	var entry []semantic.Operation
 	paramIDs := map[semantic.BindingID]bool{}
@@ -788,7 +795,7 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) []se
 	}
 	b.diagnostics = append(b.diagnostics, cb.diagnostics...)
 	b.diagnostics = append(b.diagnostics, cb.analyze().Diagnostics...)
-	return mutators
+	return mutators, semantic.FallOffEnd(cb.cfg())
 }
 
 // propagateMutators implements Решение 2 (2026-09-16): assigning a closure
@@ -915,10 +922,16 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	id := scope.Resolve(name)
 	b.declare(id)
 	b.initialize(id)
-	mutators := b.analyzeClosure(statement.Closure, scope)
+	mutators, fallOff := b.analyzeClosure(statement.Closure, scope)
 	b.closureMutates[id] = unionBindings(b.closureMutates[id], mutators)
 	if statement.Pure {
 		b.pure[id] = true
+	}
+	// D-6 (RFC-001 §13.18, ADR-0004): a declared non-null result must be
+	// initialized on every exit path; a nullable result falls off to
+	// semantic nil, a valid value.
+	if statement.HasResult && !statement.ResultNullable && fallOff {
+		b.report(semantic.MissingReturn, statement.Span)
 	}
 	b.funcResults[name] = declResult{hasResult: statement.HasResult, resultNullable: statement.ResultNullable}
 }
@@ -947,20 +960,30 @@ func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope)
 	// Registered before the body: a self-recursive call resolves like a
 	// function's self-recursion (story 07 precedent; the mutator set the
 	// self-call sees stays the one known at that point).
-	mutators := b.analyzeClosure(statement.Closure, scope)
+	mutators, fallOff := b.analyzeClosure(statement.Closure, scope)
 	b.methodMutates[name] = unionBindings(nil, mutators)
+	// D-6 (RFC-001 §13.18, ADR-0004): methods enforce missing-return like
+	// functions.
+	if statement.HasResult && !statement.ResultNullable && fallOff {
+		b.report(semantic.MissingReturn, statement.Span)
+	}
 }
 
 // emitReturn lowers the `return` statement: the flow of the enclosing
 // function terminates here. A `return expr` value (story 08) evaluates
 // before the exit - its reads join the flow (they lift the R1 lint and
-// carry deref gating), closure values analyze at the return point.
-// Following statements start a fresh block with no incoming edges - the
-// analyzer skips unreachable blocks, so their reads report nothing.
+// carry deref gating), closure values analyze at the return point, and
+// the Return operation marks the flow terminator for the D-6 measurement
+// (RFC-001 §13.18). A bare `return` provides no result, so it does not
+// terminate: a result function ending in one still falls off (D-6); in
+// void bodies the measurement does not apply. Following statements start
+// a fresh block with no incoming edges - the analyzer skips unreachable
+// blocks, so their reads report nothing.
 func (b *builder) emitReturn(statement *parser.Statement, scope *semantic.Scope) {
 	if len(statement.Values) > 0 {
 		b.readIdents(statement, scope)
 		b.analyzeClosures(statement, scope, nil)
+		b.add(semantic.Return())
 	}
 	cur := b.cur
 	b.appendBlock()

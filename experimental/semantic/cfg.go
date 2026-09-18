@@ -25,6 +25,7 @@ const (
 	AssumeOperation
 	DerefOperation
 	CallOperation
+	ReturnOperation
 )
 
 type Operation struct {
@@ -54,6 +55,11 @@ func Call(mutates ...BindingID) Operation {
 	return Operation{Kind: CallOperation, Mutates: mutates}
 }
 
+// Return terminates the enclosing function's flow with its declared
+// result (RFC-001 §13.18 rule 18, §8.2.6 D-6): it is the last operation
+// of its block, and no flow continues past it.
+func Return() Operation { return Operation{Kind: ReturnOperation} }
+
 type DiagnosticCategory string
 
 const (
@@ -63,6 +69,9 @@ const (
 	// access on a binding whose non-nil narrowing is not proven (story 05);
 	// final naming and text belong to RFC-011.
 	UnsafeMemberAccess DiagnosticCategory = "UnsafeMemberAccess"
+	// MissingReturn is the D-6 category (RFC-001 §8.2.6, ADR-0004): a
+	// declared non-null result is not initialized on all exit paths.
+	MissingReturn DiagnosticCategory = "MissingReturn"
 )
 
 type SourceSpan struct {
@@ -131,6 +140,45 @@ func (cfg *CFG) Successors(block BlockID) []Block {
 		}
 	}
 	return result
+}
+
+// FallOffEnd reports whether the body can complete without a Return: a
+// path from the entry block (ID 1) reaches a block that has no successors
+// and does not end with a Return operation (RFC-001 §13.18 rule 18,
+// §8.2.6 D-6). A Return-terminated block never continues the flow, so its
+// successors - the disconnected continuations after the return - are not
+// followed, and blocks unreachable from the entry contribute nothing: an
+// infinite loop with no exit keeps the body from falling off (Go
+// reference: `for {}` satisfies the return requirement).
+func FallOffEnd(cfg *CFG) bool {
+	seen := map[BlockID]bool{1: true}
+	queue := []BlockID{1}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		block, ok := cfg.blocks[id]
+		if !ok {
+			continue
+		}
+		if endsWithReturn(block) {
+			continue
+		}
+		if len(cfg.edges[id]) == 0 {
+			return true
+		}
+		for _, next := range cfg.edges[id] {
+			if !seen[next] {
+				seen[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return false
+}
+
+func endsWithReturn(block Block) bool {
+	n := len(block.Operations)
+	return n > 0 && block.Operations[n-1].Kind == ReturnOperation
 }
 
 type FactSet map[BindingID]BindingState
