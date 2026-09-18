@@ -1,3 +1,3 @@
-module github.com/san-smith/anuy
+module github.com/anuy-lang/anuy
 
 go 1.26.5

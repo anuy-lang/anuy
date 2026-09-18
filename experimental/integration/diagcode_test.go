@@ -3,7 +3,7 @@ package integration
 import (
 	"testing"
 
-	"github.com/san-smith/anuy/experimental/semantic"
+	"github.com/anuy-lang/anuy/experimental/semantic"
 )
 
 func TestAnalyzeSourceUnknownReadCarriesCodeAndSeverity(t *testing.T) {

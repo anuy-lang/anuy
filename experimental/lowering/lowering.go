@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/san-smith/anuy/experimental/parser"
+	"github.com/anuy-lang/anuy/experimental/parser"
 )
 
 // nullablePrelude is emitted into generated files that use the tagged

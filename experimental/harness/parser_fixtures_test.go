@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/san-smith/anuy/experimental/parser"
+	"github.com/anuy-lang/anuy/experimental/parser"
 )
 
 func TestParserCoreAcceptFixturesParse(t *testing.T) {

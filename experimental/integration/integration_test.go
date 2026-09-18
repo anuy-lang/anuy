@@ -3,8 +3,8 @@ package integration
 import (
 	"testing"
 
-	"github.com/san-smith/anuy/experimental/parser"
-	"github.com/san-smith/anuy/experimental/semantic"
+	"github.com/anuy-lang/anuy/experimental/parser"
+	"github.com/anuy-lang/anuy/experimental/semantic"
 )
 
 func assertSingleDiagnostic(t *testing.T, result Result, want string) {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/san-smith/anuy/experimental/lowering"
+	"github.com/anuy-lang/anuy/experimental/lowering"
 )
 
 // TestLoweringCoreAcceptFixturesLower runs every lowering-core fixture

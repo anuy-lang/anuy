@@ -5,8 +5,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/san-smith/anuy/experimental/parser"
-	"github.com/san-smith/anuy/experimental/semantic"
+	"github.com/anuy-lang/anuy/experimental/parser"
+	"github.com/anuy-lang/anuy/experimental/semantic"
 )
 
 type Result struct{ Diagnostics []semantic.Diagnostic }
