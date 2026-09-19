@@ -1307,8 +1307,9 @@ func TestParseFieldMutation(t *testing.T) {
 
 func TestParseFieldMutationRejects(t *testing.T) {
 	// Deeper paths and safe targets stay rejected; the safe-target reject
-	// preserves its original form.
-	if _, err := Parse("u.f.g = 1\n"); err == nil || !strings.Contains(err.Error(), "deeper field path") {
+	// preserves its original form. Story 25 moves the deeper reject to the
+	// three-segment path.
+	if _, err := Parse("u.f.g.h = 1\n"); err == nil || !strings.Contains(err.Error(), "deeper field path") {
 		t.Fatalf("err = %v, want deeper field path reject", err)
 	}
 	if _, err := Parse("u?.f = 1\n"); err == nil || !strings.Contains(err.Error(), "safe navigation is not an assignment target") {
@@ -1316,5 +1317,32 @@ func TestParseFieldMutationRejects(t *testing.T) {
 	}
 	if _, err := Parse("u.f\n"); err == nil || !strings.Contains(err.Error(), "call statement") {
 		t.Fatalf("err = %v, want the legacy navigation-call reject", err)
+	}
+}
+
+func TestParseDeepFieldMutation(t *testing.T) {
+	// Story 25 (RFC-014 6.7): `u.f.g = expr` — a two-segment ordinary
+	// path as the assignment target.
+	program, err := Parse("var u User\nu.profile.badge = \"B\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[1]
+	if s.Kind != Assign || s.Target == nil {
+		t.Fatalf("kind = %v, target = %#v, want Assign with Target", s.Kind, s.Target)
+	}
+	if s.Target.Receiver != "u" || len(s.Target.Segments) != 2 ||
+		s.Target.Segments[0].Name != "profile" || s.Target.Segments[1].Name != "badge" {
+		t.Fatalf("target = %#v, want u.profile.badge", s.Target)
+	}
+	if len(s.Values) != 1 || s.Values[0].Text != "\"B\"" {
+		t.Fatalf("values = %#v, want the RHS value", s.Values)
+	}
+}
+
+func TestParseDeepFieldMutationSafeSegmentRejected(t *testing.T) {
+	// A safe segment inside the target is not an assignment target.
+	if _, err := Parse("u.profile?.badge = 1\n"); err == nil || !strings.Contains(err.Error(), "safe navigation is not an assignment target") {
+		t.Fatalf("err = %v, want safe target reject", err)
 	}
 }

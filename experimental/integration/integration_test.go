@@ -1537,3 +1537,52 @@ func TestAnalyzeSourceMultilineMissingField(t *testing.T) {
 	}
 	assertSingleDiagnostic(t, result, "IncompleteConstruction")
 }
+
+func TestAnalyzeSourceDeepFieldDiagnostics(t *testing.T) {
+	// Story 25 (RFC-014 6.3.7, 6.7): the D-catalog classifies through the
+	// declared struct walk at depth 2.
+	base := "type Profile struct {\nbadge string\nnick string?\n}\ntype User struct {\nprofile Profile\n}\n"
+	cases := []struct{ name, source, want string }{
+		{"D-1 nil to non-null deep field", base + "var u = User{profile: Profile{badge: \"b\"}}\nu.profile.badge = nil\n", "NilToNonNull"},
+		{"D-3 nullable deep field argument", base + "func save(s string) {\n}\nvar u = User{profile: Profile{nick: nil}}\nsave(u.profile.nick)\n", "NullableArgument"},
+		{"D-4 redundant safe navigation behind deep path", base + "var u = User{profile: Profile{badge: \"b\"}}\nvar x = u.profile.badge?.lower\n", "RedundantSafeNavigation"},
+		{"D-5 redundant nil check on deep field", base + "var u = User{profile: Profile{badge: \"b\"}}\nif u.profile.badge == nil {\n}\n", "RedundantNilCheck"},
+	}
+	for _, testCase := range cases {
+		result, err := AnalyzeSource(testCase.source)
+		if err != nil {
+			t.Fatalf("%s: %v", testCase.name, err)
+		}
+		if len(result.Diagnostics) != 1 || string(result.Diagnostics[0].Category) != testCase.want {
+			t.Fatalf("%s: result = %#v, want one %s", testCase.name, result.Diagnostics, testCase.want)
+		}
+	}
+}
+
+func TestAnalyzeSourceDeepFieldNegativesStayClean(t *testing.T) {
+	// The walk conservatively refuses to classify: nullable, pointer and
+	// composite intermediates (deref-gating slice), unknown leaves and
+	// untyped roots produce no verdict and no diagnostics.
+	base := "type Profile struct {\nbadge string\n}\n"
+	sources := []string{
+		// nullable intermediate
+		base + "type User struct {\nlink Profile?\n}\nvar u = User{link: nil}\nu.link.badge = nil\n",
+		// pointer intermediate
+		base + "type User struct {\nlink *Profile\n}\nvar u = User{link: nil}\nu.link.badge = nil\n",
+		// composite intermediate
+		base + "type User struct {\nprofiles []Profile\n}\nvar u = User{profiles: nil}\nu.profiles.badge = nil\n",
+		// unknown leaf
+		base + "type User struct {\nprofile Profile\n}\nvar u = User{profile: Profile{badge: \"b\"}}\nu.profile.ghost = nil\n",
+		// untyped root
+		base + "var u = other\nu.profile.badge = nil\n",
+	}
+	for _, source := range sources {
+		result, err := AnalyzeSource(source)
+		if err != nil {
+			t.Fatalf("%q: %v", source, err)
+		}
+		if len(result.Diagnostics) != 0 {
+			t.Fatalf("%q: result = %#v, want no diagnostics", source, result.Diagnostics)
+		}
+	}
+}

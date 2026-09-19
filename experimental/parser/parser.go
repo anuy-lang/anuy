@@ -1388,23 +1388,53 @@ func hasTopLevelAssign(tokens []token) bool {
 	return false
 }
 
-// parseFieldAssignment parses the field-mutation form `u.f = expr`
-// (story 22, RFC-014 §6.7): an ordinary single-field path as the target.
-// Deeper paths reject explicitly.
+// parseFieldAssignment parses the field-mutation forms `u.f = expr`
+// (story 22) and `u.f.g = expr` (story 25, RFC-014 §6.7): an ordinary
+// path as the assignment target. Deeper paths reject explicitly; a safe
+// segment in the target is not an assignment target.
 func (lp *lineParser) parseFieldAssignment(tokens []token, line sourceLine) (Statement, error) {
 	if tokens[0].text == "_" || reservedWords[tokens[0].text] {
 		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "invalid assignment target")
 	}
-	if len(tokens) < 4 || tokens[2].kind != tokenIdent || tokens[2].text == "_" || reservedWords[tokens[2].text] {
-		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "field assignment requires a field name")
+	eq := -1
+	for i := 1; i < len(tokens); i++ {
+		if isAssign(tokens[i]) {
+			eq = i
+			break
+		}
 	}
-	if len(tokens) > 3 && isPunct(tokens[3], ".") {
-		return Statement{}, newError(UnsupportedSyntax, tokens[3].start, "deeper field paths are not supported in this slice")
-	}
-	if len(tokens) <= 3 || !isAssign(tokens[3]) {
+	if eq < 0 {
+		if offset, hasSafeTarget := safeNavigationTargetOffset(tokens, 1); hasSafeTarget {
+			return Statement{}, newError(UnsupportedSyntax, offset, "safe navigation is not an assignment target")
+		}
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "assignment requires =")
 	}
-	values, verr := lp.parseRHS(tokens, 4, line)
+	for _, t := range tokens[1:eq] {
+		if isPunct(t, "?") {
+			return Statement{}, newError(UnsupportedSyntax, t.start, "safe navigation is not an assignment target")
+		}
+	}
+	var names []token
+	for i := 2; i < eq; i += 2 {
+		if !isPunct(tokens[i-1], ".") || tokens[i].kind != tokenIdent || tokens[i].text == "_" || reservedWords[tokens[i].text] {
+			return Statement{}, newError(UnsupportedSyntax, tokens[i].start, "field assignment requires a field name")
+		}
+		names = append(names, tokens[i])
+	}
+	if eq != 2*len(names)+1 {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "field assignment requires a field name")
+	}
+	if len(names) > 2 {
+		return Statement{}, newError(UnsupportedSyntax, tokens[5].start, "deeper field paths are not supported in this slice")
+	}
+	segments := make([]NavigationSegment, 0, len(names))
+	for i, name := range names {
+		segments = append(segments, NavigationSegment{
+			Name: name.text,
+			Span: Span{Start: tokens[1+2*i].start, End: name.end},
+		})
+	}
+	values, verr := lp.parseRHS(tokens, eq+1, line)
 	if verr != nil {
 		return Statement{}, verr
 	}
@@ -1413,7 +1443,7 @@ func (lp *lineParser) parseFieldAssignment(tokens []token, line sourceLine) (Sta
 		Kind: Assign,
 		Target: &NavigationExpr{
 			Receiver: tokens[0].text,
-			Segments: []NavigationSegment{{Name: tokens[2].text, Span: Span{Start: tokens[1].start, End: tokens[2].end}}},
+			Segments: segments,
 		},
 		Values: values,
 		Span:   Span{Start: line.offset, End: line.offset + len(line.text)},

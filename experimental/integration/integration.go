@@ -236,11 +236,12 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 		return semantic.NullabilityUnknown
 	}
 	if value.Navigation != nil {
-		// Story 22: a one-level ordinary field path carries the declared
-		// class of its field (RFC-014 §6.7); anything else stays unknown.
-		if len(value.Navigation.Segments) == 1 && !value.Navigation.Segments[0].Safe {
+		// Story 22/25: an ordinary field path carries the declared class
+		// of its final field walked through declared struct types
+		// (RFC-014 §6.7); anything else stays unknown.
+		if fields, ok := pathFields(value.Navigation); ok {
 			if id := scope.Resolve(value.Navigation.Receiver); id != 0 {
-				if class := b.fieldClass(id, value.Navigation.Segments[0].Name); class != semantic.NullabilityUnknown {
+				if class := b.pathClass(id, fields); class != semantic.NullabilityUnknown {
 					return class
 				}
 			}
@@ -370,19 +371,27 @@ func (b *builder) knownNonNull(id semantic.BindingID) bool {
 }
 
 // structInfo carries the ordered fields of a declared struct (RFC-014
-// 6.2): the names drive the completeness check (6.3), the classes the
-// field-path classification (6.7).
+// 6.2): the names drive the completeness check (6.3), the classes and
+// declared type names the field-path classification (6.7).
 type structInfo struct {
 	names   []string
 	classes []semantic.Nullability
+	types   []string
 }
 
-// registerStruct adds a declared struct to the table (story 22).
+// registerStruct adds a declared struct to the table (story 22); story 25
+// records each field's declared type name so the path walk can continue
+// through named struct fields (empty for every other shape).
 func (b *builder) registerStruct(sd *parser.StructDecl) {
 	info := &structInfo{}
 	for _, field := range sd.Fields {
 		info.names = append(info.names, field.Name)
 		info.classes = append(info.classes, classOfTypeExpr(field.TypeExpr))
+		typeName := ""
+		if field.TypeExpr != nil && field.TypeExpr.Kind == parser.NamedType {
+			typeName = field.TypeExpr.Name
+		}
+		info.types = append(info.types, typeName)
 	}
 	b.structs[sd.Name] = info
 }
@@ -403,32 +412,102 @@ func classOfTypeExpr(t *parser.TypeExpr) semantic.Nullability {
 }
 
 // fieldClass resolves the declared class of a one-level field path
-// `root.field` (RFC-014 6.7): the root's declared type must be a known
-// struct; unknown anything stays Unknown.
+// `root.field` (RFC-014 6.7).
 func (b *builder) fieldClass(root semantic.BindingID, field string) semantic.Nullability {
-	typeName, ok := b.bindingTypes[root]
+	return b.pathClass(root, []string{field})
+}
+
+// pathClass resolves the declared class of an ordinary field path
+// `root.f1.…fn` (story 25, RFC-014 6.7): each intermediate field must be
+// known non-null by declared class and carry a named struct type to walk
+// through; the verdict is the final field's declared class. Nullable,
+// pointer and composite intermediates stay unknown - the deref safety of
+// the path is a separate slice (6.7 narrowing); cycles cannot occur (a
+// finite token path, 6.11 pointer indirection is not a named struct).
+func (b *builder) pathClass(root semantic.BindingID, fields []string) semantic.Nullability {
+	info, ok := b.rootStruct(root)
 	if !ok {
 		return semantic.NullabilityUnknown
 	}
-	info, ok := b.structs[typeName]
-	if !ok {
-		return semantic.NullabilityUnknown
-	}
-	for i, name := range info.names {
-		if name == field {
-			return info.classes[i]
+	for i, field := range fields {
+		index := -1
+		for j, name := range info.names {
+			if name == field {
+				index = j
+				break
+			}
+		}
+		if index < 0 {
+			return semantic.NullabilityUnknown
+		}
+		if i == len(fields)-1 {
+			return info.classes[index]
+		}
+		if info.classes[index] != semantic.NullabilityNonNull || info.types[index] == "" {
+			return semantic.NullabilityUnknown
+		}
+		info, ok = b.structs[info.types[index]]
+		if !ok {
+			return semantic.NullabilityUnknown
 		}
 	}
 	return semantic.NullabilityUnknown
 }
 
-// pathKnownNonNull reports whether a one-level field path is known
+// rootStruct resolves a binding's declared struct table entry.
+func (b *builder) rootStruct(root semantic.BindingID) (*structInfo, bool) {
+	typeName, ok := b.bindingTypes[root]
+	if !ok {
+		return nil, false
+	}
+	info, ok := b.structs[typeName]
+	return info, ok
+}
+
+// pathKnownNonNull reports whether an ordinary field path is known
 // non-null by declared classes only (6.3.7: no flow facts on fields).
-// The root's own nullability does not participate - the field's declared
-// class makes the check verdict static (deref safety of the path is a
-// separate follow-up).
-func (b *builder) pathKnownNonNull(root semantic.BindingID, field string) bool {
-	return b.fieldClass(root, field) == semantic.NullabilityNonNull
+// The root's own nullability does not participate - the final field's
+// declared class makes the check verdict static (deref safety of the
+// path is a separate follow-up).
+func (b *builder) pathKnownNonNull(root semantic.BindingID, fields []string) bool {
+	return b.pathClass(root, fields) == semantic.NullabilityNonNull
+}
+
+// pathFields reports the field names of a navigation whose segments are
+// all ordinary (no safe, no call) - the shape the path walk classifies.
+func pathFields(nav *parser.NavigationExpr) ([]string, bool) {
+	fields := make([]string, 0, len(nav.Segments))
+	for _, segment := range nav.Segments {
+		if segment.Safe || segment.Call {
+			return nil, false
+		}
+		fields = append(fields, segment.Name)
+	}
+	return fields, true
+}
+
+// safeSegmentIndex reports the index of the first safe segment in the
+// chain, -1 when every segment is ordinary.
+func safeSegmentIndex(nav *parser.NavigationExpr) int {
+	for i, segment := range nav.Segments {
+		if segment.Safe {
+			return i
+		}
+	}
+	return -1
+}
+
+// pathFieldsPrefix reports the field names of the ordinary segment prefix
+// before index k - the base path behind a safe segment.
+func pathFieldsPrefix(nav *parser.NavigationExpr, k int) ([]string, bool) {
+	fields := make([]string, 0, k)
+	for _, segment := range nav.Segments[:k] {
+		if segment.Safe || segment.Call {
+			return nil, false
+		}
+		fields = append(fields, segment.Name)
+	}
+	return fields, true
 }
 
 // checkConstruction verifies the completeness of a keyed construction
@@ -567,8 +646,11 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			// type). Fields carry no flow facts (§6.3.7).
 			b.readIdents(statement, scope)
 			root := scope.Resolve(statement.Target.Receiver)
-			field := statement.Target.Segments[len(statement.Target.Segments)-1].Name
-			if root != 0 && b.pathKnownNonNull(root, field) &&
+			fields := make([]string, 0, len(statement.Target.Segments))
+			for _, segment := range statement.Target.Segments {
+				fields = append(fields, segment.Name)
+			}
+			if root != 0 && b.pathKnownNonNull(root, fields) &&
 				b.classifyValue(&statement.Values[0], scope) == semantic.NullabilityNullable {
 				b.report(semantic.NilToNonNull, statement.Span)
 			}
@@ -639,32 +721,35 @@ func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.S
 // nilCheckOperand resolves the binding of the exact `X == nil` condition
 // (the mirror of condNarrowTarget's `!=` form); zero means the condition
 // carries no such shape.
-func (b *builder) nilCheckOperand(statement *parser.Statement, scope *semantic.Scope) (semantic.BindingID, string) {
+func (b *builder) nilCheckOperand(statement *parser.Statement, scope *semantic.Scope) (semantic.BindingID, []string) {
 	parts := strings.SplitN(statement.Cond, "==", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[1]) != "nil" {
-		return 0, ""
+		return 0, nil
 	}
 	lhs := strings.TrimSpace(parts[0])
-	// Story 22: a one-level field path `u.f` names its root through the
-	// condition identifiers.
+	// Story 22/25: an ordinary field path `u.f` / `u.f.g` names its root
+	// through the condition identifiers.
 	if dot := strings.Index(lhs, "."); dot > 0 {
-		root, field := strings.TrimSpace(lhs[:dot]), strings.TrimSpace(lhs[dot+1:])
-		if strings.Contains(field, ".") || strings.ContainsAny(field, " \t") {
-			return 0, ""
+		root := strings.TrimSpace(lhs[:dot])
+		fields := strings.Split(lhs[dot+1:], ".")
+		for _, field := range fields {
+			if field == "" || strings.ContainsAny(field, " \t") {
+				return 0, nil
+			}
 		}
 		for _, ident := range statement.CondIdents {
 			if ident == root {
-				return scope.Resolve(ident), field
+				return scope.Resolve(ident), fields
 			}
 		}
-		return 0, ""
+		return 0, nil
 	}
 	for _, ident := range statement.CondIdents {
 		if ident == lhs {
-			return scope.Resolve(ident), ""
+			return scope.Resolve(ident), nil
 		}
 	}
-	return 0, ""
+	return 0, nil
 }
 
 // reportRedundantNilCheck reports D-5 (RFC-002 §6.2.4/§8.2.5, story 19):
@@ -675,12 +760,12 @@ func (b *builder) nilCheckOperand(statement *parser.Statement, scope *semantic.S
 // outside the slice - it re-establishes narrowing in the kernel
 // (condNarrowTarget).
 func (b *builder) reportRedundantNilCheck(statement *parser.Statement, scope *semantic.Scope) {
-	id, field := b.nilCheckOperand(statement, scope)
+	id, fields := b.nilCheckOperand(statement, scope)
 	if id == 0 {
 		return
 	}
-	if field != "" {
-		if b.pathKnownNonNull(id, field) {
+	if fields != nil {
+		if b.pathKnownNonNull(id, fields) {
 			b.report(semantic.RedundantNilCheck, statement.Span)
 		}
 		return
@@ -897,12 +982,12 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 				} else if b.needsNonNilProof(id) {
 					b.add(semantic.Deref(id))
 				}
-				// Story 22: a safe segment beyond the receiver is redundant
-				// when the one-level base path is known non-null by declared
+				// Story 22/25: a safe segment behind an ordinary field path is
+				// redundant when the prefix path is known non-null by declared
 				// classes (6.3.7 - no flow facts on fields).
-				if len(value.Navigation.Segments) == 2 && !value.Navigation.Segments[0].Safe && value.Navigation.Segments[1].Safe {
-					if b.pathKnownNonNull(id, value.Navigation.Segments[0].Name) {
-						b.report(semantic.RedundantSafeNavigation, value.Navigation.Segments[1].Span)
+				if safeAt := safeSegmentIndex(value.Navigation); safeAt > 0 {
+					if fields, ok := pathFieldsPrefix(value.Navigation, safeAt); ok && b.pathKnownNonNull(id, fields) {
+						b.report(semantic.RedundantSafeNavigation, value.Navigation.Segments[safeAt].Span)
 					}
 				}
 			}
@@ -1125,11 +1210,12 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 		} else if b.needsNonNilProof(id) {
 			b.add(semantic.Deref(id))
 		}
-		// Story 22: a safe segment beyond the receiver is redundant when the
-		// one-level base path is known non-null by declared classes (6.3.7).
-		if len(call.Segments) == 2 && !call.Segments[0].Safe && call.Segments[1].Safe {
-			if b.pathKnownNonNull(id, call.Segments[0].Name) {
-				b.report(semantic.RedundantSafeNavigation, call.Segments[1].Span)
+		// Story 22/25: a safe segment behind an ordinary field path is
+		// redundant when the prefix path is known non-null by declared
+		// classes (6.3.7).
+		if safeAt := safeSegmentIndex(call); safeAt > 0 {
+			if fields, ok := pathFieldsPrefix(call, safeAt); ok && b.pathKnownNonNull(id, fields) {
+				b.report(semantic.RedundantSafeNavigation, call.Segments[safeAt].Span)
 			}
 		}
 		// A resolved method (story 08): purity opts out of both effects

@@ -1,0 +1,8 @@
+type Profile struct {
+badge string
+}
+type User struct {
+profile Profile
+}
+var u = User{profile: Profile{badge: "b"}}
+u.profile.badge = "B"
