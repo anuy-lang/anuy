@@ -94,6 +94,9 @@ const (
 	// ADR-0005): a safe segment on a receiver known to be non-null at the
 	// read point (a live narrowing fact or a declared non-null class).
 	RedundantSafeNavigation DiagnosticCategory = "RedundantSafeNavigation"
+	// NullableArgument is the D-3 category (RFC-002 §8.2.3): a
+	// classified-null argument on a declared non-null parameter.
+	NullableArgument DiagnosticCategory = "NullableArgument"
 )
 
 // SourceSpan locates a diagnostic in the source text.

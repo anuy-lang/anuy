@@ -73,12 +73,14 @@ type loopContext struct {
 }
 
 // methodInfo is the flat-table entry of a declared method (story 08):
-// result nullability feeds the call-shape classification, purity opts the
+// result nullability feeds the call-shape classification, parameter
+// nullabilities feed the D-3 argument check (story 18), purity opts the
 // call out of both effects (3a+3b).
 type methodInfo struct {
 	hasResult      bool
 	resultNullable bool
 	pure           bool
+	params         []semantic.Nullability
 }
 
 // declResult mirrors a declared function result type (story 08 Q4-A).
@@ -132,6 +134,10 @@ type builder struct {
 	// methodMutates registers, per method name, the captured bindings its
 	// body assigns - the 3a half of the method-call effect.
 	methodMutates map[string][]semantic.BindingID
+	// funcParams carries the declared parameter classes per function name
+	// (story 18, D-3); symmetric to funcResults, registered before the
+	// body so a self-recursive call sees its own parameters.
+	funcParams map[string][]semantic.Nullability
 	// funcResults records declared function result types (story 08 Q4-A)
 	// for the RHS call-shape classification (§26 establishment).
 	funcResults map[string]declResult
@@ -155,6 +161,7 @@ func newBuilder() *builder {
 		methods:        map[string]methodInfo{},
 		methodMutates:  map[string][]semantic.BindingID{},
 		funcResults:    map[string]declResult{},
+		funcParams:     map[string][]semantic.Nullability{},
 	}
 }
 
@@ -878,6 +885,7 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 	}
 	b.readIdents(statement, scope)
 	b.analyzeClosures(statement, scope, nil)
+	b.checkArgumentTypes(statement, scope)
 	id := scope.Resolve(call.Receiver)
 	if id == 0 {
 		if len(call.Segments) == 0 {
@@ -917,6 +925,32 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 	}
 }
 
+// checkArgumentTypes reports D-3 (RFC-002 §8.2.3, story 18): a
+// classified-null argument on a declared non-null parameter. Functions
+// resolve through funcParams, methods through the flat table's parameter
+// classes; unresolved callees, unpaired extra arguments and unknown
+// classes stay unchecked (conservative). Widening is free (§6.2.1).
+func (b *builder) checkArgumentTypes(statement *parser.Statement, scope *semantic.Scope) {
+	call := statement.Call
+	var params []semantic.Nullability
+	if len(call.Segments) == 0 {
+		params = b.funcParams[call.Receiver]
+	} else {
+		params = b.methods[call.Segments[len(call.Segments)-1].Name].params
+	}
+	if len(params) == 0 {
+		return
+	}
+	for i := range statement.Values {
+		if i >= len(params) || params[i] != semantic.NullabilityNonNull {
+			continue
+		}
+		if b.classifyValue(&statement.Values[i], scope) == semantic.NullabilityNullable {
+			b.report(semantic.NullableArgument, statement.Span)
+		}
+	}
+}
+
 // emitFunction lowers a story 07 function declaration: the declared name
 // binds a closure value, so the body is analyzed at the creation point like
 // a closure literal - self-recursion resolves through the scope, and the
@@ -930,6 +964,11 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 		return
 	}
 	name := statement.Names[0]
+	var paramClasses []semantic.Nullability
+	for _, p := range statement.Closure.Params {
+		paramClasses = append(paramClasses, nullabilityOfParam(p))
+	}
+	b.funcParams[name] = paramClasses
 	// One flat namespace (story 08 Q1-A): a function name colliding with a
 	// declared method rejects.
 	if _, exists := b.methods[name]; exists {
@@ -965,6 +1004,10 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 // `//anuy:pure` opts the method out of both call effects (Q2-A, F-C2).
 func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope) {
 	name := statement.Names[0]
+	var paramClasses []semantic.Nullability
+	for _, p := range statement.Closure.Params {
+		paramClasses = append(paramClasses, nullabilityOfParam(p))
+	}
 	if _, exists := b.methods[name]; exists {
 		b.report(semantic.SameScopeRedeclaration, statement.Span)
 		return
@@ -977,6 +1020,7 @@ func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope)
 		hasResult:      statement.HasResult,
 		resultNullable: statement.ResultNullable,
 		pure:           statement.Pure,
+		params:         paramClasses,
 	}
 	// Registered before the body: a self-recursive call resolves like a
 	// function's self-recursion (story 07 precedent; the mutator set the

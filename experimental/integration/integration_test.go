@@ -1211,3 +1211,84 @@ func TestAnalyzeSourceSafeValueOnUnknownClassStaysClean(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceReportsNullableArgument(t *testing.T) {
+	// D-3 (RFC-002 8.2.3): a classified-null argument on a declared
+	// non-null parameter is an Error.
+	result, err := AnalyzeSource("func save(u User) {\n}\nfunc find() User? {\nreturn make()\n}\nvar u User? = find()\nsave(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NullableArgument")
+	if result.Diagnostics[0].Severity != semantic.SeverityError {
+		t.Fatalf("severity = %s, want Error", result.Diagnostics[0].Severity)
+	}
+}
+
+func TestAnalyzeSourceReportsNilLiteralArgument(t *testing.T) {
+	result, err := AnalyzeSource("func save(u User) {\n}\nsave(nil)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NullableArgument")
+}
+
+func TestAnalyzeSourceReportsNullableMethodArgument(t *testing.T) {
+	result, err := AnalyzeSource("func T.move(d User) {\n}\nfunc find() User? {\nreturn make()\n}\nvar t T = makeT()\nvar u User? = find()\nt.move(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NullableArgument")
+}
+
+func TestAnalyzeSourceNarrowedArgumentStaysClean(t *testing.T) {
+	// §6.3.1: inside the proven branch the argument classifies non-null -
+	// no D-3 (a bare call emits no deref either).
+	result, err := AnalyzeSource("func save(u User) {\n}\nvar u User? = find()\nif u != nil {\nsave(u)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceWideningAndUnknownStayClean(t *testing.T) {
+	// Widening is free (6.2.1): a nullable parameter accepts anything
+	// classified; an unknown parameter class (composite) stays unchecked.
+	result, err := AnalyzeSource("func save(u User?) {\n}\nfunc find() User? {\nreturn make()\n}\nvar u User? = find()\nsave(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+	result, err = AnalyzeSource("func save(xs []User) {\n}\nfunc find() User? {\nreturn make()\n}\nvar u User? = find()\nsave(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceNonNullArgumentStaysClean(t *testing.T) {
+	// A known non-null result classifies the argument non-null (26).
+	result, err := AnalyzeSource("func save(u User) {\n}\nfunc mk() User {\nreturn make()\n}\nvar v User = mk()\nsave(v)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceUnresolvedCalleeStaysWithoutNullableArgument(t *testing.T) {
+	// An unresolved callee has no parameter registry - only the
+	// UnknownRead of the callee itself, no D-3.
+	result, err := AnalyzeSource("var u User? = mk()\nmystery(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "UnknownRead")
+}
