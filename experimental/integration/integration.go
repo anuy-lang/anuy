@@ -494,9 +494,38 @@ func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.S
 	b.propagateMutators(statement, scope, targets)
 }
 
+// nilCheckOperand resolves the binding of the exact `X == nil` condition
+// (the mirror of condNarrowTarget's `!=` form); zero means the condition
+// carries no such shape.
+func (b *builder) nilCheckOperand(statement *parser.Statement, scope *semantic.Scope) semantic.BindingID {
+	parts := strings.SplitN(statement.Cond, "==", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) != "nil" {
+		return 0
+	}
+	name := strings.TrimSpace(parts[0])
+	for _, ident := range statement.CondIdents {
+		if ident == name {
+			return scope.Resolve(ident)
+		}
+	}
+	return 0
+}
+
+// reportRedundantNilCheck reports D-5 (RFC-002 §6.2.4/§8.2.5, story 19):
+// the exact `X == nil` condition over a binding known to be non-null
+// (a live narrowing fact or a declared non-null class). The `!= nil`
+// form stays outside the slice - it re-establishes narrowing in the
+// kernel (condNarrowTarget).
+func (b *builder) reportRedundantNilCheck(statement *parser.Statement, scope *semantic.Scope) {
+	if id := b.nilCheckOperand(statement, scope); id != 0 && b.knownNonNull(id) {
+		b.report(semantic.RedundantNilCheck, statement.Span)
+	}
+}
+
 func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	// Condition reads evaluate in the branching block, before any branch.
 	b.readConditionIdents(statement, scope)
+	b.reportRedundantNilCheck(statement, scope)
 	before := copyFacts(b.facts[b.cur])
 	beforeNN := copyFacts(b.nonNil[b.cur])
 	start := b.blocks[b.cur].ID
@@ -561,6 +590,7 @@ func (b *builder) emitLoop(statement *parser.Statement, scope *semantic.Scope) {
 	b.appendBlock()
 	headerID := b.blocks[b.cur].ID
 	b.readConditionIdents(statement, scope)
+	b.reportRedundantNilCheck(statement, scope)
 	if len(statement.Values) > 0 {
 		// The iteration collection evaluates in the header on every
 		// iteration (RFC-003 §76). Collection resolution has no binding

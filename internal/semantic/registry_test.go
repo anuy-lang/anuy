@@ -30,6 +30,7 @@ var approvedScheme = []struct {
 	{"UnsafeMemberAccess", "ANUY4001", SeverityError},
 	{"RedundantSafeNavigation", "ANUY4002", SeverityWarning},
 	{"NullableArgument", "ANUY4003", SeverityError},
+	{"RedundantNilCheck", "ANUY4004", SeverityError},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 

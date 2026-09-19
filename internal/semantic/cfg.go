@@ -97,6 +97,9 @@ const (
 	// NullableArgument is the D-3 category (RFC-002 §8.2.3): a
 	// classified-null argument on a declared non-null parameter.
 	NullableArgument DiagnosticCategory = "NullableArgument"
+	// RedundantNilCheck is the D-5 category (RFC-002 §6.2.4/§8.2.5): the
+	// exact `X == nil` condition over a binding known to be non-null.
+	RedundantNilCheck DiagnosticCategory = "RedundantNilCheck"
 )
 
 // SourceSpan locates a diagnostic in the source text.

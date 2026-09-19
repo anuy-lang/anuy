@@ -1292,3 +1292,68 @@ func TestAnalyzeSourceUnresolvedCalleeStaysWithoutNullableArgument(t *testing.T)
 	}
 	assertSingleDiagnostic(t, result, "UnknownRead")
 }
+
+func TestAnalyzeSourceReportsRedundantNilCheckOnDeclaredNonNull(t *testing.T) {
+	// D-5 (RFC-002 6.2.4, 8.2.5): the exact `X == nil` condition over a
+	// declared non-null binding is an Error (SHOULD be compile-time).
+	result, err := AnalyzeSource("var u User = getUser()\nif u == nil {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "RedundantNilCheck")
+	if result.Diagnostics[0].Severity != semantic.SeverityError {
+		t.Fatalf("severity = %s, want Error", result.Diagnostics[0].Severity)
+	}
+}
+
+func TestAnalyzeSourceReportsRedundantNilCheckOnNarrowedReceiver(t *testing.T) {
+	// A live narrowing fact makes the inner check redundant too.
+	result, err := AnalyzeSource("var u User? = find()\nif u != nil {\nif u == nil {\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "RedundantNilCheck")
+}
+
+func TestAnalyzeSourceReportsRedundantNilCheckInLoop(t *testing.T) {
+	// The loop condition form carries the same grammar (the kernel narrows
+	// both), so the D-5 check applies to `for` headers.
+	result, err := AnalyzeSource("var u User = getUser()\nfor u == nil {\nbreak\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "RedundantNilCheck")
+}
+
+func TestAnalyzeSourceNilCheckOnNullableStaysClean(t *testing.T) {
+	// The check over a nilable binding without a fact is meaningful.
+	result, err := AnalyzeSource("var u User? = find()\nif u == nil {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceNonNullNotEqualNilStaysClean(t *testing.T) {
+	// The `!= nil` form is outside the D-5 slice - it re-establishes
+	// narrowing in the kernel (condNarrowTarget).
+	result, err := AnalyzeSource("var u User = getUser()\nif u != nil {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceNilCheckOnUnknownClassStaysClean(t *testing.T) {
+	result, err := AnalyzeSource("var u = getUser()\nif u == nil {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
