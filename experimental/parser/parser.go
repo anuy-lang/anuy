@@ -161,6 +161,9 @@ type Closure struct {
 	// (story 08); closures-as-values stay result-less.
 	HasResult      bool
 	ResultNullable bool
+	// ResultTypeExpr is the structural result type (story 16): lowering
+	// spells the carrier from it. Nil without a declared result.
+	ResultTypeExpr *TypeExpr
 }
 
 // Param is a closure parameter. Type preserves source spelling; TypeExpr is
@@ -1275,6 +1278,7 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine, a
 		return Closure{}, err
 	}
 	hasResult, resultNullable := false, false
+	var resultTypeExpr *TypeExpr
 	if i < len(tokens) && !(tokens[i].kind == tokenPunct && tokens[i].text == "{") {
 		// An optional result type before the block (story 08 Q4-A, RFC-002
 		// §40 spelling: `func f() User? {`). Types carry no braces in this
@@ -1294,12 +1298,13 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine, a
 			return Closure{}, typeErr
 		}
 		hasResult, resultNullable = true, typeExpr.Nullable
+		resultTypeExpr = typeExpr
 		i = j
 	}
 	if i >= len(tokens) || tokens[i].kind != tokenPunct || tokens[i].text != "{" {
 		return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
 	}
-	cl := Closure{Params: params, HasResult: hasResult, ResultNullable: resultNullable, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
+	cl := Closure{Params: params, HasResult: hasResult, ResultNullable: resultNullable, ResultTypeExpr: resultTypeExpr, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
 	lp.pos++
 	// A closure body is a function boundary: loop depth does not carry in,
 	// and the result-type frame scopes `return expr` (story 08).

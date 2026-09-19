@@ -724,3 +724,122 @@ func TestLowerGeneratedCallArgumentsTypeChecks(t *testing.T) {
 	// with arguments representable on builtins.
 	typeCheckGenerated(t, "println(\"hello\")\n")
 }
+
+func TestLowerFuncDeclVoidToGo(t *testing.T) {
+	// Story 16: top-level functions hoist to package-level declarations
+	// before Run; a bare return stays verbatim.
+	got, err := Lower("func f() {\nreturn\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\nfunc f() {\n\treturn\n}\n\nfunc Run() {\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerFuncDeclResultAndCallE2E(t *testing.T) {
+	// A free function with a non-null result plus its call statement.
+	got, err := Lower("func twice(n int) int {\nreturn n + n\n}\ntwice(1)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\nfunc twice(n int) int {\n\treturn n + n\n}\n\nfunc Run() {\n\ttwice(1)\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerFuncDeclCarrierResultNone(t *testing.T) {
+	// `return nil` over a declared `T?` result converts to the None carrier
+	// (§6.7-6.8, the convert rules apply in return position).
+	got, err := Lower("func find() User? {\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\n" + anuyabiImport + "func find() anuyabi.Nullable[User] {\n\treturn anuyabi.None[User]()\n}\n\nfunc Run() {\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerFuncDeclReturnSomeAndCarrierCopy(t *testing.T) {
+	// The Run body lowers before the hoisting pass, so the function body
+	// sees the tracked bindings: a carrier copy returns passthrough, other
+	// values wrap in Some.
+	got, err := Lower("var u User?\nfunc find() User? {\nreturn u\n}\nfunc pick() User? {\nreturn 42\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "func find() anuyabi.Nullable[User] {\n\treturn u\n}") {
+		t.Fatalf("Lower() = %q, wants carrier copy passthrough", got)
+	}
+	if !strings.Contains(got, "func pick() anuyabi.Nullable[User] {\n\treturn anuyabi.Some(42)\n}") {
+		t.Fatalf("Lower() = %q, wants Some wrapping", got)
+	}
+}
+
+func TestLowerFuncDeclNativeNilResult(t *testing.T) {
+	// Native-nil results keep the plain Go type; nil returns stay verbatim.
+	got, err := Lower("func wrap() error? {\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\nfunc wrap() error {\n\treturn nil\n}\n\nfunc Run() {\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerFuncDeclCarrierParam(t *testing.T) {
+	// Parameters lower through the representation rules (§6.7-6.8).
+	got, err := Lower("func show(n int?) {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "func show(n anuyabi.Nullable[int]) {\n}") {
+		t.Fatalf("Lower() = %q, wants carrier parameter", got)
+	}
+}
+
+func TestLowerMethodDeclToGo(t *testing.T) {
+	// A method emits as a Go method with the synthetic receiver (the
+	// grammar has no receiver binding - the body never reads it).
+	got, err := Lower("func User.save() {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "func (anuyRecv User) save() {\n}") {
+		t.Fatalf("Lower() = %q, wants the synthetic receiver method", got)
+	}
+}
+
+func TestLowerMethodDeclCarrierResult(t *testing.T) {
+	got, err := Lower("func User.find() User? {\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "func (anuyRecv User) find() anuyabi.Nullable[User] {\n\treturn anuyabi.None[User]()\n}") {
+		t.Fatalf("Lower() = %q, wants the method with carrier result", got)
+	}
+}
+
+func TestLowerNestedFuncDeclRejected(t *testing.T) {
+	// A block-nested declaration has no Go shape (kernel accepts it - a
+	// narrowing reject, not a silent drop).
+	if _, err := Lower("{\nfunc f() int {\nreturn 1\n}\n}\n"); err == nil || !strings.Contains(err.Error(), "nested function") {
+		t.Fatalf("err = %v, want nested function reject", err)
+	}
+}
+
+func TestLowerGeneratedFuncCallsTypeCheck(t *testing.T) {
+	typeCheckGenerated(t, "func twice(n int) int {\nreturn n + n\n}\ntwice(1)\n")
+}
+
+func TestLowerGeneratedFuncCarrierResultTypeChecks(t *testing.T) {
+	typeCheckGenerated(t, "func find() int? {\nreturn nil\n}\n")
+}
+
+func TestLowerGeneratedFuncCarrierParamTypeChecks(t *testing.T) {
+	typeCheckGenerated(t, "func show(n int?) {\n}\n")
+}

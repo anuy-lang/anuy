@@ -1,0 +1,3 @@
+func User.find() User? {
+return nil
+}

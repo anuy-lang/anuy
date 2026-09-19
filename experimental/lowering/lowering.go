@@ -20,19 +20,38 @@ func Lower(source string) (string, error) {
 		return "", err
 	}
 	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}}
+	// Story 16: top-level functions hoist to package-level declarations.
+	// The Run body lowers first, so the tracking maps are populated by the
+	// time the hoisted function bodies are rendered (captures stay
+	// visible); output order stays functions-first.
+	var bodyStatements, funcs []parser.Statement
+	for _, statement := range program.Statements {
+		if statement.Kind == parser.Function {
+			funcs = append(funcs, statement)
+		} else {
+			bodyStatements = append(bodyStatements, statement)
+		}
+	}
 	var body strings.Builder
-	last, err := l.statements(&body, program.Statements)
+	last, err := l.statements(&body, bodyStatements)
 	if err != nil {
 		return "", err
 	}
 	if last != "" && !strings.Contains(body.String(), "_ = ") {
 		fmt.Fprintf(&body, "\t_ = %s\n", last)
 	}
+	var decls strings.Builder
+	for i := range funcs {
+		if err := l.function(&decls, &funcs[i]); err != nil {
+			return "", err
+		}
+	}
 	var out strings.Builder
 	out.WriteString("package fixture\n\n")
 	if l.taggedUsed {
 		out.WriteString(anuyabiImport)
 	}
+	out.WriteString(decls.String())
 	out.WriteString("func Run() {\n")
 	out.WriteString(body.String())
 	out.WriteString("}\n")
@@ -48,6 +67,11 @@ type lowerer struct {
 	carriers   map[string]string
 	nativeNil  map[string]bool
 	taggedUsed bool
+	// returnCarrierElem is the conversion context of the enclosing
+	// function's declared result (story 16): the carrier element when the
+	// result is tagged, empty for native-nil and non-null results (raw
+	// returns). Save/restored around each body.
+	returnCarrierElem string
 }
 
 func (l *lowerer) statements(body *strings.Builder, statements []parser.Statement) (string, error) {
@@ -233,6 +257,26 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 				return "", err
 			}
 			last = ""
+		case parser.Function:
+			// Top-level declarations are hoisted by Lower before the body
+			// pass; a Function seen here is block-nested, which has no Go
+			// shape (kernel accepts it - a narrowing reject).
+			return "", fmt.Errorf("experimental lowering: nested function declaration is not supported")
+		case parser.Return:
+			// Story 16: `return expr` exists only inside a function body
+			// with a declared result (the parser funcStack); the conversion
+			// follows the result representation. A bare return stays
+			// verbatim in every shape.
+			if len(statement.Values) == 0 {
+				body.WriteString("\treturn\n")
+			} else {
+				text, err := l.convert(statement.Values[0], l.returnCarrierElem)
+				if err != nil {
+					return "", err
+				}
+				fmt.Fprintf(body, "\treturn %s\n", text)
+			}
+			last = ""
 		case parser.Break:
 			body.WriteString("\tbreak\n")
 		case parser.Continue:
@@ -408,6 +452,64 @@ func (l *lowerer) safeValue(body *strings.Builder, nav *parser.NavigationExpr, r
 		thenValue, elseValue = memberExpr, "nil"
 	}
 	fmt.Fprintf(body, "\tif %s {\n\t%s = %s\n\t} else {\n\t%s = %s\n\t}\n", guard, target, thenValue, target, elseValue)
+	return nil
+}
+
+// methodReceiver is the synthetic receiver name of a lowered method: the
+// grammar has no receiver binding (the body never reads it), and verbatim
+// calls (`u.save()`) compile only against a real Go method.
+const methodReceiver = "anuyRecv"
+
+// function lowers one hoisted top-level declaration (story 16, RFC-002
+// §6.4.11-6.4.12, §6.7-6.8): parameters and the declared result render
+// through the representation rules, and the body lowers with the return
+// context set to the result's carrier element (empty for native-nil and
+// non-null results - raw returns). `//anuy:pure` is a kernel contract and
+// a no-op for generated Go.
+func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) error {
+	cl := statement.Closure
+	var b strings.Builder
+	b.WriteString("func ")
+	if statement.Method != "" {
+		b.WriteString("(" + methodReceiver + " " + statement.Method + ") ")
+	}
+	b.WriteString(statement.Names[0] + "(")
+	for i, p := range cl.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		typeText := p.Type
+		if p.TypeExpr != nil {
+			text, err := l.goType(p.TypeExpr)
+			if err != nil {
+				return err
+			}
+			typeText = text
+		}
+		b.WriteString(p.Name + " " + typeText)
+	}
+	b.WriteString(")")
+	if statement.HasResult && cl.ResultTypeExpr != nil {
+		text, err := l.goType(cl.ResultTypeExpr)
+		if err != nil {
+			return err
+		}
+		b.WriteString(" " + text)
+	}
+	b.WriteString(" {\n")
+	saved := l.returnCarrierElem
+	if statement.HasResult && cl.ResultTypeExpr != nil {
+		if elem, ok := l.carrier(cl.ResultTypeExpr); ok {
+			l.returnCarrierElem = elem
+		}
+	}
+	if _, err := l.statements(&b, cl.Body); err != nil {
+		l.returnCarrierElem = saved
+		return err
+	}
+	l.returnCarrierElem = saved
+	b.WriteString("}\n")
+	decls.WriteString(b.String() + "\n")
 	return nil
 }
 

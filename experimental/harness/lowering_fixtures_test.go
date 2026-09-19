@@ -36,6 +36,8 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"nil-condition-carrier.anuy", "if n.IsNil() {", false},
 		{"call-arguments.anuy", "u.m(a, b)", true},
 		{"safe-call-arguments.anuy", "u.Value.send(payload())", false},
+		{"func-decl-carrier.anuy", "func find() anuyabi.Nullable[User]", false},
+		{"func-method.anuy", "func (anuyRecv User) find() anuyabi.Nullable[User]", false},
 		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
 		{"native-nil-map.anuy", "var m map[string]User", true},
 		{"native-nil-error.anuy", "var err error", true},

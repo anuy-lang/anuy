@@ -1063,3 +1063,29 @@ func TestParseSafeCallStatement(t *testing.T) {
 		t.Fatalf("segment = %#v, want a safe call", s.Call.Segments[0])
 	}
 }
+
+func TestParseFunctionDeclRetainsResultTypeExpr(t *testing.T) {
+	// Story 16: the result TypeExpr is retained structurally - lowering
+	// cannot spell the Nullable[T] result without it (parseClosure
+	// computed and dropped it before).
+	for _, tc := range []struct {
+		source string
+		want   string
+	}{
+		{"func find() User? {\n}\n", "User?"},
+		{"func f() int {\n}\n", "int"},
+		{"func User.find() int {\n}\n", "int"},
+	} {
+		program, err := Parse(tc.source)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.source, err)
+		}
+		got := program.Statements[0].Closure.ResultTypeExpr
+		if got == nil || got.Canonical() != tc.want {
+			t.Fatalf("%q: ResultTypeExpr = %#v, want %q", tc.source, got, tc.want)
+		}
+	}
+	if program, err := Parse("func f() {\n}\n"); err != nil || program.Statements[0].Closure.ResultTypeExpr != nil {
+		t.Fatalf("void function: err=%v ResultTypeExpr=%#v, want nil", err, program.Statements[0].Closure.ResultTypeExpr)
+	}
+}
