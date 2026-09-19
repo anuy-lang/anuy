@@ -100,9 +100,12 @@ type StructDecl struct {
 
 // KeyedLiteral marks a keyed construction value `N{field: expression, …}`
 // (RFC-014 §6.3): the raw Text lowers verbatim; Name carries the type the
-// fields belong to.
+// fields belong to, Fields the ordered key names and Span the literal's
+// source extent (the completeness check, story 22).
 type KeyedLiteral struct {
-	Name string
+	Name   string
+	Fields []string
+	Span   Span
 }
 
 type Kind uint8
@@ -252,6 +255,10 @@ type Statement struct {
 	// RFC-014 §6.2): Names[0] carries the type name; the declaration hoists
 	// to a package-level Go type.
 	Struct *StructDecl
+	// Target is non-nil for a field-mutation assignment `u.f = expr`
+	// (story 22, RFC-014 §6.7): an ordinary single-field navigation path;
+	// Names stays empty.
+	Target *NavigationExpr
 }
 
 // A Loop statement reuses fields by loop form (spec 1-3-1-1): condition form
@@ -447,10 +454,16 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		// `_()` — the blank identifier is not callable (GB-3: `_` holds no
 		// value, so it cannot be read as a callee either).
 		return Statement{}, newError(BlankIdentifierRead, tokens[0].start, "_ does not hold a value")
+	case tokens[0].kind == tokenIdent && len(tokens) >= 2 && isPunct(tokens[1], ".") && hasTopLevelAssign(tokens):
+		// Story 22: `u.f = expr` — field mutation, before the navigation-
+		// call path intercepts the dot.
+		return lp.parseFieldAssignment(tokens, line)
 	case isCallStatementStart(tokens):
 		return lp.parseCallStatement(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "type":
 		return lp.parseTypeDecl(tokens, line)
+	case tokens[0].kind == tokenIdent && len(tokens) >= 2 && isPunct(tokens[1], ".") && hasTopLevelAssign(tokens):
+		return lp.parseFieldAssignment(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "else":
 		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "unexpected else")
 	case len(tokens) == 1 && tokens[0].kind == tokenIdent:
@@ -1358,6 +1371,55 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 	}, nil
 }
 
+// hasTopLevelAssign reports whether the line carries an `=` outside any
+// brackets/braces (the `==` token is separate and does not count).
+func hasTopLevelAssign(tokens []token) bool {
+	depth := 0
+	for _, t := range tokens {
+		switch {
+		case isPunct(t, "(") || isPunct(t, "[") || isPunct(t, "{"):
+			depth++
+		case isPunct(t, ")") || isPunct(t, "]") || isPunct(t, "}"):
+			depth--
+		case depth == 0 && isAssign(t):
+			return true
+		}
+	}
+	return false
+}
+
+// parseFieldAssignment parses the field-mutation form `u.f = expr`
+// (story 22, RFC-014 §6.7): an ordinary single-field path as the target.
+// Deeper paths reject explicitly.
+func (lp *lineParser) parseFieldAssignment(tokens []token, line sourceLine) (Statement, error) {
+	if tokens[0].text == "_" || reservedWords[tokens[0].text] {
+		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "invalid assignment target")
+	}
+	if len(tokens) < 4 || tokens[2].kind != tokenIdent || tokens[2].text == "_" || reservedWords[tokens[2].text] {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "field assignment requires a field name")
+	}
+	if len(tokens) > 3 && isPunct(tokens[3], ".") {
+		return Statement{}, newError(UnsupportedSyntax, tokens[3].start, "deeper field paths are not supported in this slice")
+	}
+	if len(tokens) <= 3 || !isAssign(tokens[3]) {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "assignment requires =")
+	}
+	values, verr := parseValueList(tokens, 4, line)
+	if verr != nil {
+		return Statement{}, verr
+	}
+	lp.pos++
+	return Statement{
+		Kind: Assign,
+		Target: &NavigationExpr{
+			Receiver: tokens[0].text,
+			Segments: []NavigationSegment{{Name: tokens[2].text, Span: Span{Start: tokens[1].start, End: tokens[2].end}}},
+		},
+		Values: values,
+		Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
+	}, nil
+}
+
 // parseClosure parses `func(Params) {` plus its block. lp.pos is advanced
 // past every consumed line.
 func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine, allowResult bool) (Closure, *Error) {
@@ -1806,14 +1868,18 @@ func valueGroup(tokens []token, lo, hi int, line sourceLine) (Value, *Error) {
 	}
 	group := tokens[lo:hi]
 	if keyed := keyedLiteralName(group); keyed != "" {
-		idents, identErr := keyedLiteralIdents(group)
+		keys, idents, identErr := keyedLiteralScan(group)
 		if identErr != nil {
 			return Value{}, identErr
 		}
 		return Value{
 			Text:   line.raw[tokens[lo].start-line.offset : tokens[hi-1].end-line.offset],
 			Idents: idents,
-			Keyed:  &KeyedLiteral{Name: keyed},
+			Keyed: &KeyedLiteral{
+				Name:   keyed,
+				Fields: keys,
+				Span:   Span{Start: tokens[lo].start, End: tokens[hi-1].end},
+			},
 		}, nil
 	}
 	navigation, idents, recognized, navErr := navigationMetadata(group)
@@ -1850,7 +1916,11 @@ func keyedLiteralName(group []token) string {
 // the type name and the field keys are not reads (they name declared
 // structure, not values); only the field-value expressions count, scanned
 // recursively so nested literals hide their keys too.
-func keyedLiteralIdents(group []token) ([]string, *Error) {
+// keyedLiteralScan walks a keyed construction group and returns the
+// ordered field keys plus the binding reads of the field-value expressions
+// (keys and the type name are never reads).
+func keyedLiteralScan(group []token) ([]string, []string, *Error) {
+	var keys []string
 	var idents []string
 	seen := map[string]bool{}
 	i := 2 // past the type name and the opening brace
@@ -1861,9 +1931,10 @@ func keyedLiteralIdents(group []token) ([]string, *Error) {
 			// The key names a declared field, not a value: counted never,
 			// duplicated never (RFC-014 §6.3 - exactly once).
 			if seen[t.text] {
-				return nil, newError(UnsupportedSyntax, t.start, fmt.Sprintf("duplicate field key %q", t.text))
+				return nil, nil, newError(UnsupportedSyntax, t.start, fmt.Sprintf("duplicate field key %q", t.text))
 			}
 			seen[t.text] = true
+			keys = append(keys, t.text)
 			i += 2 // past the key and the colon
 			start, depth := i, 0
 			for i < len(group)-1 && (depth > 0 || !isPunct(group[i], ",")) {
@@ -1876,15 +1947,15 @@ func keyedLiteralIdents(group []token) ([]string, *Error) {
 			}
 			segment := group[start:i]
 			if keyedLiteralName(segment) != "" {
-				nested, err := keyedLiteralIdents(segment)
+				_, nested, err := keyedLiteralScan(segment)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				idents = append(idents, nested...)
 			} else {
 				segmentIdents, err := valueIdents(segment)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				idents = append(idents, segmentIdents...)
 			}
@@ -1906,7 +1977,7 @@ func keyedLiteralIdents(group []token) ([]string, *Error) {
 			i++
 		}
 	}
-	return idents, nil
+	return keys, idents, nil
 }
 
 // isElseIfHeader reports a `} else if` continuation line that closes the

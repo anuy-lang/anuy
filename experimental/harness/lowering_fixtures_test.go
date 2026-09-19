@@ -40,6 +40,7 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"func-method.anuy", "func (anuyRecv User) find() anuyabi.Nullable[User]", false},
 		{"struct-decl.anuy", "type User struct {", true},
 		{"struct-construction.anuy", "u := User{id: 1}", true},
+		{"struct-field-mutation.anuy", "u.name = \"Bob\"", true},
 		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
 		{"native-nil-map.anuy", "var m map[string]User", true},
 		{"native-nil-error.anuy", "var err error", true},

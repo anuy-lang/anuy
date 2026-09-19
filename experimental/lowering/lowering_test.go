@@ -883,3 +883,15 @@ func TestLowerGeneratedStructConstructionTypeChecks(t *testing.T) {
 	// constructed and passed to a declared function.
 	typeCheckGenerated(t, "type User struct {\nid int\n}\nfunc save(u User) {\n}\nvar u = User{id: 1}\nsave(u)\n")
 }
+
+func TestLowerFieldMutationToGo(t *testing.T) {
+	// Story 22 (RFC-014 6.7, 6.13): field mutation lowers verbatim - the
+	// type-free layer performs no field-type conversions.
+	got, err := Lower("type User struct {\nname string\n}\nvar u = User{name: \"Ann\"}\nu.name = \"Bob\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tu.name = \"Bob\"\n") {
+		t.Fatalf("Lower() = %q, wants the field mutation", got)
+	}
+}

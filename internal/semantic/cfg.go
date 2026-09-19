@@ -103,6 +103,10 @@ const (
 	// NilToNonNull is the D-1 category (RFC-002 §6.1.7/§8.2.1): a
 	// classified-null value on a declared non-null binding.
 	NilToNonNull DiagnosticCategory = "NilToNonNull"
+	// IncompleteConstruction is the RFC-014 §6.3 category (story 22): a
+	// keyed construction misses a declared direct field or names an
+	// unknown one.
+	IncompleteConstruction DiagnosticCategory = "IncompleteConstruction"
 )
 
 // SourceSpan locates a diagnostic in the source text.

@@ -1411,3 +1411,115 @@ func TestAnalyzeSourceNilToNonNullNegativesStayClean(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzeSourceReportsMissingConstructionField(t *testing.T) {
+	// RFC-014 6.3 (story 22): every direct field is present exactly once -
+	// a missing field is an Error despite Go's zero representation.
+	result, err := AnalyzeSource("type User struct {\nid int\nname string\n}\nvar u = User{id: 1}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "IncompleteConstruction")
+	if result.Diagnostics[0].Severity != semantic.SeverityError {
+		t.Fatalf("severity = %s, want Error", result.Diagnostics[0].Severity)
+	}
+}
+
+func TestAnalyzeSourceReportsUnknownConstructionKey(t *testing.T) {
+	// 6.3: every name in a construction MUST resolve to a direct field.
+	result, err := AnalyzeSource("type User struct {\nid int\n}\nvar u = User{id: 1, ghost: 2}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "IncompleteConstruction")
+}
+
+func TestAnalyzeSourceZeroFieldConstructionStaysClean(t *testing.T) {
+	// 6.2: a zero-field struct has exactly one construction - the empty
+	// literal.
+	result, err := AnalyzeSource("type Marker struct {\n}\nvar m = Marker{}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceUnknownStructLiteralStaysClean(t *testing.T) {
+	// An unknown type has no field table - conservatively unchecked.
+	result, err := AnalyzeSource("var g = Ghost{id: 1}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceReportsNilToNonNullFieldMutation(t *testing.T) {
+	// D-1 on a field path (RFC-014 6.7: mutation respects the declared
+	// field type).
+	result, err := AnalyzeSource("type User struct {\nname string\n}\nvar u = User{name: \"Ann\"}\nu.name = nil\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NilToNonNull")
+}
+
+func TestAnalyzeSourceReportsNullableFieldArgument(t *testing.T) {
+	// D-3 through a field path: the nullable field passed to a non-null
+	// parameter.
+	result, err := AnalyzeSource("func save(s string) {\n}\ntype User struct {\nnick string?\n}\nvar u = User{nick: nil}\nsave(u.nick)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NullableArgument")
+}
+
+func TestAnalyzeSourceReportsRedundantSafeFieldNavigation(t *testing.T) {
+	// D-4 through a known non-null field path (declared classes only).
+	result, err := AnalyzeSource("type Profile struct {\nbadge string\n}\ntype User struct {\nprofile Profile\n}\nvar u User = User{profile: Profile{badge: \"b\"}}\nvar b = u.profile?.badge\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "RedundantSafeNavigation")
+}
+
+func TestAnalyzeSourceReportsRedundantNilCheckOnField(t *testing.T) {
+	// D-5 through a known non-null field path.
+	result, err := AnalyzeSource("type User struct {\nactive bool\n}\nvar u User = User{active: true}\nif u.active == nil {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "RedundantNilCheck")
+}
+
+func TestAnalyzeSourceFieldModelNegativesStayClean(t *testing.T) {
+	// Unknown roots stay unknown; composite fields carry no class; a
+	// literal before its declaration is unchecked; the != form is outside
+	// D-5; a narrowing fact on the root does not make the field known
+	// (6.3.7 - declared classes only).
+	for _, source := range []string{
+		"var g = Ghost{}\nif g.f == nil {\n}\n",
+		"type T struct {\nxs []User\n}\nvar t T = T{xs: nil}\nif t.xs == nil {\n}\n",
+		"var u = User{id: 1}\ntype User struct {\nid int\n}\n",
+		"type User struct {\nactive bool\n}\nvar u User = User{active: true}\nif u.active != nil {\n}\n",
+	} {
+		result, err := AnalyzeSource(source)
+		if err != nil {
+			t.Fatalf("%q: %v", source, err)
+		}
+		if len(result.Diagnostics) != 0 {
+			t.Fatalf("%q: result = %#v, want no diagnostics", source, result.Diagnostics)
+		}
+	}
+}
+
+func TestAnalyzeSourceMultilineLiteralRejected(t *testing.T) {
+	// The line-oriented grammar accepts only single-line keyed literals
+	// (RFC-014 6.4 formatting - a follow-up slice).
+	if _, err := AnalyzeSource("type User struct {\nid int\n}\nvar u = User{\nid: 1,\n}\n"); err == nil {
+		t.Fatal("multiline literal accepted")
+	}
+}

@@ -2,6 +2,7 @@ package parser
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -1191,5 +1192,38 @@ func TestParseKeyedLiteralDuplicateKeyRejected(t *testing.T) {
 	// RFC-014 6.3: every direct field is initialized exactly once.
 	if _, err := Parse("var u = User{id: 1, id: 2}\n"); err == nil {
 		t.Fatal("duplicate key accepted")
+	}
+}
+
+func TestParseFieldMutation(t *testing.T) {
+	// Story 22 (RFC-014 6.7): `user.name = "Bob"` — an ordinary field
+	// path as the assignment target.
+	program, err := Parse("var u User\nu.name = \"Bob\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[1]
+	if s.Kind != Assign || s.Target == nil {
+		t.Fatalf("kind = %v, target = %#v, want Assign with Target", s.Kind, s.Target)
+	}
+	if s.Target.Receiver != "u" || len(s.Target.Segments) != 1 || s.Target.Segments[0].Name != "name" {
+		t.Fatalf("target = %#v, want u.name", s.Target)
+	}
+	if len(s.Values) != 1 || s.Values[0].Text != "\"Bob\"" {
+		t.Fatalf("values = %#v, want the RHS value", s.Values)
+	}
+}
+
+func TestParseFieldMutationRejects(t *testing.T) {
+	// Deeper paths and safe targets stay rejected; the safe-target reject
+	// preserves its original form.
+	if _, err := Parse("u.f.g = 1\n"); err == nil || !strings.Contains(err.Error(), "deeper field path") {
+		t.Fatalf("err = %v, want deeper field path reject", err)
+	}
+	if _, err := Parse("u?.f = 1\n"); err == nil || !strings.Contains(err.Error(), "safe navigation is not an assignment target") {
+		t.Fatalf("err = %v, want safe target reject", err)
+	}
+	if _, err := Parse("u.f\n"); err == nil || !strings.Contains(err.Error(), "call statement") {
+		t.Fatalf("err = %v, want the legacy navigation-call reject", err)
 	}
 }

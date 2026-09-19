@@ -1,0 +1,5 @@
+type User struct {
+name string
+}
+var u = User{name: "Ann"}
+u.name = "Bob"

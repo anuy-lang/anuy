@@ -151,6 +151,15 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			}
 			last = statement.Names[len(statement.Names)-1]
 		case parser.Assign:
+			if statement.Target != nil {
+				// Story 22: field mutation lowers verbatim (§6.13) - the
+				// type-free layer performs no field-type conversions.
+				if err := l.fieldMutation(body, &statement); err != nil {
+					return "", err
+				}
+				last = ""
+				break
+			}
 			// Pairing by index: the arity model of the parser guarantees
 			// equal counts except the single-value multi-target form, whose
 			// tuple RHS is not modeled - those stay raw text.
@@ -305,6 +314,25 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 		}
 	}
 	return last, nil
+}
+
+// fieldMutation lowers `u.f = expr` verbatim (story 22, RFC-014 §6.13):
+// the type-free layer performs no field-type conversions.
+func (l *lowerer) fieldMutation(body *strings.Builder, statement *parser.Statement) error {
+	expr := statement.Target.Receiver
+	for _, segment := range statement.Target.Segments {
+		expr += "." + segment.Name
+	}
+	texts := make([]string, 0, len(statement.Values))
+	for _, value := range statement.Values {
+		text, err := l.value(value)
+		if err != nil {
+			return err
+		}
+		texts = append(texts, text)
+	}
+	fmt.Fprintf(body, "\t%s = %s\n", expr, strings.Join(texts, ", "))
+	return nil
 }
 
 // condition rewrites nil comparisons over a tracked carrier binding to
