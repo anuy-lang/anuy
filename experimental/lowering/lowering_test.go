@@ -668,3 +668,59 @@ func TestLowerSafeValueRejectsCallArguments(t *testing.T) {
 		t.Fatalf("err = %v, want safe-value call arguments reject", err)
 	}
 }
+
+func TestLowerCallStatementArguments(t *testing.T) {
+	// Story 15 (the story 07 pre-existing gap): call statement arguments
+	// emit into the call - today they are dropped entirely.
+	got, err := Lower("var u User\nu.m(a, b)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tu.m(a, b)\n") {
+		t.Fatalf("Lower() = %q, wants emitted arguments", got)
+	}
+}
+
+func TestLowerCallStatementClosureArgument(t *testing.T) {
+	// A closure argument renders as the Go func literal (RFC-003 §41
+	// multiline form parses into the same Closure value).
+	got, err := Lower("var u User\nu.m(func(x int) {\ny = x\n})\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tu.m(func(x int) {\n\ty = x\n})\n") {
+		t.Fatalf("Lower() = %q, wants the closure literal argument", got)
+	}
+}
+
+func TestLowerSafeCallArgumentsInsideGuard(t *testing.T) {
+	// RFC-002 §6.10.4: the argument of a safe call evaluates only in the
+	// non-nil branch - placement inside the guard is the pin.
+	got, err := Lower("var u User?\nu?.send(payload())\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\tif !u.IsNil() {\n\tu.Value.send(payload())\n\t}\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerRejectsSafeTailCallArgument(t *testing.T) {
+	// A safe-tail argument has no dispatch target in argument position
+	// (the story 14 argument) - reject in both call forms.
+	for _, source := range []string{
+		"var u User\nu.m(a?.b)\n",
+		"var u User?\nu?.m(a?.b)\n",
+	} {
+		if _, err := Lower(source); err == nil || !strings.Contains(err.Error(), "safe-tail call argument") {
+			t.Fatalf("Lower(%q) err = %v, want safe-tail call argument reject", source, err)
+		}
+	}
+}
+
+func TestLowerGeneratedCallArgumentsTypeChecks(t *testing.T) {
+	// Compilable end-to-end: a predeclared callee is the one builtin shape
+	// with arguments representable on builtins.
+	typeCheckGenerated(t, "println(\"hello\")\n")
+}

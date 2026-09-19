@@ -229,7 +229,7 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			// Story 05: the effectful statement form - the call value is
 			// discarded by statement semantics, so no blank discard is
 			// appended and nothing feeds the trailing `_ =` line.
-			if err := l.callStatement(body, statement.Call); err != nil {
+			if err := l.callStatement(body, statement.Call, statement.Values); err != nil {
 				return "", err
 			}
 			last = ""
@@ -285,26 +285,43 @@ func nilCompareOperand(cond, op string) (string, bool) {
 	return name, true
 }
 
-// callStatement lowers the call statement. Ordinary chains emit verbatim
-// (story 05). A safe-tail call `u?.m()` (story 13, RFC-002 §6.4.3, §6.10.4)
-// lowers to the synthetic nil-guard branch in the tracked dispatch form of
-// the receiver: `!u.IsNil()` plus the member on `u.Value` for the tagged
-// carrier, the plain Go `!= nil` guard for native-nil shapes. §6.10.3
-// single evaluation is structural on this surface - the grammar admits
-// only binding receivers - so no synthetic temporary is introduced.
-// A safe segment beyond the receiver has no representation model (fields
-// are outside the slice), and an untracked receiver carries no nullable
-// information: both reject instead of dropping the `?` - verbatim output
-// would panic on an absent value.
-func (l *lowerer) callStatement(body *strings.Builder, call *parser.NavigationExpr) error {
+// callStatement lowers the call statement (story 05). Arguments emit
+// through the value renderer (story 15: raw text and func literals;
+// they were dropped entirely before). A safe-tail argument rejects -
+// argument position has no dispatch target (the story 14 argument).
+// Ordinary chains emit verbatim; a safe-tail call `u?.m()` (story 13,
+// RFC-002 §6.4.3, §6.10.4) lowers to the synthetic nil-guard branch in
+// the tracked dispatch form of the receiver - `!u.IsNil()` plus the
+// member on `u.Value` for the tagged carrier, the plain Go `!= nil`
+// guard for native-nil shapes - with the arguments inside the branch,
+// so they evaluate only when the receiver is present (§6.10.4).
+// §6.10.3 single evaluation is structural on this surface - the grammar
+// admits only binding receivers - so no synthetic temporary is
+// introduced. A safe segment beyond the receiver has no representation
+// model (fields are outside the slice), and an untracked receiver
+// carries no nullable information: both reject instead of dropping the
+// `?` - verbatim output would panic on an absent value.
+func (l *lowerer) callStatement(body *strings.Builder, call *parser.NavigationExpr, values []parser.Value) error {
+	args := make([]string, 0, len(values))
+	for _, value := range values {
+		if hasSafeTailValue(value) {
+			return fmt.Errorf("experimental lowering: safe-tail call argument is not supported")
+		}
+		text, err := l.value(value)
+		if err != nil {
+			return err
+		}
+		args = append(args, text)
+	}
+	joined := strings.Join(args, ", ")
 	if len(call.Segments) == 1 && call.Segments[0].Safe {
 		name, member := call.Receiver, call.Segments[0].Name
 		if _, tracked := l.carriers[name]; tracked {
-			fmt.Fprintf(body, "\tif !%s.IsNil() {\n\t%s.Value.%s()\n\t}\n", name, name, member)
+			fmt.Fprintf(body, "\tif !%s.IsNil() {\n\t%s.Value.%s(%s)\n\t}\n", name, name, member, joined)
 			return nil
 		}
 		if l.nativeNil[name] {
-			fmt.Fprintf(body, "\tif %s != nil {\n\t%s.%s()\n\t}\n", name, name, member)
+			fmt.Fprintf(body, "\tif %s != nil {\n\t%s.%s(%s)\n\t}\n", name, name, member, joined)
 			return nil
 		}
 		return fmt.Errorf("experimental lowering: safe-call receiver %q is not a tracked nullable", name)
@@ -318,7 +335,7 @@ func (l *lowerer) callStatement(body *strings.Builder, call *parser.NavigationEx
 	for _, segment := range call.Segments {
 		expr += "." + segment.Name
 	}
-	fmt.Fprintf(body, "\t%s()\n", expr)
+	fmt.Fprintf(body, "\t%s(%s)\n", expr, joined)
 	return nil
 }
 
