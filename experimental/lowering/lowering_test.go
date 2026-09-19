@@ -896,6 +896,27 @@ func TestLowerSwitchToGo(t *testing.T) {
 	}
 }
 
+func TestLowerValueSwitchToGo(t *testing.T) {
+	// Story 32 (RFC-006 §6.4.4, RFC-009 §6.4): the value switch lowers to
+	// the declared result plus an ordinary Go switch assigning the arm
+	// values - Go has no switch expressions.
+	got, err := Lower("type Color enum {\nRed\nGreen\n}\nvar c = Color.Red\nvar text string = switch c {\ncase Color.Red:\n\"red\"\ncase Color.Green:\n\"green\"\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tvar text string\n") || !strings.Contains(got, "\tswitch c {\n\tcase ColorRed:\n\t\ttext = \"red\"\n") {
+		t.Fatalf("Lower() = %q, wants the declared result plus switch assignments", got)
+	}
+}
+
+func TestLowerValueSwitchInferredRejected(t *testing.T) {
+	// §6.4.3 inference needs type identity the layer does not track - the
+	// §6.4.4 declared form is the v1 lowering.
+	if _, err := Lower("type Color enum {\nRed\n}\nvar c = Color.Red\nvar text = switch c {\ncase Color.Red:\n\"red\"\n}\n"); err == nil || !strings.Contains(err.Error(), "declared result type") {
+		t.Fatalf("err = %v, want the declared-result-type reject", err)
+	}
+}
+
 func TestLowerNestedTypeDeclRejected(t *testing.T) {
 	// A block-nested declaration has no Go shape (kernel accepts it - a
 	// narrowing reject).

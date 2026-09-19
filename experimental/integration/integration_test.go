@@ -1827,6 +1827,41 @@ func TestAnalyzeSourceEnumUnknownVariantStaysClean(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSourceValueSwitch(t *testing.T) {
+	// Story 32 (RFC-006 §6.4.2-6.4.4): the value switch joins arm classes
+	// (establishment), carries the exhaustiveness contract, and reports
+	// D-1 when a nil arm meets a declared non-null result.
+	base := "type Color enum {\nRed\nGreen\n}\nvar c = Color.Red\n"
+	clean, err := AnalyzeSource(base + "var s string = switch c {\ncase Color.Red:\n\"a\"\ncase Color.Green:\n\"b\"\n}\nvar y = s\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clean.Diagnostics) != 0 {
+		t.Fatalf("clean = %#v, want no diagnostics", clean.Diagnostics)
+	}
+	missing, err := AnalyzeSource(base + "var s string = switch c {\ncase Color.Red:\n\"a\"\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing.Diagnostics) != 1 || string(missing.Diagnostics[0].Category) != "MissingEnumVariant" {
+		t.Fatalf("missing = %#v, want one MissingEnumVariant", missing.Diagnostics)
+	}
+	duplicate, err := AnalyzeSource(base + "var s string = switch c {\ncase Color.Red:\n\"a\"\ncase Color.Red:\n\"b\"\ncase Color.Green:\n\"c\"\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(duplicate.Diagnostics) != 1 || string(duplicate.Diagnostics[0].Category) != "DuplicateMatchArm" {
+		t.Fatalf("duplicate = %#v, want one DuplicateMatchArm", duplicate.Diagnostics)
+	}
+	d1, err := AnalyzeSource(base + "var s string = switch c {\ncase Color.Red:\n\"a\"\ncase Color.Green:\nnil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d1.Diagnostics) != 1 || string(d1.Diagnostics[0].Category) != "NilToNonNull" {
+		t.Fatalf("d1 = %#v, want one NilToNonNull", d1.Diagnostics)
+	}
+}
+
 func TestAnalyzeSourceExhaustiveSwitchClean(t *testing.T) {
 	// Story 31 (RFC-006 §6.3): a switch over an enum binding covering
 	// every variant stays clean.

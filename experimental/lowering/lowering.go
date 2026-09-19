@@ -114,6 +114,17 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 				}
 			}
 			switch {
+			case len(statement.Values) == 1 && statement.Values[0].Switch != nil:
+				// Story 32 (RFC-006 §6.4.4): a value-producing switch
+				// requires the declared result type - Go has no switch
+				// expressions.
+				if typeText == "" || len(statement.Names) != 1 {
+					return "", fmt.Errorf("experimental lowering: value switch requires a declared result type")
+				}
+				fmt.Fprintf(body, "\tvar %s %s\n", statement.Names[0], typeText)
+				if err := l.emitSwitchAssignments(body, statement.Names[0], &statement.Values[0], carrierElem); err != nil {
+					return "", err
+				}
 			case typeText != "" && len(statement.Values) == 0:
 				fmt.Fprintf(body, "\tvar %s %s\n", names, typeText)
 			case typeText != "" && len(statement.Values) == 1 && hasSafeTailValue(statement.Values[0]):
@@ -201,6 +212,15 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 					fmt.Fprintf(body, "\t%s = %s\n", name, text)
 				}
 				last = statement.Names[len(statement.Names)-1]
+				break
+			}
+			if paired && len(statement.Values) == 1 && statement.Values[0].Switch != nil {
+				// Story 32 (RFC-006 §6.4.4): the declared-target form; the
+				// carrier element drives the widening conversions.
+				if err := l.emitSwitchAssignments(body, statement.Names[0], &statement.Values[0], l.carriers[statement.Names[0]]); err != nil {
+					return "", err
+				}
+				last = statement.Names[0]
 				break
 			}
 			converted := make([]string, 0, len(statement.Values))
@@ -336,6 +356,14 @@ func (l *lowerer) fieldMutation(body *strings.Builder, statement *parser.Stateme
 	for _, segment := range statement.Target.Segments {
 		expr += "." + segment.Name
 	}
+	if len(statement.Values) == 1 && statement.Values[0].Switch != nil {
+		// Story 32 (RFC-006 §6.4.4): a value-producing switch on a field
+		// mutation target.
+		if err := l.emitSwitchAssignments(body, expr, &statement.Values[0], ""); err != nil {
+			return err
+		}
+		return nil
+	}
 	texts := make([]string, 0, len(statement.Values))
 	for _, value := range statement.Values {
 		text, err := l.value(value)
@@ -345,6 +373,28 @@ func (l *lowerer) fieldMutation(body *strings.Builder, statement *parser.Stateme
 		texts = append(texts, text)
 	}
 	fmt.Fprintf(body, "\t%s = %s\n", expr, strings.Join(texts, ", "))
+	return nil
+}
+
+// emitSwitchAssignments writes a Go switch whose arms assign the arm
+// values to target (story 32, RFC-006 §6.4.4): the Go emulation of a
+// value-producing switch - Go has no switch expressions; carrierElem
+// drives the §6.4.4 widening conversions.
+func (l *lowerer) emitSwitchAssignments(body *strings.Builder, target string, value *parser.Value, carrierElem string) error {
+	sw := value.Switch
+	fmt.Fprintf(body, "\tswitch %s {\n", sw.Scrutinee)
+	for _, arm := range sw.Arms {
+		if arm.Value == nil {
+			return fmt.Errorf("experimental lowering: value switch arm requires a value")
+		}
+		fmt.Fprintf(body, "\tcase %s%s:\n", arm.Receiver, arm.Variant)
+		text, err := l.convert(*arm.Value, carrierElem)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(body, "\t\t%s = %s\n", target, text)
+	}
+	body.WriteString("\t}\n")
 	return nil
 }
 

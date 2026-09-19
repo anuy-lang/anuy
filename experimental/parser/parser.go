@@ -116,20 +116,23 @@ type EnumDecl struct {
 	Span     Span
 }
 
-// SwitchArm is one `case Enum.Variant:` arm of a switch statement (story
-// 31, RFC-006 §6.3): the pattern names an enum variant, the body runs to
-// the next case or the closing brace.
+// SwitchArm is one `case Enum.Variant:` arm of a switch (story 31/32,
+// RFC-006 §6.3–6.4): the pattern names an enum variant; statement arms
+// carry a Body, value arms a single Value.
 type SwitchArm struct {
 	Receiver string
 	Variant  string
 	Span     Span
 	Body     []Statement
+	Value    *Value
 }
 
-// SwitchDecl is a `switch <binding> { … }` statement (story 31, RFC-006
-// §6.3): exhaustive arms over an enum-typed binding.
+// SwitchDecl is a `switch <binding> { … }` statement or RHS (story 31/32,
+// RFC-006 §6.3–6.4): exhaustive arms over an enum-typed binding. Produces
+// marks the value form - arms carry one value line each.
 type SwitchDecl struct {
 	Scrutinee string
+	Produces  bool
 	Arms      []SwitchArm
 	Span      Span
 }
@@ -216,6 +219,10 @@ type Value struct {
 	// Idents count only the field-value reads (keys and the type name are
 	// not reads).
 	Keyed *KeyedLiteral
+	// Switch is non-nil for a value-producing switch RHS (story 32,
+	// RFC-006 §6.4.2): the class joins the arm values (§6.4.3) and the
+	// lowering requires a declared result type (§6.4.4).
+	Switch *SwitchDecl
 	// Closure is non-nil for closure literals.
 	Closure *Closure
 }
@@ -806,6 +813,72 @@ func (lp *lineParser) parseSwitchArmBody() ([]Statement, error) {
 			return nil, err
 		}
 		out = append(out, statement)
+	}
+}
+
+// parseSwitchValue parses a value-producing switch RHS (story 32,
+// RFC-006 §6.4.2): `switch <binding> {` with `case Enum.Variant:` arms
+// that produce exactly one value line each. The value class is the
+// kernel-side join of the arm values (§6.4.3); the lowering requires the
+// declared result type (§6.4.4).
+func (lp *lineParser) parseSwitchValue(tokens []token, start int, line sourceLine) (Value, error) {
+	if len(tokens)-start != 3 || tokens[start+1].kind != tokenIdent || tokens[start+1].text == "_" || reservedWords[tokens[start+1].text] || !isPunct(tokens[start+2], "{") {
+		return Value{}, newError(UnsupportedSyntax, listEnd(tokens), "value switch requires `switch <binding> {` in this slice")
+	}
+	sw := &SwitchDecl{Scrutinee: tokens[start+1].text, Produces: true, Span: Span{Start: tokens[start].start}}
+	lp.pos++
+	idents := []string{sw.Scrutinee}
+	for {
+		if lp.pos >= len(lp.lines) {
+			return Value{}, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
+		}
+		armLine := lp.lines[lp.pos]
+		if armLine.text == "" || strings.HasPrefix(armLine.text, "//") {
+			lp.pos++
+			continue
+		}
+		if armLine.text == "}" {
+			lp.pos++
+			if len(sw.Arms) == 0 {
+				return Value{}, newError(UnsupportedSyntax, armLine.offset, "switch requires at least one case")
+			}
+			sw.Span.End = armLine.offset + len(armLine.text)
+			return Value{Idents: idents, Switch: sw}, nil
+		}
+		armTokens, terr := tokenize(armLine.raw, armLine.offset)
+		if terr != nil {
+			return Value{}, terr
+		}
+		if len(armTokens) != 5 || armTokens[0].text != "case" || armTokens[1].kind != tokenIdent || reservedWords[armTokens[1].text] || !isPunct(armTokens[2], ".") || armTokens[3].kind != tokenIdent || reservedWords[armTokens[3].text] || !isPunct(armTokens[4], ":") {
+			return Value{}, newError(UnsupportedSyntax, armTokens[0].start, "switch arm must be `case Enum.Variant:`")
+		}
+		lp.pos++
+		if lp.pos >= len(lp.lines) {
+			return Value{}, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
+		}
+		valueLine := lp.lines[lp.pos]
+		if valueLine.text == "" || valueLine.text == "}" || strings.HasPrefix(valueLine.text, "case ") || strings.HasPrefix(valueLine.text, "switch") {
+			return Value{}, newError(UnsupportedSyntax, valueLine.offset, "switch arm must produce a value")
+		}
+		valueTokens, terr := tokenize(valueLine.raw, valueLine.offset)
+		if terr != nil {
+			return Value{}, terr
+		}
+		values, verr := parseValueList(valueTokens, 0, valueLine)
+		if verr != nil {
+			return Value{}, verr
+		}
+		if len(values) != 1 {
+			return Value{}, newError(UnsupportedSyntax, valueTokens[0].start, "switch arm must produce a single value")
+		}
+		idents = append(idents, values[0].Idents...)
+		lp.pos++
+		sw.Arms = append(sw.Arms, SwitchArm{
+			Receiver: armTokens[1].text,
+			Variant:  armTokens[3].text,
+			Span:     Span{Start: armTokens[0].start, End: armTokens[4].end},
+			Value:    &values[0],
+		})
 	}
 }
 
@@ -2222,6 +2295,15 @@ func keyedLiteralScan(group []token) ([]string, []string, *Error) {
 // (story 24): a multiline keyed construction when the region is exactly
 // `N{`, otherwise the ordinary single-line value list.
 func (lp *lineParser) parseRHS(tokens []token, start int, line sourceLine) ([]Value, error) {
+	// Story 32 (RFC-006 §6.4.2): a value-producing switch as the whole
+	// RHS.
+	if tokens[start].kind == tokenIdent && tokens[start].text == "switch" {
+		value, verr := lp.parseSwitchValue(tokens, start, line)
+		if verr != nil {
+			return nil, verr
+		}
+		return []Value{value}, nil
+	}
 	value, handled, kerr := lp.parseMultilineKeyed(tokens, start, line)
 	if kerr != nil {
 		return nil, kerr

@@ -243,6 +243,24 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 	if value == nil || value.Closure != nil {
 		return semantic.NullabilityUnknown
 	}
+	if value.Switch != nil {
+		// Story 32 (RFC-006 §6.4.3): the switch value class is the
+		// conservative join of its arm values - any unknown dominates,
+		// then any nullable.
+		join := semantic.NullabilityNonNull
+		for _, arm := range value.Switch.Arms {
+			if arm.Value == nil {
+				return semantic.NullabilityUnknown
+			}
+			switch b.classifyValue(arm.Value, scope) {
+			case semantic.NullabilityUnknown:
+				return semantic.NullabilityUnknown
+			case semantic.NullabilityNullable:
+				join = semantic.NullabilityNullable
+			}
+		}
+		return join
+	}
 	if value.Navigation != nil {
 		// Story 30 (RFC-006 §6.1, §6.2): `Enum.Variant` is a variant
 		// constant reference - non-null and establishing. An unknown
@@ -1030,43 +1048,12 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 // untyped scrutinee stays conservative (F-G3).
 func (b *builder) emitSwitch(statement *parser.Statement, scope *semantic.Scope) {
 	sw := statement.Switch
-	if id := scope.Resolve(sw.Scrutinee); id != 0 {
+	id, variants, knownEnum := b.switchEnum(sw.Scrutinee, scope)
+	if id != 0 {
 		b.add(semantic.Read(id))
 	}
-	enumName := ""
-	if id := scope.Resolve(sw.Scrutinee); id != 0 {
-		enumName = b.bindingTypes[id]
-	}
-	variants, knownEnum := b.enums[enumName]
 	if knownEnum {
-		covered := map[string]bool{}
-		missing := false
-		for _, arm := range sw.Arms {
-			found := false
-			for _, variant := range variants {
-				if variant == arm.Variant {
-					found = true
-					break
-				}
-			}
-			if !found {
-				b.report(semantic.UnknownMatchVariant, arm.Span)
-				continue
-			}
-			if covered[arm.Variant] {
-				b.report(semantic.DuplicateMatchArm, arm.Span)
-			}
-			covered[arm.Variant] = true
-		}
-		for _, variant := range variants {
-			if !covered[variant] {
-				missing = true
-				break
-			}
-		}
-		if missing {
-			b.report(semantic.MissingEnumVariant, statement.Span)
-		}
+		b.reportSwitchArmIssues(variants, sw.Arms, statement.Span)
 	}
 	beforeF := copyFacts(b.facts[b.cur])
 	beforeNN := copyFacts(b.nonNil[b.cur])
@@ -1105,6 +1092,52 @@ func (b *builder) emitSwitch(statement *parser.Statement, scope *semantic.Scope)
 	}
 	for _, armExit := range armExits {
 		b.connect(armExit, joinID)
+	}
+}
+
+// switchEnum resolves a switch scrutinee (story 31): the binding's
+// declared type name must be a known enum.
+func (b *builder) switchEnum(scrutinee string, scope *semantic.Scope) (semantic.BindingID, []string, bool) {
+	id := scope.Resolve(scrutinee)
+	if id == 0 {
+		return 0, nil, false
+	}
+	variants, known := b.enums[b.bindingTypes[id]]
+	return id, variants, known
+}
+
+// reportSwitchArmIssues reports the story 31 diagnostics for a switch
+// against its declared variants (§6.3.4 missing, §6.3.5 duplicate, §6.1
+// off-enum patterns); the missing-variant report lands on the switch
+// span.
+func (b *builder) reportSwitchArmIssues(variants []string, arms []parser.SwitchArm, span parser.Span) {
+	covered := map[string]bool{}
+	missing := false
+	for _, arm := range arms {
+		found := false
+		for _, variant := range variants {
+			if variant == arm.Variant {
+				found = true
+				break
+			}
+		}
+		if !found {
+			b.report(semantic.UnknownMatchVariant, arm.Span)
+			continue
+		}
+		if covered[arm.Variant] {
+			b.report(semantic.DuplicateMatchArm, arm.Span)
+		}
+		covered[arm.Variant] = true
+	}
+	for _, variant := range variants {
+		if !covered[variant] {
+			missing = true
+			break
+		}
+	}
+	if missing {
+		b.report(semantic.MissingEnumVariant, span)
 	}
 }
 
@@ -1269,6 +1302,13 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 						b.report(semantic.RedundantSafeNavigation, value.Navigation.Segments[safeAt].Span)
 					}
 				}
+			}
+		}
+		// Story 32: a value-producing switch carries the same
+		// exhaustiveness contract (§6.3.4) as the statement form.
+		if value.Switch != nil {
+			if _, variants, known := b.switchEnum(value.Switch.Scrutinee, scope); known {
+				b.reportSwitchArmIssues(variants, value.Switch.Arms, value.Switch.Span)
 			}
 		}
 	}

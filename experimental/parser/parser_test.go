@@ -1284,6 +1284,32 @@ func TestParseSwitchRejects(t *testing.T) {
 	}
 }
 
+func TestParseValueSwitch(t *testing.T) {
+	// Story 32 (RFC-006 6.4.2-6.4.4): a value-producing switch RHS with
+	// one value line per arm; idents carry the scrutinee and arm reads.
+	program, err := Parse("var text string = switch c {\ncase Color.Red:\nx\ncase Color.Green:\ny\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := program.Statements[0].Values[0]
+	if v.Switch == nil || !v.Switch.Produces || v.Switch.Scrutinee != "c" || len(v.Switch.Arms) != 2 {
+		t.Fatalf("value = %#v, want a producing switch", v)
+	}
+	if v.Switch.Arms[0].Value == nil || v.Switch.Arms[0].Value.Text != "x" {
+		t.Fatalf("arm 0 = %+v", v.Switch.Arms[0])
+	}
+	if len(v.Idents) != 3 || v.Idents[0] != "c" || v.Idents[1] != "x" || v.Idents[2] != "y" {
+		t.Fatalf("idents = %v, want [c x y]", v.Idents)
+	}
+}
+
+func TestParseValueSwitchNestedRejected(t *testing.T) {
+	// An arm value is a single expression line - a nested switch rejects.
+	if _, err := Parse("var x = switch c {\ncase Color.Red:\nswitch d {\n}\n}\n"); err == nil {
+		t.Fatal("nested switch arm value accepted")
+	}
+}
+
 func TestParseKeyedLiteralValue(t *testing.T) {
 	// RFC-014 6.3-6.4: keyed construction is one value - commas inside the
 	// braces do not split it, keys are not binding reads.
