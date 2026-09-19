@@ -19,7 +19,7 @@ func Lower(source string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	l := &lowerer{carriers: map[string]string{}}
+	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}}
 	var body strings.Builder
 	last, err := l.statements(&body, program.Statements)
 	if err != nil {
@@ -41,10 +41,12 @@ func Lower(source string) (string, error) {
 
 // lowerer carries the per-program state of one lowering run: the names
 // declared with a tagged `T?` (their carrier element type drives the
-// None/copy conversions of later assignments) and whether the generated
-// file needs the carrier prelude.
+// None/copy conversions of later assignments), the names declared with a
+// native-nil nullable shape (story 13 dispatch tracking - `*T?`, `(map…)?`,
+// `error?`) and whether the generated file needs the carrier prelude.
 type lowerer struct {
 	carriers   map[string]string
+	nativeNil  map[string]bool
 	taggedUsed bool
 }
 
@@ -67,6 +69,14 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 					for _, name := range statement.Names {
 						if name != "_" {
 							l.carriers[name] = elem
+						}
+					}
+				} else if statement.TypeExpr.Nullable {
+					// Story 13: native-nil declarations enter the dispatch
+					// tracking with their verbatim Go comparison form.
+					for _, name := range statement.Names {
+						if name != "_" {
+							l.nativeNil[name] = true
 						}
 					}
 				}
@@ -119,7 +129,8 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			fmt.Fprintf(body, "\t_ = %s\n", statement.Names[0])
 			last = statement.Names[0]
 		case parser.If:
-			fmt.Fprintf(body, "\tif %s {\n", statement.Cond)
+			cond := l.condition(statement.Cond)
+			fmt.Fprintf(body, "\tif %s {\n", cond)
 			if _, err := l.statements(body, statement.Body); err != nil {
 				return "", err
 			}
@@ -146,7 +157,7 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 				}
 				body.WriteString("\t}\n")
 			case statement.Cond != "":
-				fmt.Fprintf(body, "\tfor %s {\n", statement.Cond)
+				fmt.Fprintf(body, "\tfor %s {\n", l.condition(statement.Cond))
 				if _, err := l.statements(body, statement.Body); err != nil {
 					return "", err
 				}
@@ -162,11 +173,9 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			// Story 05: the effectful statement form - the call value is
 			// discarded by statement semantics, so no blank discard is
 			// appended and nothing feeds the trailing `_ =` line.
-			expr := statement.Call.Receiver
-			for _, segment := range statement.Call.Segments {
-				expr += "." + segment.Name
+			if err := l.callStatement(body, statement.Call); err != nil {
+				return "", err
 			}
-			fmt.Fprintf(body, "\t%s()\n", expr)
 			last = ""
 		case parser.Break:
 			body.WriteString("\tbreak\n")
@@ -183,6 +192,76 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 		}
 	}
 	return last, nil
+}
+
+// condition rewrites a nil comparison over a tracked carrier binding to
+// the dispatch form (story 13, RFC-002 §6.10.2 - the exact generated form
+// is pinned by tests): the verbatim struct comparison does not compile in
+// Go. Native-nil operands keep the plain comparison (nil is semantic nil
+// there, §6.8.1) and untracked operands keep the source text (no
+// information - the Go semantics stand as written).
+func (l *lowerer) condition(cond string) string {
+	name, ok := nilCompareOperand(cond)
+	if !ok {
+		return cond
+	}
+	if _, tracked := l.carriers[name]; tracked {
+		return "!" + name + ".IsNil()"
+	}
+	return cond
+}
+
+// nilCompareOperand reports the binding name of the exact `X != nil`
+// condition shape (the only nil-comparison form in the experimental slice,
+// mirroring the integration narrowing target). Anything else - compound,
+// `== nil`, navigation operands - reports no.
+func nilCompareOperand(cond string) (string, bool) {
+	parts := strings.SplitN(cond, "!=", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) != "nil" {
+		return "", false
+	}
+	name := strings.TrimSpace(parts[0])
+	if name == "" || strings.ContainsAny(name, " \t.()[]?*") {
+		return "", false
+	}
+	return name, true
+}
+
+// callStatement lowers the call statement. Ordinary chains emit verbatim
+// (story 05). A safe-tail call `u?.m()` (story 13, RFC-002 §6.4.3, §6.10.4)
+// lowers to the synthetic nil-guard branch in the tracked dispatch form of
+// the receiver: `!u.IsNil()` plus the member on `u.Value` for the tagged
+// carrier, the plain Go `!= nil` guard for native-nil shapes. §6.10.3
+// single evaluation is structural on this surface - the grammar admits
+// only binding receivers - so no synthetic temporary is introduced.
+// A safe segment beyond the receiver has no representation model (fields
+// are outside the slice), and an untracked receiver carries no nullable
+// information: both reject instead of dropping the `?` - verbatim output
+// would panic on an absent value.
+func (l *lowerer) callStatement(body *strings.Builder, call *parser.NavigationExpr) error {
+	if len(call.Segments) == 1 && call.Segments[0].Safe {
+		name, member := call.Receiver, call.Segments[0].Name
+		if _, tracked := l.carriers[name]; tracked {
+			fmt.Fprintf(body, "\tif !%s.IsNil() {\n\t%s.Value.%s()\n\t}\n", name, name, member)
+			return nil
+		}
+		if l.nativeNil[name] {
+			fmt.Fprintf(body, "\tif %s != nil {\n\t%s.%s()\n\t}\n", name, name, member)
+			return nil
+		}
+		return fmt.Errorf("experimental lowering: safe-call receiver %q is not a tracked nullable", name)
+	}
+	for _, segment := range call.Segments {
+		if segment.Safe {
+			return fmt.Errorf("experimental lowering: safe-call chain beyond the receiver is not supported")
+		}
+	}
+	expr := call.Receiver
+	for _, segment := range call.Segments {
+		expr += "." + segment.Name
+	}
+	fmt.Fprintf(body, "\t%s()\n", expr)
+	return nil
 }
 
 // goType renders the canonical Go representation of a restricted type

@@ -1,6 +1,13 @@
 package lowering
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -300,18 +307,160 @@ func TestLowerSliceOfNullableElements(t *testing.T) {
 	}
 }
 
-func TestLowerNullableNarrowingScenarioVerbatim(t *testing.T) {
-	// Task 5 end-to-end source: declared `T?`, the `u != nil` narrowing
-	// condition and the known-method call. The declared type lowers to the
-	// carrier; conditions and calls pass through verbatim - the branch
-	// dispatch over the carrier is a separate slice. The semantic facts of
-	// the same source are pinned by the integration suite (unchanged).
+func TestLowerNullableNarrowingScenarioDispatch(t *testing.T) {
+	// Story 13 end-to-end source (RFC-002 §6.10.2): declared `T?`, the
+	// `u != nil` narrowing condition and the known-method call. The declared
+	// type lowers to the carrier and the condition dispatches through the
+	// support API - the verbatim struct comparison does not compile in Go
+	// (mismatched types vs untyped nil). The semantic facts of the same
+	// source are pinned by the integration suite (unchanged).
 	got, err := Lower("var u User?\nif u != nil {\nu.save()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\tif u != nil {\n\tu.save()\n\t}\n\t_ = u\n}\n"
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\tif !u.IsNil() {\n\tu.save()\n\t}\n\t_ = u\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
+}
+
+func TestLowerNativeNilConditionStaysVerbatim(t *testing.T) {
+	// Native-nil shapes keep the plain Go comparison: nil is semantic nil
+	// there (§6.8.1), the comparison is correct as written.
+	got, err := Lower("var p *User?\nif p != nil {\np.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tif p != nil {\n") {
+		t.Fatalf("Lower() = %q, wants verbatim native-nil condition", got)
+	}
+}
+
+func TestLowerUntrackedConditionStaysVerbatim(t *testing.T) {
+	// Without representation information the condition keeps the source
+	// text - the Go semantics of an untracked operand stand as written.
+	got, err := Lower("var p *User = getUser()\nif p != nil {\np.save()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tif p != nil {\n") {
+		t.Fatalf("Lower() = %q, wants verbatim untracked condition", got)
+	}
+}
+
+func TestLowerCarrierLoopConditionUsesIsNil(t *testing.T) {
+	// Loop headers carry the same condition grammar (the kernel narrows
+	// both forms), so the dispatch rewrite applies to `for` as well.
+	got, err := Lower("var n int?\nfor n != nil {\nbreak\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tfor !n.IsNil() {\n") {
+		t.Fatalf("Lower() = %q, wants IsNil dispatch in the loop header", got)
+	}
+}
+
+func TestLowerSafeCallCarrierDispatch(t *testing.T) {
+	// Story 13 (RFC-002 §6.4.3): `u?.m()` means the synthetic nil-guard
+	// branch. The receiver is a binding - the only statement-form receiver
+	// - so §6.10.3 single evaluation is structural and no synthetic
+	// temporary is introduced (it enters with expression receivers).
+	got, err := Lower("var u User?\nu?.save()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\tif !u.IsNil() {\n\tu.Value.save()\n\t}\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerSafeCallNativeNilGuard(t *testing.T) {
+	// A native-nil receiver guards with the ordinary Go comparison and
+	// calls through the value itself (nil is semantic nil, §6.8.1).
+	got, err := Lower("var err error?\nerr?.Error()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\nfunc Run() {\n\tvar err error\n\tif err != nil {\n\terr.Error()\n\t}\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerSafeCallUntrackedReceiverRejected(t *testing.T) {
+	// Dropping the `?` would lower to a panicing deref of an absent value;
+	// an untracked receiver is an explicit reject instead of verbatim.
+	_, err := Lower("var u User = getUser()\nu?.save()\n")
+	if err == nil || !strings.Contains(err.Error(), "safe-call receiver") {
+		t.Fatalf("err = %v, want untracked safe-call receiver reject", err)
+	}
+}
+
+func TestLowerSafeCallIntermediateSafeSegmentRejected(t *testing.T) {
+	// Safe segments beyond the receiver have no representation model
+	// (fields are outside the slice): both safe-tail chain shapes reject
+	// instead of dropping the intermediate `?`.
+	for _, source := range []string{
+		"var u User?\nu?.a?.b()\n",
+		"var u User?\nu.a?.b()\n",
+	} {
+		if _, err := Lower(source); err == nil || !strings.Contains(err.Error(), "safe-call chain") {
+			t.Fatalf("Lower(%q) err = %v, want safe-call chain reject", source, err)
+		}
+	}
+}
+
+// anuyabiTypes type-checks the ABI support package from its source for the
+// generated-import check (a source importer cannot resolve module paths).
+type anuyabiTypes struct{}
+
+func (anuyabiTypes) Import(path string) (*types.Package, error) {
+	if path != "github.com/anuy-lang/anuy/experimental/anuyabi" {
+		return nil, fmt.Errorf("unexpected import %q", path)
+	}
+	src, err := os.ReadFile(filepath.Join("..", "anuyabi", "anuyabi.go"))
+	if err != nil {
+		return nil, err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "anuyabi.go", src, 0)
+	if err != nil {
+		return nil, err
+	}
+	// The support package imports nothing, so no nested importer is needed.
+	var conf types.Config
+	return conf.Check(path, fset, []*ast.File{file}, nil)
+}
+
+// typeCheckGenerated lowers source and verifies the generated Go parses and
+// type-checks against the support package - the compilable end-to-end pin.
+func typeCheckGenerated(t *testing.T, source string) {
+	t.Helper()
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "fixture.go", got, 0)
+	if err != nil {
+		t.Fatalf("generated Go does not parse: %v\n%s", err, got)
+	}
+	conf := &types.Config{Importer: anuyabiTypes{}}
+	if _, err := conf.Check("fixture", fset, []*ast.File{file}, nil); err != nil {
+		t.Fatalf("generated Go does not type-check: %v\n%s", err, got)
+	}
+}
+
+func TestLowerGeneratedCarrierConditionTypeChecks(t *testing.T) {
+	// Compilable end-to-end pin on builtin types (story scope): `int?` plus
+	// the narrowing condition - only the dispatch form compiles over the
+	// carrier struct.
+	typeCheckGenerated(t, "var n int? = 1\nif n != nil {\n}\n")
+}
+
+func TestLowerGeneratedNativeNilSafeCallTypeChecks(t *testing.T) {
+	// The native-nil dispatch compiles end-to-end with the builtin error
+	// interface as the receiver type.
+	typeCheckGenerated(t, "var err error?\nerr?.Error()\n")
 }
