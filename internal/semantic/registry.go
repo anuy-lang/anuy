@@ -62,7 +62,8 @@ var (
 	MissingReturnDescriptor              = register(MissingReturn, "ANUY3003", SeverityError) // D-6: result is a binding read by the caller (RFC-001 §13.3)
 
 	// Nullability/narrowing block (4xxx).
-	UnsafeMemberAccessDescriptor = register(UnsafeMemberAccess, "ANUY4001", SeverityError) // R2
+	UnsafeMemberAccessDescriptor      = register(UnsafeMemberAccess, "ANUY4001", SeverityError)        // R2
+	RedundantSafeNavigationDescriptor = register(RedundantSafeNavigation, "ANUY4002", SeverityWarning) // D-4, ADR-0005
 
 	// Lint block (5xxx): advisory analyzers.
 	UncheckedErrorDescriptor = register(UncheckedError, "ANUY5001", SeverityWarning) // R1
@@ -86,6 +87,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		PackageInitializerRequiredDescriptor,
 		MissingReturnDescriptor,
 		UnsafeMemberAccessDescriptor,
+		RedundantSafeNavigationDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -131,6 +133,7 @@ var catalog = map[Code]string{
 	"ANUY3002": "package-level binding requires an initializer",
 	"ANUY3003": "missing return: declared result is not initialized on all paths",
 	"ANUY4001": "only safe (?.) or non-null asserted calls are allowed on a nullable receiver",
+	"ANUY4002": "redundant safe navigation: the receiver is known to be non-null",
 	"ANUY5001": "error value is not checked",
 }
 

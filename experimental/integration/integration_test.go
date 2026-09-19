@@ -1010,12 +1010,23 @@ func TestAnalyzeSourceSafeCallNeedsNoProof(t *testing.T) {
 
 func TestAnalyzeSourceSafeCallInvalidatesReceiverNarrowing(t *testing.T) {
 	// §33 desugaring: the call happens on the taken path, so the narrowing
-	// is dropped afterwards (3b applies to the safe form too).
+	// is dropped afterwards (3b applies to the safe form too). Story 17:
+	// inside the proven branch the safe form is also redundant - D-4
+	// (Warning) fires before the invalidation, and `u.save()` still
+	// requires its proof afterwards.
 	result, err := AnalyzeSource("var u User? = find()\nfunc T.m() {\n}\nif u != nil {\nu?.m()\nu.save()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSingleDiagnostic(t, result, "UnsafeMemberAccess")
+	if len(result.Diagnostics) != 2 {
+		t.Fatalf("result = %#v, want two diagnostics", result.Diagnostics)
+	}
+	if string(result.Diagnostics[0].Category) != "RedundantSafeNavigation" {
+		t.Fatalf("first = %s, want RedundantSafeNavigation", result.Diagnostics[0].Category)
+	}
+	if string(result.Diagnostics[1].Category) != "UnsafeMemberAccess" {
+		t.Fatalf("second = %s, want UnsafeMemberAccess", result.Diagnostics[1].Category)
+	}
 }
 
 func TestAnalyzeSourceKnownNonNullCallResultEstablishes(t *testing.T) {
@@ -1164,4 +1175,39 @@ func TestAnalyzeSourceMethodMissingReturnReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSingleDiagnostic(t, result, "MissingReturn")
+}
+
+func TestAnalyzeSourceReportsRedundantSafeCallOnNarrowedReceiver(t *testing.T) {
+	// D-4 (RFC-002 8.2.4, ADR-0005): inside the proven-non-null branch the
+	// safe call is redundant - a Warning, not an error.
+	result, err := AnalyzeSource("var u User? = find()\nfunc T.m() {\n}\nif u != nil {\nu?.m()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "RedundantSafeNavigation")
+	if result.Diagnostics[0].Severity != semantic.SeverityWarning {
+		t.Fatalf("severity = %s, want Warning", result.Diagnostics[0].Severity)
+	}
+}
+
+func TestAnalyzeSourceReportsRedundantSafeValueOnDeclaredNonNull(t *testing.T) {
+	// A declared non-null receiver makes the safe value navigation
+	// redundant as well (the MN-07 shape, receiver-rooted form).
+	result, err := AnalyzeSource("var u User = getUser()\nvar c = u?.count\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "RedundantSafeNavigation")
+}
+
+func TestAnalyzeSourceSafeValueOnUnknownClassStaysClean(t *testing.T) {
+	// Unknown classes (inferred declarations) are not known non-null -
+	// no D-4, conservatively.
+	result, err := AnalyzeSource("var u = getUser()\nvar c = u?.count\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
 }

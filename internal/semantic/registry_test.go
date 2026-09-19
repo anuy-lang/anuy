@@ -28,6 +28,7 @@ var approvedScheme = []struct {
 	{"PackageInitializerRequired", "ANUY3002", SeverityError},
 	{"MissingReturn", "ANUY3003", SeverityError},
 	{"UnsafeMemberAccess", "ANUY4001", SeverityError},
+	{"RedundantSafeNavigation", "ANUY4002", SeverityWarning},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 

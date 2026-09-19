@@ -90,6 +90,10 @@ const (
 	// MissingReturn is the D-6 category (RFC-001 §8.2.6, ADR-0004): a
 	// declared non-null result is not initialized on all exit paths.
 	MissingReturn DiagnosticCategory = "MissingReturn"
+	// RedundantSafeNavigation is the D-4 category (RFC-002 §8.2.4/§12.10,
+	// ADR-0005): a safe segment on a receiver known to be non-null at the
+	// read point (a live narrowing fact or a declared non-null class).
+	RedundantSafeNavigation DiagnosticCategory = "RedundantSafeNavigation"
 )
 
 // SourceSpan locates a diagnostic in the source text.

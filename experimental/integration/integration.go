@@ -330,6 +330,14 @@ func (b *builder) isNonNil(id semantic.BindingID) bool {
 	return b.nonNil[b.cur][id]
 }
 
+// knownNonNull reports whether the binding is known to be non-null at the
+// current point: a live narrowing fact (RFC-002 §6.3) or a declared
+// non-null class (story 08 G1). Unknown classes stay unknown - the
+// conservative side keeps them D-4 free.
+func (b *builder) knownNonNull(id semantic.BindingID) bool {
+	return b.isNonNil(id) || b.classes[id] == semantic.NullabilityNonNull
+}
+
 func (b *builder) isInitialized(id semantic.BindingID) bool {
 	return b.facts[b.cur][id]
 }
@@ -665,13 +673,20 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 				b.add(semantic.Read(id))
 			}
 		}
-		// An ordinary member access on a declared `T?` receiver requires
-		// the non-nil proof (RFC-002 §22; safe tails are exempt via
-		// SafeNavigate). Unresolved receivers stay in the F-G3 tolerance
+		// Story 17: a receiver-safe segment on a known non-null receiver is
+		// redundant (D-4, RFC-002 §8.2.4, ADR-0005). An ordinary member
+		// access on a declared `T?` receiver requires the non-nil proof
+		// (RFC-002 §22). Unresolved receivers stay in the F-G3 tolerance
 		// zone.
-		if value.Navigation != nil && len(value.Navigation.Segments) > 0 && !value.Navigation.Segments[0].Safe {
-			if id := scope.Resolve(value.Navigation.Receiver); id != 0 && b.needsNonNilProof(id) {
-				b.add(semantic.Deref(id))
+		if value.Navigation != nil && len(value.Navigation.Segments) > 0 {
+			if id := scope.Resolve(value.Navigation.Receiver); id != 0 {
+				if value.Navigation.Segments[0].Safe {
+					if b.knownNonNull(id) {
+						b.report(semantic.RedundantSafeNavigation, value.Navigation.Segments[0].Span)
+					}
+				} else if b.needsNonNilProof(id) {
+					b.add(semantic.Deref(id))
+				}
 			}
 		}
 	}
@@ -872,7 +887,13 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 	}
 	b.add(semantic.Read(id))
 	if len(call.Segments) > 0 {
-		if !call.Segments[0].Safe && b.needsNonNilProof(id) {
+		if call.Segments[0].Safe {
+			// D-4 (RFC-002 §8.2.4, ADR-0005): a safe call on a receiver
+			// known to be non-null is redundant.
+			if b.knownNonNull(id) {
+				b.report(semantic.RedundantSafeNavigation, call.Segments[0].Span)
+			}
+		} else if b.needsNonNilProof(id) {
 			b.add(semantic.Deref(id))
 		}
 		// A resolved method (story 08): purity opts out of both effects
