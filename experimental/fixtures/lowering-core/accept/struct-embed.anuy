@@ -1,0 +1,9 @@
+type Logger struct {
+badge string
+}
+type Server struct {
+embed Logger
+port string
+}
+var s = Server{Logger: Logger{badge: "b"}, port: "80"}
+s.port = "90"

@@ -84,11 +84,14 @@ type NavigationExpr struct {
 }
 
 // StructField is one direct field of a struct declaration (RFC-014 §6.2):
-// an ordered name plus a restricted structural type.
+// an ordered name plus a restricted structural type. Embedded marks the
+// §6.9 `embed T` / `embed *T` form - the name is derived from the type
+// and the field is a real direct storage field.
 type StructField struct {
 	Name     string
 	TypeExpr *TypeExpr
 	Span     Span
+	Embedded bool
 }
 
 // StructDecl is a `type N struct { … }` declaration (RFC-014 §6.2).
@@ -584,6 +587,42 @@ func (lp *lineParser) parseTypeDecl(tokens []token, line sourceLine) (Statement,
 		fieldTokens, terr := tokenize(fieldLine.raw, fieldLine.offset)
 		if terr != nil {
 			return Statement{}, terr
+		}
+		if fieldTokens[0].kind == tokenIdent && fieldTokens[0].text == "embed" {
+			// Story 29 (RFC-014 §6.9): `embed` is a contextual keyword of
+			// the struct body - the first token of a field line only; the
+			// derived field name is the type name, `*` stripped (§6.10
+			// forbids nullable embedding).
+			if len(fieldTokens) < 2 {
+				return Statement{}, newError(UnsupportedSyntax, fieldTokens[0].start, "embedded field requires a type")
+			}
+			typeExpr, terr := parseType(fieldTokens[1:])
+			if terr != nil {
+				return Statement{}, terr
+			}
+			embeddedName := ""
+			if typeExpr != nil {
+				switch typeExpr.Kind {
+				case NamedType:
+					if !typeExpr.Nullable {
+						embeddedName = typeExpr.Name
+					}
+				case PointerType:
+					if typeExpr.Elem != nil && typeExpr.Elem.Kind == NamedType && !typeExpr.Elem.Nullable {
+						embeddedName = typeExpr.Elem.Name
+					}
+				}
+			}
+			if embeddedName == "" {
+				return Statement{}, newError(UnsupportedSyntax, fieldTokens[1].start, "embedded field requires a non-null named type")
+			}
+			if seen[embeddedName] {
+				return Statement{}, newError(UnsupportedSyntax, fieldTokens[1].start, fmt.Sprintf("duplicate field %q", embeddedName))
+			}
+			seen[embeddedName] = true
+			decl.Fields = append(decl.Fields, StructField{Name: embeddedName, TypeExpr: typeExpr, Span: Span{Start: fieldTokens[0].start, End: typeExpr.Span.End}, Embedded: true})
+			lp.pos++
+			continue
 		}
 		if len(fieldTokens) < 2 || fieldTokens[0].kind != tokenIdent || fieldTokens[0].text == "_" || reservedWords[fieldTokens[0].text] {
 			return Statement{}, newError(UnsupportedSyntax, fieldTokens[0].start, "struct field requires a name and a type")

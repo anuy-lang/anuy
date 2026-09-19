@@ -378,11 +378,13 @@ func (b *builder) knownNonNull(id semantic.BindingID) bool {
 
 // structInfo carries the ordered fields of a declared struct (RFC-014
 // 6.2): the names drive the completeness check (6.3), the classes and
-// declared type names the field-path classification (6.7).
+// declared type names the field-path classification (6.7); the embedded
+// flags mark the §6.9 `embed` fields - the promotion roots (6.10).
 type structInfo struct {
-	names   []string
-	classes []semantic.Nullability
-	types   []string
+	names    []string
+	classes  []semantic.Nullability
+	types    []string
+	embedded []bool
 }
 
 // registerStruct adds a declared struct to the table (story 22); story 25
@@ -398,6 +400,7 @@ func (b *builder) registerStruct(sd *parser.StructDecl) {
 			typeName = field.TypeExpr.Name
 		}
 		info.types = append(info.types, typeName)
+		info.embedded = append(info.embedded, field.Embedded)
 	}
 	b.structs[sd.Name] = info
 }
@@ -424,40 +427,98 @@ func (b *builder) fieldClass(root semantic.BindingID, field string) semantic.Nul
 }
 
 // pathClass resolves the declared class of an ordinary field path
-// `root.f1.…fn` (story 25, RFC-014 6.7): each intermediate field must be
+// `root.f1.…fn` (story 25, RFC-014 §6.7): each intermediate field must be
 // known non-null by declared class and carry a named struct type to walk
 // through; the verdict is the final field's declared class. Nullable,
 // pointer and composite intermediates stay unknown - the deref safety of
-// the path is a separate slice (6.7 narrowing); cycles cannot occur (a
-// finite token path, 6.11 pointer indirection is not a named struct).
+// the path is a separate slice (§6.7 narrowing); cycles cannot occur (a
+// finite token path, §6.11 pointer indirection is not a named struct).
 func (b *builder) pathClass(root semantic.BindingID, fields []string) semantic.Nullability {
 	info, ok := b.rootStruct(root)
 	if !ok {
 		return semantic.NullabilityUnknown
 	}
 	for i, field := range fields {
-		index := -1
-		for j, name := range info.names {
-			if name == field {
-				index = j
-				break
-			}
-		}
-		if index < 0 {
+		entry, ok := b.lookupField(info, field)
+		if !ok {
 			return semantic.NullabilityUnknown
 		}
 		if i == len(fields)-1 {
-			return info.classes[index]
+			return entry.class
 		}
-		if info.classes[index] != semantic.NullabilityNonNull || info.types[index] == "" {
+		if entry.class != semantic.NullabilityNonNull || entry.typeName == "" {
 			return semantic.NullabilityUnknown
 		}
-		info, ok = b.structs[info.types[index]]
+		info, ok = b.structs[entry.typeName]
 		if !ok {
 			return semantic.NullabilityUnknown
 		}
 	}
 	return semantic.NullabilityUnknown
+}
+
+// fieldEntry is one resolved field: declared class and declared type name
+// (empty for every composite shape).
+type fieldEntry struct {
+	class    semantic.Nullability
+	typeName string
+}
+
+// lookupField resolves a field name inside a struct (story 29, RFC-014
+// §6.10): direct fields first, then promoted through embedded structs,
+// breadth-first - the shallowest depth wins and two candidates on the
+// same minimal depth are ambiguous, resolving unknown; the visited set
+// guards embedding cycles (the §6.11 layout check is a follow-up).
+func (b *builder) lookupField(info *structInfo, name string) (fieldEntry, bool) {
+	for i, n := range info.names {
+		if n == name {
+			return fieldEntry{info.classes[i], info.types[i]}, true
+		}
+	}
+	visited := map[string]bool{}
+	current := []*structInfo{}
+	for i := range info.names {
+		if !info.embedded[i] || info.types[i] == "" || visited[info.types[i]] {
+			continue
+		}
+		if sub, ok := b.structs[info.types[i]]; ok {
+			visited[info.types[i]] = true
+			current = append(current, sub)
+		}
+	}
+	for len(current) > 0 {
+		matches := 0
+		var result fieldEntry
+		next := []*structInfo{}
+		for _, sub := range current {
+			for i, n := range sub.names {
+				if n == name {
+					matches++
+					result = fieldEntry{sub.classes[i], sub.types[i]}
+				}
+			}
+		}
+		if matches > 1 {
+			// ambiguous on the minimal depth: unknown, but resolved
+			return fieldEntry{}, true
+		}
+		if matches == 1 {
+			return result, true
+		}
+		for _, sub := range current {
+			for i := range sub.names {
+				if !sub.embedded[i] || sub.types[i] == "" || visited[sub.types[i]] {
+					continue
+				}
+				if deeper, ok := b.structs[sub.types[i]]; ok {
+					visited[sub.types[i]] = true
+					next = append(next, deeper)
+				}
+			}
+		}
+		current = next
+	}
+	return fieldEntry{}, false
 }
 
 // rootStruct resolves a binding's declared struct table entry.

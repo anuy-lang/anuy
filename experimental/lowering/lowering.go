@@ -568,6 +568,12 @@ func (l *lowerer) typeDecl(decls *strings.Builder, statement *parser.Statement) 
 		if err != nil {
 			return err
 		}
+		if field.Embedded {
+			// Story 29 (RFC-014 §6.9, normative 63): `embed` lowers to an
+			// ordinary Go embedded field - the bare type, no name.
+			fmt.Fprintf(&b, "\t%s\n", text)
+			continue
+		}
 		fmt.Fprintf(&b, "\t%s %s\n", field.Name, text)
 	}
 	b.WriteString("}\n")

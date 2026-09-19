@@ -43,6 +43,7 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"struct-construction-multiline.anuy", "u := User{\nid: 1,\nname: \"Ann\",\n}", true},
 		{"struct-field-mutation.anuy", "u.name = \"Bob\"", true},
 		{"struct-deep-field-mutation.anuy", "u.profile.badge = \"B\"", true},
+		{"struct-embed.anuy", "type Server struct {\n\tLogger\n\tport string\n}", true},
 		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
 		{"native-nil-map.anuy", "var m map[string]User", true},
 		{"native-nil-error.anuy", "var err error", true},

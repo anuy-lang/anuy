@@ -1720,3 +1720,83 @@ func TestAnalyzeSourceNonPureCallsKillNarrowing(t *testing.T) {
 		t.Fatalf("result = %#v, want the gate to fire", result.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceEmbeddedConstructionAndPromotion(t *testing.T) {
+	// Story 29 (RFC-014 6.3, 6.9): the embedded field is a real direct
+	// storage field - completeness speaks its derived name, promoted
+	// members are not construction keys.
+	base := "type Logger struct {\nbadge string\nnick string?\n}\ntype Server struct {\nembed Logger\nport string\n}\n"
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{"complete construction", base + "var s = Server{Logger: Logger{badge: \"b\", nick: nil}, port: \"80\"}\n", ""},
+		{"missing embedded key", base + "var s = Server{port: \"80\"}\n", "IncompleteConstruction"},
+		{"promoted key is unknown", base + "var s = Server{badge: \"b\", port: \"80\"}\n", "IncompleteConstruction"},
+		{"unknown key", base + "var s = Server{Logger: Logger{badge: \"b\"}, port: \"80\", ghost: nil}\n", "IncompleteConstruction"},
+	}
+	for _, testCase := range cases {
+		result, err := AnalyzeSource(testCase.source)
+		if err != nil {
+			t.Fatalf("%s: %v", testCase.name, err)
+		}
+		if testCase.want == "" {
+			if len(result.Diagnostics) != 0 {
+				t.Fatalf("%s: result = %#v, want no diagnostics", testCase.name, result.Diagnostics)
+			}
+			continue
+		}
+		if len(result.Diagnostics) != 1 || string(result.Diagnostics[0].Category) != testCase.want {
+			t.Fatalf("%s: result = %#v, want one %s", testCase.name, result.Diagnostics, testCase.want)
+		}
+	}
+}
+
+func TestAnalyzeSourcePromotedPathDiagnostics(t *testing.T) {
+	// Story 29 (RFC-014 6.10): the D-catalog classifies promoted paths.
+	base := "type Logger struct {\nbadge string\nnick string?\n}\ntype Server struct {\nembed Logger\nport string\n}\nvar s = Server{Logger: Logger{badge: \"b\", nick: nil}, port: \"80\"}\n"
+	cases := []struct{ name, source, want string }{
+		{"D-1 nil to promoted non-null", base + "s.badge = nil\n", "NilToNonNull"},
+		{"D-3 promoted nullable argument", base + "func save(s string) {\n}\nsave(s.nick)\n", "NullableArgument"},
+		{"D-5 redundant nil check on promoted field", base + "if s.badge == nil {\n}\n", "RedundantNilCheck"},
+	}
+	for _, testCase := range cases {
+		result, err := AnalyzeSource(testCase.source)
+		if err != nil {
+			t.Fatalf("%s: %v", testCase.name, err)
+		}
+		if len(result.Diagnostics) != 1 || string(result.Diagnostics[0].Category) != testCase.want {
+			t.Fatalf("%s: result = %#v, want one %s", testCase.name, result.Diagnostics, testCase.want)
+		}
+	}
+}
+
+func TestAnalyzeSourcePromotedAmbiguousAndPointerStayClean(t *testing.T) {
+	// Shallowest depth wins; a same-depth tie is ambiguous and stays
+	// unknown (§8.7 diagnostics are a follow-up); pointer-embedded links
+	// stay in the deref-gating domain.
+	ambiguous := "type A struct {\nbadge string\n}\ntype B struct {\nbadge string\n}\ntype Server struct {\nembed A\nembed B\nport string\n}\nvar s = Server{A: A{badge: \"1\"}, B: B{badge: \"2\"}, port: \"80\"}\nif s.badge == nil {\n}\n"
+	pointer := "type Logger struct {\nbadge string\n}\ntype Server struct {\nembed *Logger\nport string\n}\nvar s = Server{Logger: nil, port: \"80\"}\nif s.badge == nil {\n}\n"
+	for name, source := range map[string]string{"ambiguous": ambiguous, "pointer embed": pointer} {
+		result, err := AnalyzeSource(source)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(result.Diagnostics) != 0 {
+			t.Fatalf("%s: result = %#v, want no diagnostics", name, result.Diagnostics)
+		}
+	}
+}
+
+func TestAnalyzeSourcePromotedMethodCall(t *testing.T) {
+	// §6.10 method promotion is free through the flat method table.
+	source := "type Logger struct {\nlines int\n}\nfunc Logger.log() {\n}\ntype Server struct {\nembed Logger\nport string\n}\nvar s = Server{Logger: Logger{lines: 1}, port: \"80\"}\ns.log()\n"
+	result, err := AnalyzeSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}

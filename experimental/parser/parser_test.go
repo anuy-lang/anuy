@@ -1150,6 +1150,58 @@ func TestParseStructBlankAndReservedFieldNamesRejected(t *testing.T) {
 	}
 }
 
+func TestParseEmbedDeclaration(t *testing.T) {
+	// Story 29 (RFC-014 6.9): `embed` is a contextual keyword of the
+	// struct body; the derived field name is the type name, `*` stripped.
+	program, err := Parse("type Server struct {\nembed Logger\naddress string\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := program.Statements[0].Struct.Fields
+	if len(fields) != 2 || fields[0].Name != "Logger" || !fields[0].Embedded {
+		t.Fatalf("fields = %+v, want embedded Logger + address", fields)
+	}
+	if fields[0].TypeExpr.Canonical() != "Logger" {
+		t.Fatalf("type = %q, want Logger", fields[0].TypeExpr.Canonical())
+	}
+	if fields[1].Embedded {
+		t.Fatalf("field 1 = %+v, want an ordinary field", fields[1])
+	}
+	program, err = Parse("type Server struct {\nembed *Logger\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields = program.Statements[0].Struct.Fields
+	if fields[0].Name != "Logger" || !fields[0].Embedded || fields[0].TypeExpr.Canonical() != "*Logger" {
+		t.Fatalf("fields = %+v, want embedded *Logger as Logger", fields)
+	}
+}
+
+func TestParseEmbedContextualOutsideStruct(t *testing.T) {
+	// Outside struct bodies `embed` stays an ordinary identifier.
+	program, err := Parse("var embed = 1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if program.Statements[0].Names[0] != "embed" {
+		t.Fatalf("names = %v, want embed", program.Statements[0].Names)
+	}
+}
+
+func TestParseEmbedRejects(t *testing.T) {
+	// RFC-014 6.10: nullable embedding MUST NOT; 6.9: derived names must
+	// not collide; the bare type form stays rejected.
+	if _, err := Parse("type Server struct {\nembed Logger?\n}\n"); err == nil {
+		t.Fatal("nullable embedding accepted")
+	}
+	if _, err := Parse("type Server struct {\nembed Logger\nLogger string\n}\n"); err == nil {
+		t.Fatal("derived name collision accepted")
+	}
+	if _, err := Parse("type Server struct {\nLogger\n}\n"); err == nil {
+		t.Fatal("bare type embedding accepted")
+	}
+}
+
 func TestParseKeyedLiteralValue(t *testing.T) {
 	// RFC-014 6.3-6.4: keyed construction is one value - commas inside the
 	// braces do not split it, keys are not binding reads.
