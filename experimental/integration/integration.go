@@ -305,13 +305,18 @@ func classifyDeclResult(hasResult, resultNullable bool) semantic.Nullability {
 // establish applies §26 after the §25 invalidation of an assignment: a
 // non-null-classified RHS re-establishes the narrowing (the Assume after
 // the Assign), a null RHS records the flow-nullable fact (Q3-A, no
-// consumers in v1), unknown changes nothing.
-func (b *builder) establish(id semantic.BindingID, value *parser.Value, scope *semantic.Scope) {
+// consumers in v1), unknown changes nothing. Story 20: a classified-null
+// value on a declared non-null binding is the D-1 violation (RFC-002
+// §6.1.7/§8.2.1) - reported at the assignment's span.
+func (b *builder) establish(id semantic.BindingID, value *parser.Value, scope *semantic.Scope, span parser.Span) {
 	switch b.classifyValue(value, scope) {
 	case semantic.NullabilityNonNull:
 		b.assume(id)
 	case semantic.NullabilityNullable:
 		b.flowNullable[id] = true
+		if b.classes[id] == semantic.NullabilityNonNull {
+			b.report(semantic.NilToNonNull, span)
+		}
 	}
 }
 
@@ -328,7 +333,7 @@ func (b *builder) establishAssignments(statement *parser.Statement, scope *seman
 			continue
 		}
 		if id := scope.Resolve(name); id != 0 {
-			b.establish(id, &statement.Values[i], scope)
+			b.establish(id, &statement.Values[i], scope, statement.Span)
 		}
 	}
 }

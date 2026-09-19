@@ -100,6 +100,9 @@ const (
 	// RedundantNilCheck is the D-5 category (RFC-002 §6.2.4/§8.2.5): the
 	// exact `X == nil` condition over a binding known to be non-null.
 	RedundantNilCheck DiagnosticCategory = "RedundantNilCheck"
+	// NilToNonNull is the D-1 category (RFC-002 §6.1.7/§8.2.1): a
+	// classified-null value on a declared non-null binding.
+	NilToNonNull DiagnosticCategory = "NilToNonNull"
 )
 
 // SourceSpan locates a diagnostic in the source text.

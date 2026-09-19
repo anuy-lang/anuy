@@ -66,6 +66,7 @@ var (
 	RedundantSafeNavigationDescriptor = register(RedundantSafeNavigation, "ANUY4002", SeverityWarning) // D-4, ADR-0005
 	NullableArgumentDescriptor        = register(NullableArgument, "ANUY4003", SeverityError)          // D-3
 	RedundantNilCheckDescriptor       = register(RedundantNilCheck, "ANUY4004", SeverityError)         // D-5
+	NilToNonNullDescriptor            = register(NilToNonNull, "ANUY4005", SeverityError)              // D-1
 
 	// Lint block (5xxx): advisory analyzers.
 	UncheckedErrorDescriptor = register(UncheckedError, "ANUY5001", SeverityWarning) // R1
@@ -92,6 +93,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		RedundantSafeNavigationDescriptor,
 		NullableArgumentDescriptor,
 		RedundantNilCheckDescriptor,
+		NilToNonNullDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -140,6 +142,7 @@ var catalog = map[Code]string{
 	"ANUY4002": "redundant safe navigation: the receiver is known to be non-null",
 	"ANUY4003": "nullable argument where a non-null is required",
 	"ANUY4004": "redundant nil check: the value is non-null and cannot be nil",
+	"ANUY4005": "nil used where a non-null value is required",
 	"ANUY5001": "error value is not checked",
 }
 

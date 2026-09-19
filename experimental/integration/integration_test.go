@@ -1357,3 +1357,57 @@ func TestAnalyzeSourceNilCheckOnUnknownClassStaysClean(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceReportsNilToNonNullDeclaration(t *testing.T) {
+	// D-1 (RFC-002 6.1.7, 8.2.1): the nil literal on a declared non-null
+	// target is an Error.
+	result, err := AnalyzeSource("var x int = nil\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NilToNonNull")
+	if result.Diagnostics[0].Severity != semantic.SeverityError {
+		t.Fatalf("severity = %s, want Error", result.Diagnostics[0].Severity)
+	}
+}
+
+func TestAnalyzeSourceReportsNilToNonNullAssignment(t *testing.T) {
+	result, err := AnalyzeSource("var u User = getUser()\nu = nil\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NilToNonNull")
+}
+
+func TestAnalyzeSourceReportsNullableSourceToNonNull(t *testing.T) {
+	// §6.2.2: no implicit T? -> T - a classified-null initializer violates
+	// the same rule (the known nullable call result classifies null).
+	result, err := AnalyzeSource("func find() User? {\nreturn make()\n}\nvar u User = find()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NilToNonNull")
+}
+
+func TestAnalyzeSourceNilToNonNullNegativesStayClean(t *testing.T) {
+	// Nullable and inferred targets take nil; composite targets stay
+	// outside the slice (ADR-0002; slices: nil is a present value, 6.8.12);
+	// a narrowed source classifies non-null; the blank target holds no
+	// binding.
+	for _, source := range []string{
+		"var x int? = nil\n",
+		"var x = nil\n",
+		"var s []User = nil\n",
+		"var p *User = nil\n",
+		"func find() User? {\nreturn make()\n}\nvar u User? = find()\nif u != nil {\nvar x User = u\n}\n",
+		"_ = nil\n",
+	} {
+		result, err := AnalyzeSource(source)
+		if err != nil {
+			t.Fatalf("%q: %v", source, err)
+		}
+		if len(result.Diagnostics) != 0 {
+			t.Fatalf("%q: result = %#v, want no diagnostics", source, result.Diagnostics)
+		}
+	}
+}
