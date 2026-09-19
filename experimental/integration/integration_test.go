@@ -1560,13 +1560,12 @@ func TestAnalyzeSourceDeepFieldDiagnostics(t *testing.T) {
 }
 
 func TestAnalyzeSourceDeepFieldNegativesStayClean(t *testing.T) {
-	// The walk conservatively refuses to classify: nullable, pointer and
-	// composite intermediates (deref-gating slice), unknown leaves and
-	// untyped roots produce no verdict and no diagnostics.
+	// The walk conservatively refuses to classify: pointer and composite
+	// intermediates (deref-gating slice), unknown leaves and
+	// untyped roots produce no verdict and no diagnostics. The nullable
+	// intermediate moved to the story 26 gate.
 	base := "type Profile struct {\nbadge string\n}\n"
 	sources := []string{
-		// nullable intermediate
-		base + "type User struct {\nlink Profile?\n}\nvar u = User{link: nil}\nu.link.badge = nil\n",
 		// pointer intermediate
 		base + "type User struct {\nlink *Profile\n}\nvar u = User{link: nil}\nu.link.badge = nil\n",
 		// composite intermediate
@@ -1575,6 +1574,49 @@ func TestAnalyzeSourceDeepFieldNegativesStayClean(t *testing.T) {
 		base + "type User struct {\nprofile Profile\n}\nvar u = User{profile: Profile{badge: \"b\"}}\nu.profile.ghost = nil\n",
 		// untyped root
 		base + "var u = other\nu.profile.badge = nil\n",
+	}
+	for _, source := range sources {
+		result, err := AnalyzeSource(source)
+		if err != nil {
+			t.Fatalf("%q: %v", source, err)
+		}
+		if len(result.Diagnostics) != 0 {
+			t.Fatalf("%q: result = %#v, want no diagnostics", source, result.Diagnostics)
+		}
+	}
+}
+
+func TestAnalyzeSourceNullableIntermediateGated(t *testing.T) {
+	// Story 26 (RFC-014 6.7): an ordinary segment traversed through a
+	// provably nullable prefix is UnsafeMemberAccess (ANUY4001) - exactly
+	// one report; the root-narrowed case proves the root machine and the
+	// gate do not double-report.
+	base := "type Profile struct {\nbadge string\n}\ntype User struct {\nlink Profile?\n}\n"
+	cases := []struct{ name, source string }{
+		{"value read", base + "var u = User{link: nil}\nvar x = u.link.badge\n"},
+		{"mutation", base + "var u = User{link: nil}\nu.link.badge = \"B\"\n"},
+		{"nil condition", base + "var u = User{link: nil}\nif u.link.badge == nil {\n}\n"},
+		{"root narrowed, link still gated", "type Profile struct {\nbadge string\n}\ntype User struct {\nlink Profile?\n}\nvar u User?\nu = User{link: nil}\nif u != nil {\nvar x = u.link.badge\n}\n"},
+	}
+	for _, testCase := range cases {
+		result, err := AnalyzeSource(testCase.source)
+		if err != nil {
+			t.Fatalf("%s: %v", testCase.name, err)
+		}
+		if len(result.Diagnostics) != 1 || string(result.Diagnostics[0].Category) != "UnsafeMemberAccess" {
+			t.Fatalf("%s: result = %#v, want one UnsafeMemberAccess", testCase.name, result.Diagnostics)
+		}
+	}
+}
+
+func TestAnalyzeSourceNullableIntermediateSafeFormClean(t *testing.T) {
+	// The safe form is the §6.7 way out: `u.link?.badge` stays clean, and
+	// pointer/composite intermediates stay conservative (story 25).
+	base := "type Profile struct {\nbadge string\n}\n"
+	sources := []string{
+		base + "type User struct {\nlink Profile?\n}\nvar u = User{link: nil}\nvar x = u.link?.badge\n",
+		base + "type User struct {\nlink *Profile\n}\nvar u = User{link: nil}\nvar x = u.link.badge\n",
+		base + "type User struct {\nprofiles []Profile\n}\nvar u = User{profiles: nil}\nvar x = u.profiles.badge\n",
 	}
 	for _, source := range sources {
 		result, err := AnalyzeSource(source)

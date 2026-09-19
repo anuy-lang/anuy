@@ -510,6 +510,53 @@ func pathFieldsPrefix(nav *parser.NavigationExpr, k int) ([]string, bool) {
 	return fields, true
 }
 
+// gatePathDerefs reports UnsafeMemberAccess (ANUY4001) at the first
+// ordinary segment traversed through a provably nullable prefix (story
+// 26, RFC-014 §6.7: ordinary `.` MUST NOT resolve without narrowing) and
+// returns true. Unknown prefixes stay silent - conservative; the safe
+// form is the §6.7 way out and never gated. The root link (segment 0)
+// stays on the Deref/CFG machine, so a true return suppresses the root
+// Deref: one error per path, at the violating segment.
+func (b *builder) gatePathDerefs(root semantic.BindingID, nav *parser.NavigationExpr) bool {
+	for i := 1; i < len(nav.Segments); i++ {
+		if nav.Segments[i].Safe || nav.Segments[i].Call {
+			return false
+		}
+		fields, ok := pathFieldsPrefix(nav, i)
+		if !ok {
+			return false
+		}
+		switch b.pathClass(root, fields) {
+		case semantic.NullabilityNullable:
+			b.report(semantic.UnsafeMemberAccess, nav.Segments[i].Span)
+			return true
+		case semantic.NullabilityNonNull:
+			// keep walking to the next link
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// gatePathDerefsFields is the fields-only variant for positions without
+// segment spans (the exact `X == nil` condition form): the report lands
+// on the given statement span.
+func (b *builder) gatePathDerefsFields(root semantic.BindingID, fields []string, span parser.Span) bool {
+	for k := 1; k < len(fields); k++ {
+		switch b.pathClass(root, fields[:k]) {
+		case semantic.NullabilityNullable:
+			b.report(semantic.UnsafeMemberAccess, span)
+			return true
+		case semantic.NullabilityNonNull:
+			// keep walking to the next link
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 // checkConstruction verifies the completeness of a keyed construction
 // against the declared struct (RFC-014 6.3, story 22): every direct field
 // present exactly once and every key resolving to a direct field. Unknown
@@ -650,7 +697,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			for _, segment := range statement.Target.Segments {
 				fields = append(fields, segment.Name)
 			}
-			if root != 0 && b.pathKnownNonNull(root, fields) &&
+			if root != 0 && !b.gatePathDerefs(root, statement.Target) && b.pathKnownNonNull(root, fields) &&
 				b.classifyValue(&statement.Values[0], scope) == semantic.NullabilityNullable {
 				b.report(semantic.NilToNonNull, statement.Span)
 			}
@@ -765,7 +812,7 @@ func (b *builder) reportRedundantNilCheck(statement *parser.Statement, scope *se
 		return
 	}
 	if fields != nil {
-		if b.pathKnownNonNull(id, fields) {
+		if !b.gatePathDerefsFields(id, fields, statement.Span) && b.pathKnownNonNull(id, fields) {
 			b.report(semantic.RedundantNilCheck, statement.Span)
 		}
 		return
@@ -979,7 +1026,7 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 					if b.knownNonNull(id) {
 						b.report(semantic.RedundantSafeNavigation, value.Navigation.Segments[0].Span)
 					}
-				} else if b.needsNonNilProof(id) {
+				} else if !b.gatePathDerefs(id, value.Navigation) && b.needsNonNilProof(id) {
 					b.add(semantic.Deref(id))
 				}
 				// Story 22/25: a safe segment behind an ordinary field path is
