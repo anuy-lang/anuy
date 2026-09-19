@@ -107,6 +107,15 @@ const (
 	// keyed construction misses a declared direct field or names an
 	// unknown one.
 	IncompleteConstruction DiagnosticCategory = "IncompleteConstruction"
+	// MissingEnumVariant is the RFC-006 §6.3.4 category (story 31): a
+	// switch over a native enum does not cover every declared variant.
+	MissingEnumVariant DiagnosticCategory = "MissingEnumVariant"
+	// DuplicateMatchArm is the RFC-006 §6.3.5 category (story 31): a
+	// variant is handled by more than one case of the same switch.
+	DuplicateMatchArm DiagnosticCategory = "DuplicateMatchArm"
+	// UnknownMatchVariant is the RFC-006 §6.1 category (story 31): a case
+	// pattern is not a variant of the scrutinee's enum.
+	UnknownMatchVariant DiagnosticCategory = "UnknownMatchVariant"
 )
 
 // SourceSpan locates a diagnostic in the source text.

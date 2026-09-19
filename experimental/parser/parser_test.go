@@ -1248,6 +1248,42 @@ func TestParseEnumRejects(t *testing.T) {
 	}
 }
 
+func TestParseSwitchDeclaration(t *testing.T) {
+	// Story 31 (RFC-006 6.3): `switch <binding> { case Enum.Variant: … }`
+	// - exhaustive arms over an enum binding.
+	program, err := Parse("var c = Color.Red\nswitch c {\ncase Color.Red:\nvar x = 1\ncase Color.Green:\nvar x = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[1]
+	if s.Kind != Switch || s.Switch == nil {
+		t.Fatalf("kind = %v, want Switch", s.Kind)
+	}
+	if s.Switch.Scrutinee != "c" || len(s.Switch.Arms) != 2 {
+		t.Fatalf("switch = %+v, want scrutinee c with 2 arms", s.Switch)
+	}
+	if s.Switch.Arms[0].Receiver != "Color" || s.Switch.Arms[0].Variant != "Red" || len(s.Switch.Arms[0].Body) != 1 {
+		t.Fatalf("arm 0 = %+v", s.Switch.Arms[0])
+	}
+}
+
+func TestParseSwitchRejects(t *testing.T) {
+	// RFC-006 6.3.6-6.3.7: no wildcard/default - the API evolution
+	// guarantee; 6.4.7: no guards. A case line without `:` rejects.
+	if _, err := Parse("switch c {\ncase Color.Red:\nvar x = 1\ndefault:\nvar x = 2\n}\n"); err == nil {
+		t.Fatal("default arm accepted")
+	}
+	if _, err := Parse("switch c {\ncase Color.Red, Color.Green:\nvar x = 1\n}\n"); err == nil {
+		t.Fatal("multi-pattern arm accepted")
+	}
+	if _, err := Parse("switch c {\ncase Color.Red if x:\nvar x = 1\n}\n"); err == nil {
+		t.Fatal("guard accepted")
+	}
+	if _, err := Parse("switch c {\ncase Color.Red\nvar x = 1\n}\n"); err == nil {
+		t.Fatal("case without a colon accepted")
+	}
+}
+
 func TestParseKeyedLiteralValue(t *testing.T) {
 	// RFC-014 6.3-6.4: keyed construction is one value - commas inside the
 	// braces do not split it, keys are not binding reads.

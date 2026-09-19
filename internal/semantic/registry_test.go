@@ -33,6 +33,9 @@ var approvedScheme = []struct {
 	{"RedundantNilCheck", "ANUY4004", SeverityError},
 	{"NilToNonNull", "ANUY4005", SeverityError},
 	{"IncompleteConstruction", "ANUY4006", SeverityError},
+	{"MissingEnumVariant", "ANUY4007", SeverityError},
+	{"DuplicateMatchArm", "ANUY4008", SeverityError},
+	{"UnknownMatchVariant", "ANUY4009", SeverityError},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 

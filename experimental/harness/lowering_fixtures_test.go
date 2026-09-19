@@ -45,6 +45,7 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"struct-deep-field-mutation.anuy", "u.profile.badge = \"B\"", true},
 		{"struct-embed.anuy", "type Server struct {\n\tLogger\n\tport string\n}", true},
 		{"enum-declaration.anuy", "ColorRed Color = 1", true},
+		{"enum-switch.anuy", "case ColorRed:", true},
 		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
 		{"native-nil-map.anuy", "var m map[string]User", true},
 		{"native-nil-error.anuy", "var err error", true},

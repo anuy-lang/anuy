@@ -884,6 +884,18 @@ func TestLowerEnumDeclarationToGo(t *testing.T) {
 	}
 }
 
+func TestLowerSwitchToGo(t *testing.T) {
+	// Story 31 (RFC-009 §6.4, §6.4.5): the switch lowers to an ordinary
+	// Go switch; case labels are the §6.4.5 constant names.
+	got, err := Lower("type Color enum {\nRed\nGreen\n}\nvar c = Color.Red\nswitch c {\ncase Color.Red:\nvar x = 1\ncase Color.Green:\nvar x = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tswitch c {\n\tcase ColorRed:\n") || !strings.Contains(got, "\tcase ColorGreen:\n") {
+		t.Fatalf("Lower() = %q, wants the Go switch with variant case labels", got)
+	}
+}
+
 func TestLowerNestedTypeDeclRejected(t *testing.T) {
 	// A block-nested declaration has no Go shape (kernel accepts it - a
 	// narrowing reject).

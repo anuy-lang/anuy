@@ -68,6 +68,9 @@ var (
 	RedundantNilCheckDescriptor       = register(RedundantNilCheck, "ANUY4004", SeverityError)         // D-5
 	NilToNonNullDescriptor            = register(NilToNonNull, "ANUY4005", SeverityError)              // D-1
 	IncompleteConstructionDescriptor  = register(IncompleteConstruction, "ANUY4006", SeverityError)    // RFC-014 §6.3
+	MissingEnumVariantDescriptor      = register(MissingEnumVariant, "ANUY4007", SeverityError)        // RFC-006 §6.3.4
+	DuplicateMatchArmDescriptor       = register(DuplicateMatchArm, "ANUY4008", SeverityError)         // RFC-006 §6.3.5
+	UnknownMatchVariantDescriptor     = register(UnknownMatchVariant, "ANUY4009", SeverityError)       // RFC-006 §6.1
 
 	// Lint block (5xxx): advisory analyzers.
 	UncheckedErrorDescriptor = register(UncheckedError, "ANUY5001", SeverityWarning) // R1
@@ -96,6 +99,9 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		RedundantNilCheckDescriptor,
 		NilToNonNullDescriptor,
 		IncompleteConstructionDescriptor,
+		MissingEnumVariantDescriptor,
+		DuplicateMatchArmDescriptor,
+		UnknownMatchVariantDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -146,6 +152,9 @@ var catalog = map[Code]string{
 	"ANUY4004": "redundant nil check: the value is non-null and cannot be nil",
 	"ANUY4005": "nil used where a non-null value is required",
 	"ANUY4006": "incomplete construction: every declared field must be initialized exactly once",
+	"ANUY4007": "non-exhaustive switch over a native enum: not all variants are handled",
+	"ANUY4008": "duplicate switch arm: the variant is already handled",
+	"ANUY4009": "switch case is not a variant of the scrutinee's enum",
 	"ANUY5001": "error value is not checked",
 }
 

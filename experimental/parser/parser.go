@@ -116,6 +116,24 @@ type EnumDecl struct {
 	Span     Span
 }
 
+// SwitchArm is one `case Enum.Variant:` arm of a switch statement (story
+// 31, RFC-006 §6.3): the pattern names an enum variant, the body runs to
+// the next case or the closing brace.
+type SwitchArm struct {
+	Receiver string
+	Variant  string
+	Span     Span
+	Body     []Statement
+}
+
+// SwitchDecl is a `switch <binding> { … }` statement (story 31, RFC-006
+// §6.3): exhaustive arms over an enum-typed binding.
+type SwitchDecl struct {
+	Scrutinee string
+	Arms      []SwitchArm
+	Span      Span
+}
+
 // KeyedLiteral marks a keyed construction value `N{field: expression, …}`
 // (RFC-014 §6.3): the raw Text lowers verbatim; Name carries the type the
 // fields belong to, Fields the ordered key names and Span the literal's
@@ -141,6 +159,7 @@ const (
 	Function
 	Return
 	TypeDecl
+	Switch
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -277,6 +296,9 @@ type Statement struct {
 	// RFC-006 §6.1): the declaration hoists to a package-level Go type
 	// with discriminant constants.
 	Enum *EnumDecl
+	// Switch is non-nil for a `switch <binding> { … }` statement (story
+	// 31, RFC-006 §6.3): exhaustive arms over an enum-typed binding.
+	Switch *SwitchDecl
 	// Target is non-nil for a field-mutation assignment `u.f = expr`
 	// (story 22, RFC-014 §6.7): an ordinary single-field navigation path;
 	// Names stays empty.
@@ -454,6 +476,9 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		// without a name stays a closure literal and is rejected below by
 		// the call-statement path.
 		return lp.parseFunctionDecl(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "switch":
+		// Story 31 (RFC-006 §6.3): the exhaustive enum switch.
+		return lp.parseSwitch(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "return":
 		// `return` is a contextual keyword in statement position (the `in`
 		// precedent, story 03).
@@ -706,6 +731,81 @@ func (lp *lineParser) parseEnumDecl(tokens []token, line sourceLine) (Statement,
 		seen[variantTokens[0].text] = true
 		decl.Variants = append(decl.Variants, EnumVariant{Name: variantTokens[0].text, Span: Span{Start: variantTokens[0].start, End: variantTokens[0].end}})
 		lp.pos++
+	}
+}
+
+// parseSwitch parses `switch <binding> { case Enum.Variant: … }` (story
+// 31, RFC-006 §6.3): exhaustive arms over an enum-typed binding.
+// Wildcard/default arms, guards and multi-pattern cases reject (§6.3.6,
+// §6.4.5, §6.4.7) - the API evolution guarantee is the feature. `case`
+// is a contextual keyword of the switch body.
+func (lp *lineParser) parseSwitch(tokens []token, line sourceLine) (Statement, error) {
+	if len(tokens) != 3 || tokens[1].kind != tokenIdent || tokens[1].text == "_" || reservedWords[tokens[1].text] || !isPunct(tokens[2], "{") {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "switch requires `switch <binding> {` in this slice")
+	}
+	sw := &SwitchDecl{Scrutinee: tokens[1].text, Span: Span{Start: tokens[0].start}}
+	lp.pos++
+	for {
+		if lp.pos >= len(lp.lines) {
+			return Statement{}, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
+		}
+		armLine := lp.lines[lp.pos]
+		if armLine.text == "" || strings.HasPrefix(armLine.text, "//") {
+			lp.pos++
+			continue
+		}
+		if armLine.text == "}" {
+			lp.pos++
+			if len(sw.Arms) == 0 {
+				return Statement{}, newError(UnsupportedSyntax, armLine.offset, "switch requires at least one case")
+			}
+			sw.Span.End = armLine.offset + len(armLine.text)
+			return Statement{Kind: Switch, Switch: sw, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}, nil
+		}
+		armTokens, terr := tokenize(armLine.raw, armLine.offset)
+		if terr != nil {
+			return Statement{}, terr
+		}
+		if len(armTokens) != 5 || armTokens[0].text != "case" || armTokens[1].kind != tokenIdent || reservedWords[armTokens[1].text] || !isPunct(armTokens[2], ".") || armTokens[3].kind != tokenIdent || reservedWords[armTokens[3].text] || !isPunct(armTokens[4], ":") {
+			return Statement{}, newError(UnsupportedSyntax, armTokens[0].start, "switch arm must be `case Enum.Variant:`")
+		}
+		lp.pos++
+		body, err := lp.parseSwitchArmBody()
+		if err != nil {
+			return Statement{}, err
+		}
+		sw.Arms = append(sw.Arms, SwitchArm{
+			Receiver: armTokens[1].text,
+			Variant:  armTokens[3].text,
+			Span:     Span{Start: armTokens[0].start, End: armTokens[4].end},
+			Body:     body,
+		})
+	}
+}
+
+// parseSwitchArmBody parses arm-body statements until the next `case`
+// line or the switch-closing `}` line, which the caller consumes. Nested
+// blocks are consumed whole by parseStatement, so no depth tracking is
+// needed here.
+func (lp *lineParser) parseSwitchArmBody() ([]Statement, error) {
+	var out []Statement
+	for {
+		if lp.pos >= len(lp.lines) {
+			return nil, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
+		}
+		line := lp.lines[lp.pos]
+		if line.text == "" || strings.HasPrefix(line.text, "//") {
+			lp.pos++
+			continue
+		}
+		if line.text == "}" || strings.HasPrefix(line.text, "case ") {
+			return out, nil
+		}
+		statement, err := lp.parseStatement(line)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, statement)
 	}
 }
 

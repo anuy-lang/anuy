@@ -220,6 +220,19 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 		case parser.Read:
 			fmt.Fprintf(body, "\t_ = %s\n", statement.Names[0])
 			last = statement.Names[0]
+		case parser.Switch:
+			// Story 31 (RFC-006 §6.3, RFC-009 §6.4): the exhaustive enum
+			// switch lowers to an ordinary Go switch; case labels are the
+			// §6.4.5 constant names (`Color.Red` -> `ColorRed`).
+			sw := statement.Switch
+			fmt.Fprintf(body, "\tswitch %s {\n", sw.Scrutinee)
+			for _, arm := range sw.Arms {
+				fmt.Fprintf(body, "\tcase %s%s:\n", arm.Receiver, arm.Variant)
+				if _, err := l.statements(body, arm.Body); err != nil {
+					return "", err
+				}
+			}
+			body.WriteString("\t}\n")
 		case parser.If:
 			cond := l.condition(statement.Cond)
 			fmt.Fprintf(body, "\tif %s {\n", cond)

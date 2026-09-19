@@ -1,0 +1,11 @@
+type Color enum {
+Red
+Green
+}
+var c = Color.Red
+switch c {
+case Color.Red:
+var x = 1
+case Color.Green:
+var x = 2
+}

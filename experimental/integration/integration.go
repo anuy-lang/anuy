@@ -729,6 +729,8 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		} else {
 			b.registerStruct(statement.Struct)
 		}
+	case parser.Switch:
+		b.emitSwitch(statement, scope)
 	case parser.Var:
 		b.readIdents(statement, scope)
 		declared := make([]string, 0, len(statement.Names))
@@ -743,8 +745,16 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			// declaration enters its own scope - matching readIdents, which
 			// resolves initializer idents before the declaration (RFC-003 §36).
 			var inferred semantic.Nullability
+			enumName := ""
 			if statement.TypeExpr == nil && i < len(statement.Values) {
 				inferred = b.classifyValue(&statement.Values[i], scope)
+				// Story 30: a variant reference pins the binding's enum
+				// type - the switch scrutinee resolves through it.
+				if nav := statement.Values[i].Navigation; nav != nil && len(nav.Segments) == 1 && !nav.Segments[0].Safe && !nav.Segments[0].Call {
+					if _, isEnum := b.enums[nav.Receiver]; isEnum {
+						enumName = nav.Receiver
+					}
+				}
 			}
 			if serr := scope.Declare(name); serr != nil {
 				b.report(serr.Category, statement.Span)
@@ -754,6 +764,9 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			id := scope.Resolve(name)
 			targets = append(targets, id)
 			b.declare(id)
+			if enumName != "" {
+				b.bindingTypes[id] = enumName
+			}
 			if statement.TypeExpr != nil {
 				if statement.TypeExpr.Nullable {
 					b.nilable[id] = true
@@ -1005,6 +1018,93 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 		b.connect(elseExit, joinID)
 	} else {
 		b.connect(start, joinID)
+	}
+}
+
+// emitSwitch lowers the exhaustive enum switch into the CFG (story 31,
+// RFC-006 §6.3): the scrutinee reads exactly once (§6.3.2), each arm runs
+// in a child scope on copies of the entry facts, and the join intersects
+// every arm exit - exhaustive means no implicit skip path (§6.3.3).
+// Exhaustiveness and duplicates check against the declared enum
+// (§6.3.4, §6.3.5); an off-enum pattern reports §6.1's closed set. An
+// untyped scrutinee stays conservative (F-G3).
+func (b *builder) emitSwitch(statement *parser.Statement, scope *semantic.Scope) {
+	sw := statement.Switch
+	if id := scope.Resolve(sw.Scrutinee); id != 0 {
+		b.add(semantic.Read(id))
+	}
+	enumName := ""
+	if id := scope.Resolve(sw.Scrutinee); id != 0 {
+		enumName = b.bindingTypes[id]
+	}
+	variants, knownEnum := b.enums[enumName]
+	if knownEnum {
+		covered := map[string]bool{}
+		missing := false
+		for _, arm := range sw.Arms {
+			found := false
+			for _, variant := range variants {
+				if variant == arm.Variant {
+					found = true
+					break
+				}
+			}
+			if !found {
+				b.report(semantic.UnknownMatchVariant, arm.Span)
+				continue
+			}
+			if covered[arm.Variant] {
+				b.report(semantic.DuplicateMatchArm, arm.Span)
+			}
+			covered[arm.Variant] = true
+		}
+		for _, variant := range variants {
+			if !covered[variant] {
+				missing = true
+				break
+			}
+		}
+		if missing {
+			b.report(semantic.MissingEnumVariant, statement.Span)
+		}
+	}
+	beforeF := copyFacts(b.facts[b.cur])
+	beforeNN := copyFacts(b.nonNil[b.cur])
+	beforePath := copyPathFacts(b.pathNN[b.cur])
+	start := b.blocks[b.cur].ID
+	joinF, joinNN, joinPath := beforeF, beforeNN, beforePath
+	first := true
+	var armIDs, armExits []semantic.BlockID
+	for _, arm := range sw.Arms {
+		b.appendBlock()
+		armIDs = append(armIDs, b.blocks[b.cur].ID)
+		b.facts[b.cur] = copyFacts(beforeF)
+		b.nonNil[b.cur] = copyFacts(beforeNN)
+		b.pathNN[b.cur] = copyPathFacts(beforePath)
+		b.emit(arm.Body, scope.Child())
+		armExits = append(armExits, b.blocks[b.cur].ID)
+		armF := copyFacts(b.facts[b.cur])
+		armNN := copyFacts(b.nonNil[b.cur])
+		armPath := copyPathFacts(b.pathNN[b.cur])
+		if first {
+			joinF, joinNN, joinPath = armF, armNN, armPath
+			first = false
+			continue
+		}
+		joinF = intersectFacts(joinF, armF)
+		joinNN = intersectFacts(joinNN, armNN)
+		joinPath = intersectPathFacts(joinPath, armPath)
+	}
+	b.appendBlock()
+	b.facts[b.cur] = joinF
+	b.nonNil[b.cur] = joinNN
+	b.pathNN[b.cur] = joinPath
+	joinID := b.blocks[b.cur].ID
+	for _, armID := range armIDs {
+		b.connect(start, armID)
+	}
+	for _, armExit := range armExits {
+		b.connect(armExit, joinID)
 	}
 }
 

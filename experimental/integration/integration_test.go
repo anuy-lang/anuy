@@ -1826,3 +1826,51 @@ func TestAnalyzeSourceEnumUnknownVariantStaysClean(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceExhaustiveSwitchClean(t *testing.T) {
+	// Story 31 (RFC-006 §6.3): a switch over an enum binding covering
+	// every variant stays clean.
+	source := "type Color enum {\nRed\nGreen\n}\nvar c = Color.Red\nswitch c {\ncase Color.Red:\nvar x = 1\ncase Color.Green:\nvar x = 2\n}\n"
+	result, err := AnalyzeSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceSwitchDiagnostics(t *testing.T) {
+	// RFC-006 §6.3.4/§6.3.5/§6.1: missing variants, duplicate arms and
+	// off-enum patterns report; a non-enum scrutinee stays conservative.
+	base := "type Color enum {\nRed\nGreen\n}\nvar c = Color.Red\n"
+	missing, err := AnalyzeSource(base + "switch c {\ncase Color.Red:\nvar x = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing.Diagnostics) != 1 || string(missing.Diagnostics[0].Category) != "MissingEnumVariant" {
+		t.Fatalf("missing = %#v, want one MissingEnumVariant", missing.Diagnostics)
+	}
+	duplicate, err := AnalyzeSource(base + "switch c {\ncase Color.Red:\nvar x = 1\ncase Color.Red:\nvar x = 2\ncase Color.Green:\nvar x = 3\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(duplicate.Diagnostics) != 1 || string(duplicate.Diagnostics[0].Category) != "DuplicateMatchArm" {
+		t.Fatalf("duplicate = %#v, want one DuplicateMatchArm", duplicate.Diagnostics)
+	}
+	// An off-enum pattern reports the closed set and leaves Green missing.
+	both, err := AnalyzeSource(base + "switch c {\ncase Color.Red:\nvar x = 1\ncase Color.Ghost:\nvar x = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(both.Diagnostics) != 2 {
+		t.Fatalf("both = %#v, want MissingEnumVariant + UnknownMatchVariant", both.Diagnostics)
+	}
+	nonEnum, err := AnalyzeSource("type User struct {\nid int\n}\nvar u = User{id: 1}\nswitch u {\ncase User.Red:\nvar x = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nonEnum.Diagnostics) != 0 {
+		t.Fatalf("non-enum scrutinee = %#v, want no diagnostics", nonEnum.Diagnostics)
+	}
+}
