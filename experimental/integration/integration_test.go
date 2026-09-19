@@ -1827,6 +1827,34 @@ func TestAnalyzeSourceEnumUnknownVariantStaysClean(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSourceNullableEnumSwitch(t *testing.T) {
+	// Story 33 (RFC-006 §6.5): the exhaustive set is {nil} ∪ variants;
+	// a variant arm proves the scrutinee non-nil (§6.5.4) - D-5 consumes
+	// it; a nil arm on a non-null enum is unreachable (§6.5.3).
+	base := "type Color enum {\nRed\nGreen\n}\nvar c Color? = nil\n"
+	refined, err := AnalyzeSource(base + "switch c {\ncase nil:\nvar x = 1\ncase Color.Green:\nif c == nil {\n}\ncase Color.Red:\nvar y = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refined.Diagnostics) != 1 || string(refined.Diagnostics[0].Category) != "RedundantNilCheck" {
+		t.Fatalf("refined = %#v, want one RedundantNilCheck", refined.Diagnostics)
+	}
+	missingNil, err := AnalyzeSource(base + "switch c {\ncase Color.Red:\nvar x = 1\ncase Color.Green:\nvar y = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missingNil.Diagnostics) != 1 || string(missingNil.Diagnostics[0].Category) != "MissingEnumVariant" {
+		t.Fatalf("missingNil = %#v, want one MissingEnumVariant", missingNil.Diagnostics)
+	}
+	nilOnNonNull, err := AnalyzeSource("type Color enum {\nRed\n}\nvar c = Color.Red\nswitch c {\ncase nil:\nvar x = 1\ncase Color.Red:\nvar y = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nilOnNonNull.Diagnostics) != 1 || string(nilOnNonNull.Diagnostics[0].Category) != "NilArmOnNonNullEnum" {
+		t.Fatalf("nilOnNonNull = %#v, want one NilArmOnNonNullEnum", nilOnNonNull.Diagnostics)
+	}
+}
+
 func TestAnalyzeSourceValueSwitch(t *testing.T) {
 	// Story 32 (RFC-006 §6.4.2-6.4.4): the value switch joins arm classes
 	// (establishment), carries the exhaustiveness contract, and reports

@@ -71,6 +71,7 @@ var (
 	MissingEnumVariantDescriptor      = register(MissingEnumVariant, "ANUY4007", SeverityError)        // RFC-006 §6.3.4
 	DuplicateMatchArmDescriptor       = register(DuplicateMatchArm, "ANUY4008", SeverityError)         // RFC-006 §6.3.5
 	UnknownMatchVariantDescriptor     = register(UnknownMatchVariant, "ANUY4009", SeverityError)       // RFC-006 §6.1
+	NilArmOnNonNullEnumDescriptor     = register(NilArmOnNonNullEnum, "ANUY4010", SeverityError)       // RFC-006 §6.5.3
 
 	// Lint block (5xxx): advisory analyzers.
 	UncheckedErrorDescriptor = register(UncheckedError, "ANUY5001", SeverityWarning) // R1
@@ -102,6 +103,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		MissingEnumVariantDescriptor,
 		DuplicateMatchArmDescriptor,
 		UnknownMatchVariantDescriptor,
+		NilArmOnNonNullEnumDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -155,6 +157,7 @@ var catalog = map[Code]string{
 	"ANUY4007": "non-exhaustive switch over a native enum: not all variants are handled",
 	"ANUY4008": "duplicate switch arm: the variant is already handled",
 	"ANUY4009": "switch case is not a variant of the scrutinee's enum",
+	"ANUY4010": "nil arm on a non-null enum scrutinee is unreachable",
 	"ANUY5001": "error value is not checked",
 }
 

@@ -125,6 +125,9 @@ type SwitchArm struct {
 	Span     Span
 	Body     []Statement
 	Value    *Value
+	// NilArm marks the `case nil:` arm of a nullable-enum switch (story
+	// 33, RFC-006 §6.5).
+	NilArm bool
 }
 
 // SwitchDecl is a `switch <binding> { … }` statement or RHS (story 31/32,
@@ -772,6 +775,17 @@ func (lp *lineParser) parseSwitch(tokens []token, line sourceLine) (Statement, e
 		armTokens, terr := tokenize(armLine.raw, armLine.offset)
 		if terr != nil {
 			return Statement{}, terr
+		}
+		if len(armTokens) == 3 && armTokens[0].text == "case" && armTokens[1].text == "nil" && isPunct(armTokens[2], ":") {
+			// Story 33 (RFC-006 §6.5): `case nil:` arms the nil case of a
+			// nullable-enum switch.
+			lp.pos++
+			body, err := lp.parseSwitchArmBody()
+			if err != nil {
+				return Statement{}, err
+			}
+			sw.Arms = append(sw.Arms, SwitchArm{NilArm: true, Span: Span{Start: armTokens[0].start, End: armTokens[2].end}, Body: body})
+			continue
 		}
 		if len(armTokens) != 5 || armTokens[0].text != "case" || armTokens[1].kind != tokenIdent || reservedWords[armTokens[1].text] || !isPunct(armTokens[2], ".") || armTokens[3].kind != tokenIdent || reservedWords[armTokens[3].text] || !isPunct(armTokens[4], ":") {
 			return Statement{}, newError(UnsupportedSyntax, armTokens[0].start, "switch arm must be `case Enum.Variant:`")

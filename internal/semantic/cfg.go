@@ -116,6 +116,9 @@ const (
 	// UnknownMatchVariant is the RFC-006 §6.1 category (story 31): a case
 	// pattern is not a variant of the scrutinee's enum.
 	UnknownMatchVariant DiagnosticCategory = "UnknownMatchVariant"
+	// NilArmOnNonNullEnum is the RFC-006 §6.5.3 category (story 33): a
+	// `case nil:` arm on a switch over a non-null enum - unreachable.
+	NilArmOnNonNullEnum DiagnosticCategory = "NilArmOnNonNullEnum"
 )
 
 // SourceSpan locates a diagnostic in the source text.

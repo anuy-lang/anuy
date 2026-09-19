@@ -1,0 +1,13 @@
+type Color enum {
+Red
+Green
+}
+var c Color? = nil
+switch c {
+case nil:
+var x = 1
+case Color.Red:
+var y = 2
+case Color.Green:
+var z = 3
+}

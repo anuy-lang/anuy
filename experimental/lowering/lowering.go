@@ -245,6 +245,26 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			// switch lowers to an ordinary Go switch; case labels are the
 			// §6.4.5 constant names (`Color.Red` -> `ColorRed`).
 			sw := statement.Switch
+			if l.carriers[sw.Scrutinee] != "" {
+				// Story 33 (RFC-006 §6.5, §6.11.3): a nullable-enum
+				// scrutinee lowers to the representation-specific nullable
+				// test plus the Value dispatch; the synthetic default
+				// guards the foreign boundary (RFC-009 §6.4.3).
+				fmt.Fprintf(body, "\tswitch {\n")
+				for _, arm := range sw.Arms {
+					if arm.NilArm {
+						fmt.Fprintf(body, "\tcase %s.IsNil():\n", sw.Scrutinee)
+					} else {
+						fmt.Fprintf(body, "\tcase %s.Value == %s%s:\n", sw.Scrutinee, arm.Receiver, arm.Variant)
+					}
+					if _, err := l.statements(body, arm.Body); err != nil {
+						return "", err
+					}
+				}
+				fmt.Fprintf(body, "\tdefault:\n\t\tpanic(\"anuy: invalid enum discriminant\")\n")
+				body.WriteString("\t}\n")
+				break
+			}
 			fmt.Fprintf(body, "\tswitch %s {\n", sw.Scrutinee)
 			for _, arm := range sw.Arms {
 				fmt.Fprintf(body, "\tcase %s%s:\n", arm.Receiver, arm.Variant)

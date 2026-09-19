@@ -1052,8 +1052,12 @@ func (b *builder) emitSwitch(statement *parser.Statement, scope *semantic.Scope)
 	if id != 0 {
 		b.add(semantic.Read(id))
 	}
+	// Story 33 (RFC-006 §6.5.2): for a nullable enum the exhaustive set
+	// is {nil} ∪ variants; a nil arm on a non-null enum is unreachable
+	// (§6.5.3).
+	nullable := knownEnum && b.classes[id] == semantic.NullabilityNullable
 	if knownEnum {
-		b.reportSwitchArmIssues(variants, sw.Arms, statement.Span)
+		b.reportSwitchArmIssues(variants, sw.Arms, statement.Span, nullable)
 	}
 	beforeF := copyFacts(b.facts[b.cur])
 	beforeNN := copyFacts(b.nonNil[b.cur])
@@ -1068,6 +1072,11 @@ func (b *builder) emitSwitch(statement *parser.Statement, scope *semantic.Scope)
 		b.facts[b.cur] = copyFacts(beforeF)
 		b.nonNil[b.cur] = copyFacts(beforeNN)
 		b.pathNN[b.cur] = copyPathFacts(beforePath)
+		if knownEnum && nullable && !arm.NilArm && id != 0 {
+			// Story 33 (RFC-006 §6.5.4): a variant arm proves the
+			// scrutinee non-nil - ordinary control-flow facts (§6.5.4).
+			b.assume(id)
+		}
 		b.emit(arm.Body, scope.Child())
 		armExits = append(armExits, b.blocks[b.cur].ID)
 		armF := copyFacts(b.facts[b.cur])
@@ -1110,10 +1119,19 @@ func (b *builder) switchEnum(scrutinee string, scope *semantic.Scope) (semantic.
 // against its declared variants (§6.3.4 missing, §6.3.5 duplicate, §6.1
 // off-enum patterns); the missing-variant report lands on the switch
 // span.
-func (b *builder) reportSwitchArmIssues(variants []string, arms []parser.SwitchArm, span parser.Span) {
+func (b *builder) reportSwitchArmIssues(variants []string, arms []parser.SwitchArm, span parser.Span, nullable bool) {
 	covered := map[string]bool{}
 	missing := false
 	for _, arm := range arms {
+		if arm.NilArm {
+			// Story 33 (§6.5.3): nil is reachable only for a nullable
+			// scrutinee.
+			if !nullable {
+				b.report(semantic.NilArmOnNonNullEnum, arm.Span)
+			}
+			covered["nil"] = true
+			continue
+		}
 		found := false
 		for _, variant := range variants {
 			if variant == arm.Variant {
@@ -1135,6 +1153,9 @@ func (b *builder) reportSwitchArmIssues(variants []string, arms []parser.SwitchA
 			missing = true
 			break
 		}
+	}
+	if nullable && !covered["nil"] {
+		missing = true
 	}
 	if missing {
 		b.report(semantic.MissingEnumVariant, span)
@@ -1307,8 +1328,9 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 		// Story 32: a value-producing switch carries the same
 		// exhaustiveness contract (§6.3.4) as the statement form.
 		if value.Switch != nil {
-			if _, variants, known := b.switchEnum(value.Switch.Scrutinee, scope); known {
-				b.reportSwitchArmIssues(variants, value.Switch.Arms, value.Switch.Span)
+			if id, variants, known := b.switchEnum(value.Switch.Scrutinee, scope); known {
+				nullable := b.classes[id] == semantic.NullabilityNullable
+				b.reportSwitchArmIssues(variants, value.Switch.Arms, value.Switch.Span, nullable)
 			}
 		}
 	}

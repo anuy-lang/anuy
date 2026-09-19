@@ -1310,6 +1310,19 @@ func TestParseValueSwitchNestedRejected(t *testing.T) {
 	}
 }
 
+func TestParseSwitchNilArm(t *testing.T) {
+	// Story 33 (RFC-006 §6.5): `case nil:` arms the nil case of a
+	// nullable-enum switch.
+	program, err := Parse("switch c {\ncase nil:\nvar x = 1\ncase Color.Red:\nvar y = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	arms := program.Statements[0].Switch.Arms
+	if len(arms) != 2 || !arms[0].NilArm || arms[1].Variant != "Red" {
+		t.Fatalf("arms = %+v, want nil arm + Red", arms)
+	}
+}
+
 func TestParseKeyedLiteralValue(t *testing.T) {
 	// RFC-014 6.3-6.4: keyed construction is one value - commas inside the
 	// braces do not split it, keys are not binding reads.

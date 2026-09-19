@@ -917,6 +917,27 @@ func TestLowerValueSwitchInferredRejected(t *testing.T) {
 	}
 }
 
+func TestLowerNullableEnumSwitchToGo(t *testing.T) {
+	// Story 33 (RFC-006 §6.5, §6.11.3): a nullable-enum scrutinee lowers
+	// to the representation-specific nullable test plus the Value
+	// dispatch; the synthetic default guards the foreign boundary
+	// (RFC-009 §6.4.3).
+	got, err := Lower("type Color enum {\nRed\nGreen\n}\nvar c Color? = nil\nswitch c {\ncase nil:\nvar x = 1\ncase Color.Red:\nvar y = 2\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"\tswitch {\n",
+		"\tcase c.IsNil():\n",
+		"\tcase c.Value == ColorRed:\n",
+		"panic(\"anuy: invalid enum discriminant\")",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+}
+
 func TestLowerNestedTypeDeclRejected(t *testing.T) {
 	// A block-nested declaration has no Go shape (kernel accepts it - a
 	// narrowing reject).
