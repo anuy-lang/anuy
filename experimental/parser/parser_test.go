@@ -1195,6 +1195,97 @@ func TestParseKeyedLiteralDuplicateKeyRejected(t *testing.T) {
 	}
 }
 
+func TestParseKeyedLiteralMultiline(t *testing.T) {
+	// Story 24 (RFC-014 6.4): `N{` opens a multiline construction, each
+	// entry line ends with a comma, and the bare `}` line closes it; the
+	// raw source spans the value text verbatim.
+	program, err := Parse("var u = User{\nid: 1,\nname: \"x\",\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := program.Statements[0].Values[0]
+	if v.Text != "User{\nid: 1,\nname: \"x\",\n}" {
+		t.Fatalf("text = %q", v.Text)
+	}
+	if v.Keyed == nil || v.Keyed.Name != "User" {
+		t.Fatalf("keyed = %#v, want User", v.Keyed)
+	}
+	if fields := v.Keyed.Fields; len(fields) != 2 || fields[0] != "id" || fields[1] != "name" {
+		t.Fatalf("fields = %v, want [id name]", fields)
+	}
+	if len(v.Idents) != 0 {
+		t.Fatalf("idents = %v, want none", v.Idents)
+	}
+}
+
+func TestParseKeyedLiteralMultilineIdentsSkipFiller(t *testing.T) {
+	// Blank lines and `//` comment lines inside the literal are skipped
+	// but stay in the verbatim text; field values keep their reads in
+	// source order.
+	source := "var u = User{\n\n// the identifier\nid: x,\n\nname: n,\n}\n"
+	program, err := Parse(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := program.Statements[0].Values[0]
+	if v.Text != "User{\n\n// the identifier\nid: x,\n\nname: n,\n}" {
+		t.Fatalf("text = %q", v.Text)
+	}
+	if idents := v.Idents; len(idents) != 2 || idents[0] != "x" || idents[1] != "n" {
+		t.Fatalf("idents = %v, want [x n]", idents)
+	}
+}
+
+func TestParseKeyedLiteralMultilineNestedSingleLineEntry(t *testing.T) {
+	// A single-line nested literal inside an entry keeps its keys hidden.
+	program, err := Parse("var o = Outer{\ninner: Inner{x: 1},\ntag: tag,\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idents := program.Statements[0].Values[0].Idents; len(idents) != 1 || idents[0] != "tag" {
+		t.Fatalf("idents = %v, want [tag]", idents)
+	}
+}
+
+func TestParseKeyedLiteralMultilineAssignAndFieldTargets(t *testing.T) {
+	// Assignment and field-mutation RHS open multiline blocks too.
+	program, err := Parse("var u User\nu = User{\nid: 1,\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := program.Statements[1]; s.Kind != Assign || s.Values[0].Keyed == nil {
+		t.Fatalf("assign = %#v, want Assign with a keyed value", s)
+	}
+	program, err = Parse("var u User\nu.meta = User{\nid: 1,\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[1]
+	if s.Kind != Assign || s.Target == nil || s.Values[0].Keyed == nil {
+		t.Fatalf("field assign = %#v, want a Target with a keyed value", s)
+	}
+}
+
+func TestParseKeyedLiteralMultilineRejects(t *testing.T) {
+	// RFC-014 6.4: every entry MUST end with a comma; the restricted slice
+	// keeps one entry per line, single-line entry values, and a bare `}`
+	// closer (nested multiline, two entries, and a suffix closer are
+	// explicit follow-ups).
+	rejects := []struct{ name, source string }{
+		{"missing trailing comma on last entry", "var u = User{\nid: 1,\nname: \"x\"\n}\n"},
+		{"missing comma on middle entry", "var u = User{\nid: 1\nname: \"x\",\n}\n"},
+		{"two entries on one line", "var u = User{\nid: 1, name: \"x\",\n}\n"},
+		{"nested multiline literal", "var o = Outer{\ninner: Inner{\nx: 1,\n},\n}\n"},
+		{"closer with suffix", "var u = User{\nid: 1,\n},\n"},
+		{"missing closer", "var u = User{\nid: 1,\n"},
+	}
+	for _, reject := range rejects {
+		if _, err := Parse(reject.source); err == nil {
+			t.Fatalf("%s: accepted", reject.name)
+		}
+	}
+}
+
 func TestParseFieldMutation(t *testing.T) {
 	// Story 22 (RFC-014 6.7): `user.name = "Bob"` — an ordinary field
 	// path as the assignment target.

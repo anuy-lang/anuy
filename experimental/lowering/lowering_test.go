@@ -895,3 +895,22 @@ func TestLowerFieldMutationToGo(t *testing.T) {
 		t.Fatalf("Lower() = %q, wants the field mutation", got)
 	}
 }
+
+func TestLowerMultilineConstructionVerbatim(t *testing.T) {
+	// Story 24 (RFC-014 6.4, 6.5): the multiline construction lowers
+	// verbatim - the source order of the field initializers is the
+	// generated order (§6.5 example shape).
+	got, err := Lower("type Pair struct {\nright int\nleft int\n}\nvar pair = Pair{\nright: nextRight(),\nleft: nextLeft(),\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tpair := Pair{\nright: nextRight(),\nleft: nextLeft(),\n}\n") {
+		t.Fatalf("Lower() = %q, wants the verbatim multiline construction", got)
+	}
+}
+
+func TestLowerGeneratedMultilineConstructionTypeChecks(t *testing.T) {
+	// The §6.4 trailing-comma MUST is what keeps the verbatim multiline
+	// literal valid Go: the generated file parses and type-checks.
+	typeCheckGenerated(t, "type User struct {\nid int\nname string\n}\nvar u = User{\nid: 1,\nname: \"Ann\",\n}\n")
+}

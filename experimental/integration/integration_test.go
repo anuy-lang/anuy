@@ -1516,10 +1516,24 @@ func TestAnalyzeSourceFieldModelNegativesStayClean(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSourceMultilineLiteralRejected(t *testing.T) {
-	// The line-oriented grammar accepts only single-line keyed literals
-	// (RFC-014 6.4 formatting - a follow-up slice).
-	if _, err := AnalyzeSource("type User struct {\nid int\n}\nvar u = User{\nid: 1,\n}\n"); err == nil {
-		t.Fatal("multiline literal accepted")
+func TestAnalyzeSourceMultilineConstructionClean(t *testing.T) {
+	// Story 24 (RFC-014 6.4): the multiline keyed construction parses and
+	// passes completeness - the story 22 reject pin flips.
+	result, err := AnalyzeSource("type User struct {\nid int\n}\nvar u = User{\nid: 1,\n}\n")
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceMultilineMissingField(t *testing.T) {
+	// 6.3 completeness on the multiline form: the missing key is reported
+	// the same way as on the single-line literal.
+	result, err := AnalyzeSource("type User struct {\nid int\nname string\n}\nvar u = User{\nid: 1,\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "IncompleteConstruction")
 }

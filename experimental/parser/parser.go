@@ -1299,7 +1299,7 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 			statement.Values = []Value{{Closure: &cl}}
 			return statement, nil
 		}
-		values, verr := parseValueList(tokens, i+1, line)
+		values, verr := lp.parseRHS(tokens, i+1, line)
 		if verr != nil {
 			return Statement{}, verr
 		}
@@ -1332,7 +1332,7 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 		// lp.pos was advanced past the closure body by parseClosure.
 		values = []Value{{Closure: &cl}}
 	} else {
-		rest, verr := parseValueList(tokens, i+1, line)
+		rest, verr := lp.parseRHS(tokens, i+1, line)
 		if verr != nil {
 			return Statement{}, verr
 		}
@@ -1404,7 +1404,7 @@ func (lp *lineParser) parseFieldAssignment(tokens []token, line sourceLine) (Sta
 	if len(tokens) <= 3 || !isAssign(tokens[3]) {
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "assignment requires =")
 	}
-	values, verr := parseValueList(tokens, 4, line)
+	values, verr := lp.parseRHS(tokens, 4, line)
 	if verr != nil {
 		return Statement{}, verr
 	}
@@ -1978,6 +1978,128 @@ func keyedLiteralScan(group []token) ([]string, []string, *Error) {
 		}
 	}
 	return keys, idents, nil
+}
+
+// parseRHS parses the value region of a declaration or assignment RHS
+// (story 24): a multiline keyed construction when the region is exactly
+// `N{`, otherwise the ordinary single-line value list.
+func (lp *lineParser) parseRHS(tokens []token, start int, line sourceLine) ([]Value, error) {
+	value, handled, kerr := lp.parseMultilineKeyed(tokens, start, line)
+	if kerr != nil {
+		return nil, kerr
+	}
+	if handled {
+		return []Value{value}, nil
+	}
+	return parseValueList(tokens, start, line)
+}
+
+// parseMultilineKeyed parses the multiline keyed construction `N{` … `}`
+// (story 24, RFC-014 §6.4): the header is exactly `N{` at the end of the
+// line, each entry line is `key: value,` (the trailing comma is MUST), and
+// a bare `}` line closes the literal. Blank and `//` lines are skipped but
+// stay in the verbatim text. Keys, reads, duplicates and nested
+// single-line literals reuse the single-line scan over the collected
+// token group; entry lines never reach parseValueList, so their commas
+// cannot split the value list. Reports handled=false when the region is
+// not exactly `N{`.
+func (lp *lineParser) parseMultilineKeyed(tokens []token, start int, line sourceLine) (Value, bool, error) {
+	if len(tokens)-start != 2 || tokens[start].kind != tokenIdent || reservedWords[tokens[start].text] || !isPunct(tokens[start+1], "{") {
+		return Value{}, false, nil
+	}
+	group := []token{tokens[start], tokens[start+1]}
+	var text strings.Builder
+	text.WriteString(line.raw[tokens[start].start-line.offset:])
+	lp.pos++
+	for {
+		if lp.pos >= len(lp.lines) {
+			return Value{}, true, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
+		}
+		cur := lp.lines[lp.pos]
+		if cur.text == "" || strings.HasPrefix(cur.text, "//") {
+			text.WriteString(cur.raw)
+			lp.pos++
+			continue
+		}
+		if cur.text == "}" {
+			closerTokens, terr := tokenize(cur.raw, cur.offset)
+			if terr != nil {
+				return Value{}, true, terr
+			}
+			text.WriteString(cur.raw[:closerTokens[0].end-cur.offset])
+			group = append(group, closerTokens[0])
+			lp.pos++
+			value, kerr := keyedMultilineValue(group, text.String())
+			return value, true, kerr
+		}
+		entryTokens, terr := tokenize(cur.raw, cur.offset)
+		if terr != nil {
+			return Value{}, true, terr
+		}
+		if kerr := validateKeyedEntry(entryTokens); kerr != nil {
+			return Value{}, true, kerr
+		}
+		group = append(group, entryTokens...)
+		text.WriteString(cur.raw)
+		lp.pos++
+	}
+}
+
+// validateKeyedEntry checks one multiline entry line `key: value,`
+// (story 24, RFC-014 §6.4): the trailing comma is MUST, the value is a
+// single-line expression - one top-level comma would be a second entry,
+// and an unbalanced value is a nested multiline literal; both are
+// explicit follow-up rejects.
+func validateKeyedEntry(tokens []token) error {
+	if len(tokens) < 4 || tokens[0].kind != tokenIdent || !isPunct(tokens[1], ":") {
+		return newError(UnsupportedSyntax, tokens[0].start, "multiline literal entry must be `field: value,`")
+	}
+	if !isPunct(tokens[len(tokens)-1], ",") {
+		return newError(UnsupportedSyntax, tokens[len(tokens)-1].start, "multiline literal entry must end with a comma")
+	}
+	depth := 0
+	for _, t := range tokens[2 : len(tokens)-1] {
+		switch {
+		case isPunct(t, "{") || isPunct(t, "(") || isPunct(t, "["):
+			depth++
+		case isPunct(t, "}") || isPunct(t, ")") || isPunct(t, "]"):
+			depth--
+			if depth < 0 {
+				return newError(UnsupportedSyntax, t.start, "unexpected closing bracket in entry value")
+			}
+		case depth == 0 && isPunct(t, ","):
+			return newError(UnsupportedSyntax, t.start, "multiline literal entry must be one `field: value,` per line")
+		case depth == 0 && (isAssign(t) || isPunct(t, "==")):
+			return newError(UnsupportedSyntax, t.start, "unexpected = in entry value")
+		}
+	}
+	if depth != 0 {
+		return newError(UnsupportedSyntax, tokens[len(tokens)-2].start, "nested multiline literal is not supported in this slice")
+	}
+	return nil
+}
+
+// keyedMultilineValue builds the Value from the collected `N { entries }`
+// token group: the shape, keys, reads, the duplicate-key check and nested
+// single-line literals reuse the single-line scan verbatim.
+func keyedMultilineValue(group []token, text string) (Value, error) {
+	name := keyedLiteralName(group)
+	if name == "" {
+		return Value{}, newError(UnsupportedSyntax, listEnd(group), "invalid multiline keyed literal")
+	}
+	keys, idents, serr := keyedLiteralScan(group)
+	if serr != nil {
+		return Value{}, serr
+	}
+	return Value{
+		Text:   text,
+		Idents: idents,
+		Keyed: &KeyedLiteral{
+			Name:   name,
+			Fields: keys,
+			Span:   Span{Start: group[0].start, End: listEnd(group)},
+		},
+	}, nil
 }
 
 // isElseIfHeader reports a `} else if` continuation line that closes the
