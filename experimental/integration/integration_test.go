@@ -1800,3 +1800,29 @@ func TestAnalyzeSourcePromotedMethodCall(t *testing.T) {
 		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceEnumVariantEstablishes(t *testing.T) {
+	// Story 30 (RFC-006 §6.1, §6.2): `Enum.Variant` classifies non-null
+	// and establishes the binding - the later read stays clean.
+	source := "type Color enum {\nRed\nGreen\n}\nvar c Color = Color.Red\nvar x = c\n"
+	result, err := AnalyzeSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceEnumUnknownVariantStaysClean(t *testing.T) {
+	// F-G3 tolerance: an unknown variant reference classifies unknown -
+	// no verdict, no diagnostics.
+	source := "type Color enum {\nRed\n}\nvar c = Color.Ghost\n"
+	result, err := AnalyzeSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}

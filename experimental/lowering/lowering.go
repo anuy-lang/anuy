@@ -560,6 +560,9 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 // lower verbatim (§6.13 - "practically directly"); their completeness is
 // a kernel concern (story 22).
 func (l *lowerer) typeDecl(decls *strings.Builder, statement *parser.Statement) error {
+	if statement.Enum != nil {
+		return l.enumDecl(decls, statement)
+	}
 	sd := statement.Struct
 	var b strings.Builder
 	b.WriteString("type " + sd.Name + " struct {\n")
@@ -577,6 +580,22 @@ func (l *lowerer) typeDecl(decls *strings.Builder, statement *parser.Statement) 
 		fmt.Fprintf(&b, "\t%s %s\n", field.Name, text)
 	}
 	b.WriteString("}\n")
+	decls.WriteString(b.String() + "\n")
+	return nil
+}
+
+// enumDecl lowers an enum declaration (story 30, RFC-009 §6.4): a named
+// uint32 plus discriminant constants 1..N in declaration order - the Go
+// zero value stays the reserved invalid representation (§6.4.2-6.4.3);
+// constant names follow §6.4.5 (`Color.Red` -> `ColorRed`).
+func (l *lowerer) enumDecl(decls *strings.Builder, statement *parser.Statement) error {
+	ed := statement.Enum
+	var b strings.Builder
+	fmt.Fprintf(&b, "type %s uint32\n\nconst (\n", ed.Name)
+	for i, variant := range ed.Variants {
+		fmt.Fprintf(&b, "\t%s%s %s = %d\n", ed.Name, variant.Name, ed.Name, i+1)
+	}
+	b.WriteString(")\n")
 	decls.WriteString(b.String() + "\n")
 	return nil
 }

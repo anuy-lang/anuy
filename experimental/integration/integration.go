@@ -143,6 +143,10 @@ type builder struct {
 	// ordered field names and their classes - the completeness check uses
 	// the names, the field-path classification the classes.
 	structs map[string]*structInfo
+	// enums carries the declared enum table (story 30, RFC-006 6.1):
+	// enum name to ordered variant names - the variant-reference
+	// classification (6.2) reads it.
+	enums map[string][]string
 	// bindingTypes carries the declared type name of a binding when it is
 	// a named type (story 22): the root of a field path resolves through
 	// it.
@@ -173,6 +177,7 @@ func newBuilder() *builder {
 		funcResults:    map[string]declResult{},
 		funcParams:     map[string][]semantic.Nullability{},
 		structs:        map[string]*structInfo{},
+		enums:          map[string][]string{},
 		bindingTypes:   map[semantic.BindingID]string{},
 	}
 }
@@ -239,6 +244,18 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 		return semantic.NullabilityUnknown
 	}
 	if value.Navigation != nil {
+		// Story 30 (RFC-006 §6.1, §6.2): `Enum.Variant` is a variant
+		// constant reference - non-null and establishing. An unknown
+		// variant or enum falls through unknown (F-G3 tolerance).
+		if len(value.Navigation.Segments) == 1 && !value.Navigation.Segments[0].Safe && !value.Navigation.Segments[0].Call {
+			if variants, ok := b.enums[value.Navigation.Receiver]; ok {
+				for _, variant := range variants {
+					if variant == value.Navigation.Segments[0].Name {
+						return semantic.NullabilityNonNull
+					}
+				}
+			}
+		}
 		// Story 22/25: an ordinary field path carries the declared class
 		// of its final field walked through declared struct types
 		// (RFC-014 §6.7); anything else stays unknown.
@@ -403,6 +420,17 @@ func (b *builder) registerStruct(sd *parser.StructDecl) {
 		info.embedded = append(info.embedded, field.Embedded)
 	}
 	b.structs[sd.Name] = info
+}
+
+// registerEnum adds a declared enum to the table (story 30, RFC-006
+// §6.1): the ordered variant names drive the variant-reference
+// classification (§6.2).
+func (b *builder) registerEnum(ed *parser.EnumDecl) {
+	names := make([]string, 0, len(ed.Variants))
+	for _, variant := range ed.Variants {
+		names = append(names, variant.Name)
+	}
+	b.enums[ed.Name] = names
 }
 
 // classOfTypeExpr classifies a restricted type expression (story 22):
@@ -693,9 +721,14 @@ func (b *builder) emit(statements []parser.Statement, scope *semantic.Scope) {
 func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Scope) {
 	switch statement.Kind {
 	case parser.TypeDecl:
-		// Story 22: the struct table feeds the completeness check and the
-		// field-path classification (RFC-014 §6.2/§6.7).
-		b.registerStruct(statement.Struct)
+		// Story 22/29: the struct table feeds the completeness check and
+		// the field-path classification (RFC-014 §6.2/§6.7). Story 30:
+		// enums register their variant table (RFC-006 §6.1).
+		if statement.Enum != nil {
+			b.registerEnum(statement.Enum)
+		} else {
+			b.registerStruct(statement.Struct)
+		}
 	case parser.Var:
 		b.readIdents(statement, scope)
 		declared := make([]string, 0, len(statement.Names))
@@ -1249,6 +1282,7 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) ([]s
 		// body reads field classes; its own declarations register in fresh
 		// maps).
 		structs:      b.structs,
+		enums:        b.enums,
 		bindingTypes: map[semantic.BindingID]string{},
 		funcParams:   map[string][]semantic.Nullability{},
 	}

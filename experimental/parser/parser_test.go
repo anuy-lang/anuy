@@ -1202,6 +1202,52 @@ func TestParseEmbedRejects(t *testing.T) {
 	}
 }
 
+func TestParseEnumDeclaration(t *testing.T) {
+	// Story 30 (RFC-006 6.1, ADR syntax `type N enum`): a line-based
+	// closed set of bare variant names.
+	program, err := Parse("type Color enum {\nRed\nGreen\nBlue\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[0]
+	if s.Kind != TypeDecl || s.Enum == nil {
+		t.Fatalf("kind = %v, want TypeDecl with Enum", s.Kind)
+	}
+	if s.Enum.Name != "Color" || len(s.Enum.Variants) != 3 {
+		t.Fatalf("enum = %+v, want Color with 3 variants", s.Enum)
+	}
+	if s.Enum.Variants[0].Name != "Red" || s.Enum.Variants[2].Name != "Blue" {
+		t.Fatalf("variants = %+v, want [Red Green Blue]", s.Enum.Variants)
+	}
+	if s.Enum.Variants[0].Span.Start > s.Enum.Variants[2].Span.Start {
+		t.Fatalf("variant order not preserved: %+v", s.Enum.Variants)
+	}
+}
+
+func TestParseEnumSkipsFillerLines(t *testing.T) {
+	// Blank lines and `//` comments between variants are skipped.
+	program, err := Parse("type Color enum {\n\n// the first\nRed\n\nGreen\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if variants := program.Statements[0].Enum.Variants; len(variants) != 2 {
+		t.Fatalf("variants = %+v, want [Red Green]", variants)
+	}
+}
+
+func TestParseEnumRejects(t *testing.T) {
+	// RFC-006 6.1.4/6.1.5/6.1.6: unique bare variants, at least one.
+	if _, err := Parse("type Color enum {\nRed\nRed\n}\n"); err == nil {
+		t.Fatal("duplicate variant accepted")
+	}
+	if _, err := Parse("type Color enum {\n}\n"); err == nil {
+		t.Fatal("empty enum accepted")
+	}
+	if _, err := Parse("type Token enum {\nIdentifier(string)\n}\n"); err == nil {
+		t.Fatal("payload variant accepted")
+	}
+}
+
 func TestParseKeyedLiteralValue(t *testing.T) {
 	// RFC-014 6.3-6.4: keyed construction is one value - commas inside the
 	// braces do not split it, keys are not binding reads.

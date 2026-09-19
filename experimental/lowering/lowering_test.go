@@ -870,6 +870,20 @@ func TestLowerStructFieldTagged(t *testing.T) {
 	}
 }
 
+func TestLowerEnumDeclarationToGo(t *testing.T) {
+	// Story 30 (RFC-009 §6.4): a named uint32 with discriminants 1..N in
+	// declaration order - the Go zero value stays the reserved invalid
+	// representation (§6.4.2-6.4.3); constant names per §6.4.5.
+	got, err := Lower("type Color enum {\nRed\nGreen\nBlue\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\ntype Color uint32\n\nconst (\n\tColorRed Color = 1\n\tColorGreen Color = 2\n\tColorBlue Color = 3\n)\n\nfunc Run() {\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
 func TestLowerNestedTypeDeclRejected(t *testing.T) {
 	// A block-nested declaration has no Go shape (kernel accepts it - a
 	// narrowing reject).

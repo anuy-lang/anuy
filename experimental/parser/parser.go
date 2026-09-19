@@ -101,6 +101,21 @@ type StructDecl struct {
 	Span   Span
 }
 
+// EnumVariant is one variant of an enum declaration (story 30, RFC-006
+// §6.1): a bare name in the declaration order.
+type EnumVariant struct {
+	Name string
+	Span Span
+}
+
+// EnumDecl is a `type N enum { … }` declaration (story 30, RFC-006 §6.1):
+// a closed set of bare variant names.
+type EnumDecl struct {
+	Name     string
+	Variants []EnumVariant
+	Span     Span
+}
+
 // KeyedLiteral marks a keyed construction value `N{field: expression, …}`
 // (RFC-014 §6.3): the raw Text lowers verbatim; Name carries the type the
 // fields belong to, Fields the ordered key names and Span the literal's
@@ -258,6 +273,10 @@ type Statement struct {
 	// RFC-014 §6.2): Names[0] carries the type name; the declaration hoists
 	// to a package-level Go type.
 	Struct *StructDecl
+	// Enum is non-nil for a `type N enum { … }` declaration (story 30,
+	// RFC-006 §6.1): the declaration hoists to a package-level Go type
+	// with discriminant constants.
+	Enum *EnumDecl
 	// Target is non-nil for a field-mutation assignment `u.f = expr`
 	// (story 22, RFC-014 §6.7): an ordinary single-field navigation path;
 	// Names stays empty.
@@ -560,8 +579,17 @@ func (lp *lineParser) parseTypeDecl(tokens []token, line sourceLine) (Statement,
 	if len(tokens) < 2 || tokens[1].kind != tokenIdent || tokens[1].text == "_" || reservedWords[tokens[1].text] {
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "invalid type name")
 	}
-	if len(tokens) < 4 || tokens[2].kind != tokenIdent || tokens[2].text != "struct" || !isPunct(tokens[3], "{") {
-		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "type declaration supports only `type N struct { ... }` in this slice")
+	if len(tokens) < 4 || tokens[2].kind != tokenIdent || tokens[2].text == "_" || reservedWords[tokens[2].text] {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "type declaration supports only `type N struct { ... }` and `type N enum { ... }` in this slice")
+	}
+	if kind := tokens[2].text; kind != "struct" && kind != "enum" {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "type declaration supports only `type N struct { ... }` and `type N enum { ... }` in this slice")
+	}
+	if !isPunct(tokens[3], "{") {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "type declaration supports only `type N struct { ... }` and `type N enum { ... }` in this slice")
+	}
+	if tokens[2].text == "enum" {
+		return lp.parseEnumDecl(tokens, line)
 	}
 	decl := &StructDecl{Name: tokens[1].text, Span: Span{Start: tokens[0].start}}
 	lp.pos++
@@ -636,6 +664,47 @@ func (lp *lineParser) parseTypeDecl(tokens []token, line sourceLine) (Statement,
 		}
 		seen[fieldTokens[0].text] = true
 		decl.Fields = append(decl.Fields, StructField{Name: fieldTokens[0].text, TypeExpr: typeExpr, Span: Span{Start: fieldTokens[0].start, End: typeExpr.Span.End}})
+		lp.pos++
+	}
+}
+
+// parseEnumDecl parses the variant body of `type N enum {` (story 30,
+// RFC-006 §6.1): bare variant names, one per line; unique (§6.1.4), at
+// least one (§6.1.5), no payloads (§6.1.6). Blank lines and `//`
+// comments are skipped.
+func (lp *lineParser) parseEnumDecl(tokens []token, line sourceLine) (Statement, error) {
+	decl := &EnumDecl{Name: tokens[1].text, Span: Span{Start: tokens[0].start}}
+	lp.pos++
+	seen := map[string]bool{}
+	for {
+		if lp.pos >= len(lp.lines) {
+			return Statement{}, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
+		}
+		variantLine := lp.lines[lp.pos]
+		if variantLine.text == "" || strings.HasPrefix(variantLine.text, "//") {
+			lp.pos++
+			continue
+		}
+		if variantLine.text == "}" {
+			if len(decl.Variants) == 0 {
+				return Statement{}, newError(UnsupportedSyntax, variantLine.offset, "enum requires at least one variant")
+			}
+			lp.pos++
+			decl.Span.End = variantLine.offset + len(variantLine.text)
+			return Statement{Kind: TypeDecl, Names: []string{decl.Name}, Enum: decl, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}, nil
+		}
+		variantTokens, terr := tokenize(variantLine.raw, variantLine.offset)
+		if terr != nil {
+			return Statement{}, terr
+		}
+		if len(variantTokens) != 1 || variantTokens[0].kind != tokenIdent || variantTokens[0].text == "_" || reservedWords[variantTokens[0].text] {
+			return Statement{}, newError(UnsupportedSyntax, variantTokens[0].start, "enum variant must be a bare name")
+		}
+		if seen[variantTokens[0].text] {
+			return Statement{}, newError(UnsupportedSyntax, variantTokens[0].start, fmt.Sprintf("duplicate variant %q", variantTokens[0].text))
+		}
+		seen[variantTokens[0].text] = true
+		decl.Variants = append(decl.Variants, EnumVariant{Name: variantTokens[0].text, Span: Span{Start: variantTokens[0].start, End: variantTokens[0].end}})
 		lp.pos++
 	}
 }
