@@ -84,6 +84,13 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			switch {
 			case typeText != "" && len(statement.Values) == 0:
 				fmt.Fprintf(body, "\tvar %s %s\n", names, typeText)
+			case typeText != "" && len(statement.Values) == 1 && hasSafeTailValue(statement.Values[0]):
+				// Story 14 (RFC-002 §6.10.2): a safe-tail initializer with a
+				// declared nullable type lowers to the declaration plus the
+				// synthetic guard branch.
+				if err := l.safeValueDecl(body, &statement, carrierElem, typeText); err != nil {
+					return "", err
+				}
 			case typeText != "":
 				converted := make([]string, 0, len(statement.Values))
 				for _, value := range statement.Values {
@@ -95,6 +102,11 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 				}
 				fmt.Fprintf(body, "\tvar %s %s = %s\n", names, typeText, strings.Join(converted, ", "))
 			default:
+				// An inferred target has no carrier element to spell
+				// None[elem]() with - a safe-tail initializer rejects.
+				if len(statement.Values) == 1 && hasSafeTailValue(statement.Values[0]) {
+					return "", fmt.Errorf("experimental lowering: safe-value target %q is not a declared nullable", statement.Names[0])
+				}
 				values := make([]string, 0, len(statement.Values))
 				for _, value := range statement.Values {
 					text, err := l.value(value)
@@ -111,6 +123,45 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			// equal counts except the single-value multi-target form, whose
 			// tuple RHS is not modeled - those stay raw text.
 			paired := len(statement.Values) == len(statement.Names)
+			hasSafe := false
+			for _, value := range statement.Values {
+				if hasSafeTailValue(value) {
+					hasSafe = true
+					break
+				}
+			}
+			if hasSafe {
+				// Story 14: a safe-tail value lowers to its guard branch as a
+				// statement of its own; plain siblings emit as single
+				// assignments in source order (the joint tuple line cannot
+				// interleave with guards). Without pairing or a declared
+				// nullable target the None[elem]()/nil branch cannot be
+				// spelled - reject.
+				if !paired {
+					return "", fmt.Errorf("experimental lowering: safe-value assignment is unpaired")
+				}
+				for i, value := range statement.Values {
+					name := statement.Names[i]
+					elem := l.carriers[name]
+					native := l.nativeNil[name]
+					if hasSafeTailValue(value) {
+						if name == "_" || (elem == "" && !native) {
+							return "", fmt.Errorf("experimental lowering: safe-value target %q is not a declared nullable", name)
+						}
+						if err := l.safeValue(body, value.Navigation, value.Text, name, elem); err != nil {
+							return "", err
+						}
+						continue
+					}
+					text, err := l.convert(value, elem)
+					if err != nil {
+						return "", err
+					}
+					fmt.Fprintf(body, "\t%s = %s\n", name, text)
+				}
+				last = statement.Names[len(statement.Names)-1]
+				break
+			}
 			converted := make([]string, 0, len(statement.Values))
 			for i, value := range statement.Values {
 				elem := ""
@@ -146,7 +197,12 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			case len(statement.Names) > 0:
 				// Iteration form lowers to Go range with a discarded index
 				// (spec 1-3-1-1 lowering plan); the binding is fresh on every
-				// iteration, matching §76/§77.
+				// iteration, matching §76/§77. A safe-tail collection has no
+				// defined iteration semantics yet - it rejects instead of
+				// emitting range u?.items.
+				if hasSafeTailValue(statement.Values[0]) {
+					return "", fmt.Errorf("experimental lowering: safe-tail range operand is not supported")
+				}
 				operand, err := rangeOperand(statement.Values[0])
 				if err != nil {
 					return "", err
@@ -194,29 +250,31 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 	return last, nil
 }
 
-// condition rewrites a nil comparison over a tracked carrier binding to
-// the dispatch form (story 13, RFC-002 §6.10.2 - the exact generated form
-// is pinned by tests): the verbatim struct comparison does not compile in
+// condition rewrites nil comparisons over a tracked carrier binding to
+// the dispatch form (stories 13–14, RFC-002 §6.10.2 - the exact generated
+// form is pinned by tests): verbatim struct comparisons do not compile in
 // Go. Native-nil operands keep the plain comparison (nil is semantic nil
 // there, §6.8.1) and untracked operands keep the source text (no
 // information - the Go semantics stand as written).
 func (l *lowerer) condition(cond string) string {
-	name, ok := nilCompareOperand(cond)
-	if !ok {
-		return cond
-	}
-	if _, tracked := l.carriers[name]; tracked {
-		return "!" + name + ".IsNil()"
+	if name, ok := nilCompareOperand(cond, "!="); ok {
+		if _, tracked := l.carriers[name]; tracked {
+			return "!" + name + ".IsNil()"
+		}
+	} else if name, ok := nilCompareOperand(cond, "=="); ok {
+		if _, tracked := l.carriers[name]; tracked {
+			return name + ".IsNil()"
+		}
 	}
 	return cond
 }
 
-// nilCompareOperand reports the binding name of the exact `X != nil`
-// condition shape (the only nil-comparison form in the experimental slice,
-// mirroring the integration narrowing target). Anything else - compound,
-// `== nil`, navigation operands - reports no.
-func nilCompareOperand(cond string) (string, bool) {
-	parts := strings.SplitN(cond, "!=", 2)
+// nilCompareOperand reports the binding name of the exact `X != nil` /
+// `X == nil` condition shapes (the only nil-comparison forms in the
+// experimental slice, mirroring the integration narrowing target).
+// Anything else - compound, navigation operands - reports no.
+func nilCompareOperand(cond, op string) (string, bool) {
+	parts := strings.SplitN(cond, op, 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[1]) != "nil" {
 		return "", false
 	}
@@ -261,6 +319,78 @@ func (l *lowerer) callStatement(body *strings.Builder, call *parser.NavigationEx
 		expr += "." + segment.Name
 	}
 	fmt.Fprintf(body, "\t%s()\n", expr)
+	return nil
+}
+
+// hasSafeTailValue reports whether the value carries a safe segment - the
+// dispatch trigger of story 14. Ordinary navigation stays verbatim.
+func hasSafeTailValue(value parser.Value) bool {
+	if value.Navigation == nil {
+		return false
+	}
+	for _, segment := range value.Navigation.Segments {
+		if segment.Safe {
+			return true
+		}
+	}
+	return false
+}
+
+// safeValueDecl lowers a single-value typed declaration whose initializer
+// is a safe-tail value: the plain declaration, then the guard branch into
+// the target. The blank identifier is not a binding and the target must be
+// declared nullable - otherwise the None[elem]()/nil branch cannot be
+// spelled.
+func (l *lowerer) safeValueDecl(body *strings.Builder, statement *parser.Statement, carrierElem, typeText string) error {
+	if statement.Names[0] == "_" || (carrierElem == "" && !statement.TypeExpr.Nullable) {
+		return fmt.Errorf("experimental lowering: safe-value target %q is not a declared nullable", statement.Names[0])
+	}
+	fmt.Fprintf(body, "\tvar %s %s\n", statement.Names[0], typeText)
+	return l.safeValue(body, statement.Values[0].Navigation, statement.Values[0].Text, statement.Names[0], carrierElem)
+}
+
+// safeValue emits the synthetic guard branch assigning a safe-tail value
+// to the target (story 14, RFC-002 §6.4.5, §6.10.2): the guard follows the
+// receiver representation (`!x.IsNil()` plus the member on x.Value for the
+// carrier, the plain Go comparison plus the member on x for native-nil),
+// the conversion follows the target representation (`Some(member)` /
+// `None[elem]()` for a carrier target, the raw member / nil for a
+// native-nil target). A zero-argument member call emits the call form;
+// call arguments are invisible in NavigationExpr, so an argumented call
+// rejects. §6.10.3 single evaluation is structural: the dispatch requires
+// a tracked binding receiver, and a root call is invisible - hence
+// untracked and rejected. Safe segments beyond the receiver have no
+// representation model and reject.
+func (l *lowerer) safeValue(body *strings.Builder, nav *parser.NavigationExpr, raw, target, carrierElem string) error {
+	if len(nav.Segments) != 1 || !nav.Segments[0].Safe {
+		return fmt.Errorf("experimental lowering: safe-value chain beyond the receiver is not supported")
+	}
+	name, member := nav.Receiver, nav.Segments[0].Name
+	var guard, memberExpr string
+	if _, tracked := l.carriers[name]; tracked {
+		guard = "!" + name + ".IsNil()"
+		memberExpr = name + ".Value." + member
+	} else if l.nativeNil[name] {
+		guard = name + " != nil"
+		memberExpr = name + "." + member
+	} else {
+		return fmt.Errorf("experimental lowering: safe-value receiver %q is not a tracked nullable", name)
+	}
+	if nav.Segments[0].Call {
+		if !strings.Contains(raw, member+"()") {
+			return fmt.Errorf("experimental lowering: safe-value call arguments are not supported")
+		}
+		memberExpr += "()"
+	}
+	var thenValue, elseValue string
+	if carrierElem != "" {
+		l.taggedUsed = true
+		thenValue = "anuyabi.Some(" + memberExpr + ")"
+		elseValue = "anuyabi.None[" + carrierElem + "]()"
+	} else {
+		thenValue, elseValue = memberExpr, "nil"
+	}
+	fmt.Fprintf(body, "\tif %s {\n\t%s = %s\n\t} else {\n\t%s = %s\n\t}\n", guard, target, thenValue, target, elseValue)
 	return nil
 }
 

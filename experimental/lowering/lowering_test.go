@@ -464,3 +464,207 @@ func TestLowerGeneratedNativeNilSafeCallTypeChecks(t *testing.T) {
 	// interface as the receiver type.
 	typeCheckGenerated(t, "var err error?\nerr?.Error()\n")
 }
+
+func TestLowerCarrierNilConditionUsesIsNil(t *testing.T) {
+	// Story 14 (RFC-002 §6.2.3): the `x == nil` comparison over a tracked
+	// carrier dispatches through the support API, mirroring the `!=` form.
+	got, err := Lower("var n int?\nif n == nil {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tif n.IsNil() {\n") {
+		t.Fatalf("Lower() = %q, wants IsNil dispatch for == nil", got)
+	}
+}
+
+func TestLowerCarrierLoopNilConditionUsesIsNil(t *testing.T) {
+	got, err := Lower("var n int?\nfor n == nil {\nbreak\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tfor n.IsNil() {\n") {
+		t.Fatalf("Lower() = %q, wants IsNil dispatch in the loop header", got)
+	}
+}
+
+func TestLowerNativeNilNilConditionStaysVerbatim(t *testing.T) {
+	// Native-nil operands keep the plain Go comparison (nil is semantic
+	// nil there, §6.8.1) - both comparison directions.
+	got, err := Lower("var p *User?\nif p == nil {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tif p == nil {\n") {
+		t.Fatalf("Lower() = %q, wants verbatim native-nil condition", got)
+	}
+}
+
+func TestLowerUntrackedNilConditionStaysVerbatim(t *testing.T) {
+	got, err := Lower("var p *User = getUser()\nif p == nil {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tif p == nil {\n") {
+		t.Fatalf("Lower() = %q, wants verbatim untracked condition", got)
+	}
+}
+
+func TestLowerSafeValueCarrierReceiverCarrierTarget(t *testing.T) {
+	// Story 14 (RFC-002 §6.4.5, §6.10.2): a safe-tail value with a declared
+	// nullable target lowers to the synthetic guard branch - Some(member)
+	// in the non-nil branch, None in the nil branch.
+	got, err := Lower("var a User?\nvar c int? = a?.count\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar a anuyabi.Nullable[User]\n\tvar c anuyabi.Nullable[int]\n\tif !a.IsNil() {\n\tc = anuyabi.Some(a.Value.count)\n\t} else {\n\tc = anuyabi.None[int]()\n\t}\n\t_ = c\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerSafeValueNativeNilReceiverCarrierTarget(t *testing.T) {
+	// A native-nil receiver guards with the plain Go comparison and reads
+	// the member off the value itself.
+	got, err := Lower("var err error?\nvar s string? = err?.Error()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar err error\n\tvar s anuyabi.Nullable[string]\n\tif err != nil {\n\ts = anuyabi.Some(err.Error())\n\t} else {\n\ts = anuyabi.None[string]()\n\t}\n\t_ = s\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerSafeValueCarrierReceiverNativeNilTarget(t *testing.T) {
+	// A native-nil target takes the raw member in the non-nil branch and
+	// Go nil as semantic nil in the nil branch (§6.8.1).
+	got, err := Lower("var a User?\nvar p *User? = a?.profile\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar a anuyabi.Nullable[User]\n\tvar p *User\n\tif !a.IsNil() {\n\tp = a.Value.profile\n\t} else {\n\tp = nil\n\t}\n\t_ = p\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerSafeValueAssignCarrierTarget(t *testing.T) {
+	// The assignment form dispatches through the tracked target binding.
+	got, err := Lower("var a User?\nvar c int?\nc = a?.count\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar a anuyabi.Nullable[User]\n\tvar c anuyabi.Nullable[int]\n\tif !a.IsNil() {\n\tc = anuyabi.Some(a.Value.count)\n\t} else {\n\tc = anuyabi.None[int]()\n\t}\n\t_ = c\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerSafeValueCallMemberDispatch(t *testing.T) {
+	// A safe method value dispatches identically; the call evaluates only
+	// in the non-nil branch (§6.10.4 analogue). The receiver is a binding,
+	// so §6.10.3 single evaluation stays structural - no temporary.
+	got, err := Lower("var n int?\nvar b bool? = n?.IsNil()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar n anuyabi.Nullable[int]\n\tvar b anuyabi.Nullable[bool]\n\tif !n.IsNil() {\n\tb = anuyabi.Some(n.Value.IsNil())\n\t} else {\n\tb = anuyabi.None[bool]()\n\t}\n\t_ = b\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerSafeValueRejectsUndeclaredTarget(t *testing.T) {
+	// Without a declared nullable target the None[elem] branch cannot be
+	// spelled: inferred and non-null-typed targets reject.
+	for _, source := range []string{
+		"var a User?\nvar c = a?.count\n",
+		"var a User?\nvar c int = a?.count\n",
+		"var a User?\nvar c = 1\nc = a?.count\n",
+	} {
+		if _, err := Lower(source); err == nil || !strings.Contains(err.Error(), "not a declared nullable") {
+			t.Fatalf("Lower(%q) err = %v, want declared nullable target reject", source, err)
+		}
+	}
+}
+
+func TestLowerSafeValueRejectsUntrackedReceiver(t *testing.T) {
+	// An untracked binding and a root-call receiver (its call is invisible
+	// in NavigationExpr) carry no representation information.
+	for _, source := range []string{
+		"var a User = getUser()\nvar c int? = a?.count\n",
+		"var c int? = findUser()?.id\n",
+	} {
+		if _, err := Lower(source); err == nil || !strings.Contains(err.Error(), "not a tracked nullable") {
+			t.Fatalf("Lower(%q) err = %v, want untracked receiver reject", source, err)
+		}
+	}
+}
+
+func TestLowerSafeValueRejectsChainsBeyondReceiver(t *testing.T) {
+	// Safe segments beyond the receiver have no representation model
+	// (mixed chains, multi-safe chains) - reject, not verbatim.
+	for _, source := range []string{
+		"var a User?\nvar c int? = a.addr?.code\n",
+		"var a User?\nvar c int? = a?.x?.y\n",
+	} {
+		if _, err := Lower(source); err == nil || !strings.Contains(err.Error(), "beyond the receiver") {
+			t.Fatalf("Lower(%q) err = %v, want chain reject", source, err)
+		}
+	}
+}
+
+func TestLowerSafeValueRejectsUnpairedTuple(t *testing.T) {
+	// The single-value multi-target form has no pairing, so no tracked
+	// target exists for the dispatch.
+	if _, err := Lower("var c, d = 1, 2\nc, d = a?.b\n"); err == nil || !strings.Contains(err.Error(), "unpaired") {
+		t.Fatalf("err = %v, want unpaired safe-value reject", err)
+	}
+}
+
+func TestLowerRejectsSafeTailRangeOperand(t *testing.T) {
+	// Iteration over a nullable collection has no defined semantics yet
+	// (RFC-003 iteration slice): the safe-tail range operand rejects
+	// instead of emitting range u?.items.
+	if _, err := Lower("var u User?\nfor x in u?.items {\n}\n"); err == nil || !strings.Contains(err.Error(), "safe-tail range operand") {
+		t.Fatalf("err = %v, want safe-tail range operand reject", err)
+	}
+}
+
+func TestLowerOrdinaryNavigationStaysVerbatim(t *testing.T) {
+	// Ordinary (non-safe) navigation keeps the verbatim lowering in every
+	// target shape - the dispatch touches only safe tails.
+	for _, source := range []string{
+		"var c = a.b\n",
+		"var c int = a.b\n",
+		"var a User\nvar c int = a.count\n",
+	} {
+		if _, err := Lower(source); err != nil {
+			t.Fatalf("Lower(%q) err = %v, want verbatim ordinary navigation", source, err)
+		}
+	}
+}
+
+func TestLowerGeneratedNativeNilReceiverSafeValueTypeChecks(t *testing.T) {
+	// Compilable end-to-end for the native-nil receiver form. The carrier-
+	// receiver form has no builtin shape to type-check (builtin value types
+	// have no members - Nullable.IsNil is the carrier API, not an Anuy
+	// member of T) and stays pinned by exact text.
+	typeCheckGenerated(t, "var err error?\nvar s string? = err?.Error()\n")
+}
+
+func TestLowerGeneratedCarrierNilConditionTypeChecks(t *testing.T) {
+	// The == nil dispatch form compiles where the verbatim struct
+	// comparison does not (mirror of the story 13 != pin).
+	typeCheckGenerated(t, "var n int? = 1\nif n == nil {\n}\n")
+}
+
+func TestLowerSafeValueRejectsCallArguments(t *testing.T) {
+	// Mid-chain call arguments are invisible in NavigationExpr; a call
+	// with arguments cannot dispatch (only the zero-argument member call
+	// is part of the slice).
+	if _, err := Lower("var a User?\nvar c int? = a?.sum(1)\n"); err == nil || !strings.Contains(err.Error(), "call arguments") {
+		t.Fatalf("err = %v, want safe-value call arguments reject", err)
+	}
+}

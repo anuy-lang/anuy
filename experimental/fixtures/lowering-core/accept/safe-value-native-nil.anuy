@@ -1,0 +1,2 @@
+var err error?
+var s string? = err?.Error()
