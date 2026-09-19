@@ -1628,3 +1628,46 @@ func TestAnalyzeSourceNullableIntermediateSafeFormClean(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzeSourcePathNarrowingLiftsGate(t *testing.T) {
+	// Story 27 (ADR-0008, RFC-002 6.3.7): the exact `path != nil`
+	// condition narrows the path inside the then-block - the story 26
+	// gate accepts the proof.
+	base := "type Profile struct {\nbadge string\n}\ntype User struct {\nlink Profile?\n}\nvar u = User{link: nil}\n"
+	cases := []struct{ name, source string }{
+		{"value read", base + "if u.link != nil {\nvar x = u.link.badge\n}\n"},
+		{"mutation", base + "if u.link != nil {\nu.link.badge = \"B\"\n}\n"},
+	}
+	for _, testCase := range cases {
+		result, err := AnalyzeSource(testCase.source)
+		if err != nil {
+			t.Fatalf("%s: %v", testCase.name, err)
+		}
+		if len(result.Diagnostics) != 0 {
+			t.Fatalf("%s: result = %#v, want no diagnostics", testCase.name, result.Diagnostics)
+		}
+	}
+}
+
+func TestAnalyzeSourcePathNarrowingInvalidation(t *testing.T) {
+	// ADR-0008 invalidation: assignment to the target or its prefix kills
+	// the fact, any call kills all facts; the else branch and the code
+	// past the block stay gated.
+	base := "type Profile struct {\nbadge string\n}\ntype User struct {\nlink Profile?\n}\nvar u = User{link: nil}\n"
+	cases := []struct{ name, source string }{
+		{"prefix mutation", base + "if u.link != nil {\nu.link = nil\nvar x = u.link.badge\n}\n"},
+		{"root mutation", base + "if u.link != nil {\nu = User{link: nil}\nvar x = u.link.badge\n}\n"},
+		{"call kills", base + "func touch() {\n}\nif u.link != nil {\ntouch()\nvar x = u.link.badge\n}\n"},
+		{"else branch", base + "if u.link != nil {\n} else {\nvar x = u.link.badge\n}\n"},
+		{"no leak past the block", base + "if u.link != nil {\n}\nvar x = u.link.badge\n"},
+	}
+	for _, testCase := range cases {
+		result, err := AnalyzeSource(testCase.source)
+		if err != nil {
+			t.Fatalf("%s: %v", testCase.name, err)
+		}
+		if len(result.Diagnostics) != 1 || string(result.Diagnostics[0].Category) != "UnsafeMemberAccess" {
+			t.Fatalf("%s: result = %#v, want one UnsafeMemberAccess", testCase.name, result.Diagnostics)
+		}
+	}
+}

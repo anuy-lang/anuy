@@ -93,6 +93,7 @@ type builder struct {
 	blocks      []semantic.Block
 	facts       []map[semantic.BindingID]bool // initialization facts at the end of each block
 	nonNil      []map[semantic.BindingID]bool // non-nil narrowing facts, parallel to facts (story 05)
+	pathNN      []map[string]bool             // non-nil narrowing facts of field paths, parallel to facts (story 27, ADR-0008)
 	edges       []edge
 	cur         int // index into blocks
 	nextBlockID semantic.BlockID
@@ -156,6 +157,7 @@ func newBuilder() *builder {
 		blocks:         []semantic.Block{{ID: 1}},
 		facts:          []map[semantic.BindingID]bool{{}},
 		nonNil:         []map[semantic.BindingID]bool{{}},
+		pathNN:         []map[string]bool{{}},
 		nextBlockID:    1,
 		nilable:        map[semantic.BindingID]bool{},
 		classes:        map[semantic.BindingID]semantic.Nullability{},
@@ -180,6 +182,7 @@ func (b *builder) appendBlock() {
 	b.blocks = append(b.blocks, semantic.Block{ID: b.nextBlockID})
 	b.facts = append(b.facts, map[semantic.BindingID]bool{})
 	b.nonNil = append(b.nonNil, map[semantic.BindingID]bool{})
+	b.pathNN = append(b.pathNN, map[string]bool{})
 	b.cur = len(b.blocks) - 1
 }
 
@@ -352,6 +355,9 @@ func (b *builder) establishAssignments(statement *parser.Statement, scope *seman
 		if name == "_" {
 			continue
 		}
+		// Story 27 (ADR-0008): the assignment kills the narrowing facts of
+		// the target and its extensions.
+		b.killPathFacts(name)
 		if id := scope.Resolve(name); id != 0 {
 			b.establish(id, &statement.Values[i], scope, statement.Span)
 		}
@@ -526,6 +532,10 @@ func (b *builder) gatePathDerefs(root semantic.BindingID, nav *parser.Navigation
 		if !ok {
 			return false
 		}
+		if b.pathNN[b.cur][pathFactKey(nav.Receiver, fields)] {
+			// Story 27: the `path != nil` narrowing proves this link.
+			continue
+		}
 		switch b.pathClass(root, fields) {
 		case semantic.NullabilityNullable:
 			b.report(semantic.UnsafeMemberAccess, nav.Segments[i].Span)
@@ -541,9 +551,13 @@ func (b *builder) gatePathDerefs(root semantic.BindingID, nav *parser.Navigation
 
 // gatePathDerefsFields is the fields-only variant for positions without
 // segment spans (the exact `X == nil` condition form): the report lands
-// on the given statement span.
-func (b *builder) gatePathDerefsFields(root semantic.BindingID, fields []string, span parser.Span) bool {
+// on the given statement span. receiver names the fact-key base.
+func (b *builder) gatePathDerefsFields(root semantic.BindingID, receiver string, fields []string, span parser.Span) bool {
 	for k := 1; k < len(fields); k++ {
+		if b.pathNN[b.cur][pathFactKey(receiver, fields[:k])] {
+			// Story 27: the `path != nil` narrowing proves this link.
+			continue
+		}
 		switch b.pathClass(root, fields[:k]) {
 		case semantic.NullabilityNullable:
 			b.report(semantic.UnsafeMemberAccess, span)
@@ -701,6 +715,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 				b.classifyValue(&statement.Values[0], scope) == semantic.NullabilityNullable {
 				b.report(semantic.NilToNonNull, statement.Span)
 			}
+			b.killPathFacts(pathFactKey(statement.Target.Receiver, fields))
 			b.analyzeClosures(statement, scope, nil)
 			return
 		}
@@ -725,6 +740,10 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		b.readIdent(statement.Names[0], scope, statement.Span, nil)
 	case parser.Call:
 		b.emitCall(statement, scope)
+		// Story 27 (ADR-0008): any call kills all path facts - the args
+		// were read with the facts alive, the call effect invalidates them
+		// for the statements that follow.
+		b.killAllPathFacts()
 	case parser.Function:
 		b.emitFunction(statement, scope)
 	case parser.Return:
@@ -732,6 +751,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 	case parser.If:
 		b.emitIf(statement, scope)
 	case parser.Loop:
+		b.killAllPathFacts()
 		b.emitLoop(statement, scope)
 	case parser.Break:
 		b.emitJump(true)
@@ -768,10 +788,10 @@ func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.S
 // nilCheckOperand resolves the binding of the exact `X == nil` condition
 // (the mirror of condNarrowTarget's `!=` form); zero means the condition
 // carries no such shape.
-func (b *builder) nilCheckOperand(statement *parser.Statement, scope *semantic.Scope) (semantic.BindingID, []string) {
+func (b *builder) nilCheckOperand(statement *parser.Statement, scope *semantic.Scope) (semantic.BindingID, string, []string) {
 	parts := strings.SplitN(statement.Cond, "==", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[1]) != "nil" {
-		return 0, nil
+		return 0, "", nil
 	}
 	lhs := strings.TrimSpace(parts[0])
 	// Story 22/25: an ordinary field path `u.f` / `u.f.g` names its root
@@ -781,22 +801,22 @@ func (b *builder) nilCheckOperand(statement *parser.Statement, scope *semantic.S
 		fields := strings.Split(lhs[dot+1:], ".")
 		for _, field := range fields {
 			if field == "" || strings.ContainsAny(field, " \t") {
-				return 0, nil
+				return 0, "", nil
 			}
 		}
 		for _, ident := range statement.CondIdents {
 			if ident == root {
-				return scope.Resolve(ident), fields
+				return scope.Resolve(ident), root, fields
 			}
 		}
-		return 0, nil
+		return 0, "", nil
 	}
 	for _, ident := range statement.CondIdents {
 		if ident == lhs {
-			return scope.Resolve(ident), nil
+			return scope.Resolve(ident), lhs, nil
 		}
 	}
-	return 0, nil
+	return 0, "", nil
 }
 
 // reportRedundantNilCheck reports D-5 (RFC-002 §6.2.4/§8.2.5, story 19):
@@ -807,12 +827,12 @@ func (b *builder) nilCheckOperand(statement *parser.Statement, scope *semantic.S
 // outside the slice - it re-establishes narrowing in the kernel
 // (condNarrowTarget).
 func (b *builder) reportRedundantNilCheck(statement *parser.Statement, scope *semantic.Scope) {
-	id, fields := b.nilCheckOperand(statement, scope)
+	id, receiver, fields := b.nilCheckOperand(statement, scope)
 	if id == 0 {
 		return
 	}
 	if fields != nil {
-		if !b.gatePathDerefsFields(id, fields, statement.Span) && b.pathKnownNonNull(id, fields) {
+		if !b.gatePathDerefsFields(id, receiver, fields, statement.Span) && b.pathKnownNonNull(id, fields) {
 			b.report(semantic.RedundantNilCheck, statement.Span)
 		}
 		return
@@ -828,43 +848,57 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	b.reportRedundantNilCheck(statement, scope)
 	before := copyFacts(b.facts[b.cur])
 	beforeNN := copyFacts(b.nonNil[b.cur])
+	beforePath := copyPathFacts(b.pathNN[b.cur])
 	start := b.blocks[b.cur].ID
 	b.appendBlock()
 	thenID := b.blocks[b.cur].ID
 	b.facts[b.cur] = copyFacts(before)
 	b.nonNil[b.cur] = copyFacts(beforeNN)
+	b.pathNN[b.cur] = copyPathFacts(beforePath)
 	if narrowID := b.condNarrowTarget(statement, scope); narrowID != 0 {
 		b.assume(narrowID)
+	}
+	if p := b.condNarrowPath(statement, scope); p != "" {
+		// Story 27 (ADR-0008): `u.link != nil` narrows the path in the
+		// then-branch only.
+		b.pathNN[b.cur][p] = true
 	}
 	b.emit(statement.Body, scope.Child())
 	thenFacts := copyFacts(b.facts[b.cur])
 	thenNN := copyFacts(b.nonNil[b.cur])
+	thenPath := copyPathFacts(b.pathNN[b.cur])
 	thenExit := b.blocks[b.cur].ID
 
 	hasElse := statement.Else != nil
 	var elseID, elseExit semantic.BlockID
 	var elseFacts, elseNN map[semantic.BindingID]bool
+	var elsePath map[string]bool
 	if hasElse {
 		b.appendBlock()
 		elseID = b.blocks[b.cur].ID
 		b.facts[b.cur] = copyFacts(before)
 		b.nonNil[b.cur] = copyFacts(beforeNN)
+		b.pathNN[b.cur] = copyPathFacts(beforePath)
 		b.emit(statement.Else, scope.Child())
 		elseFacts = copyFacts(b.facts[b.cur])
 		elseNN = copyFacts(b.nonNil[b.cur])
+		elsePath = copyPathFacts(b.pathNN[b.cur])
 		elseExit = b.blocks[b.cur].ID
 	}
 
 	joinFacts := intersectFacts(thenFacts, before)
 	joinNN := intersectFacts(thenNN, beforeNN)
+	joinPath := intersectPathFacts(thenPath, beforePath)
 	if hasElse {
 		joinFacts = intersectFacts(thenFacts, elseFacts)
 		joinNN = intersectFacts(thenNN, elseNN)
+		joinPath = intersectPathFacts(thenPath, elsePath)
 	}
 
 	b.appendBlock()
 	b.facts[b.cur] = joinFacts
 	b.nonNil[b.cur] = joinNN
+	b.pathNN[b.cur] = joinPath
 	joinID := b.blocks[b.cur].ID
 	b.connect(start, thenID)
 	b.connect(thenExit, joinID)
@@ -1136,6 +1170,7 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) ([]s
 		blocks:       []semantic.Block{{ID: 1, Operations: entry}},
 		facts:        []map[semantic.BindingID]bool{{}},
 		nonNil:       []map[semantic.BindingID]bool{{}},
+		pathNN:       []map[string]bool{{}},
 		nextBlockID:  1,
 		nilable:      b.nilable,
 		classes:      b.classes,
@@ -1472,6 +1507,15 @@ func copyFacts(facts map[semantic.BindingID]bool) map[semantic.BindingID]bool {
 	return out
 }
 
+// copyPathFacts mirrors copyFacts for the path narrowing facts (story 27).
+func copyPathFacts(facts map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(facts))
+	for key, value := range facts {
+		out[key] = value
+	}
+	return out
+}
+
 // intersectFacts keeps a binding initialized only if both incoming paths
 // initialize it, matching the kernel join semantics.
 func intersectFacts(a, b map[semantic.BindingID]bool) map[semantic.BindingID]bool {
@@ -1482,6 +1526,72 @@ func intersectFacts(a, b map[semantic.BindingID]bool) map[semantic.BindingID]boo
 		}
 	}
 	return out
+}
+
+// intersectPathFacts keeps a path fact only if both incoming paths carry
+// it - the join semantics of the story 27 narrowing (a fact proven on one
+// branch alone does not survive).
+func intersectPathFacts(a, b map[string]bool) map[string]bool {
+	out := make(map[string]bool)
+	for key, value := range a {
+		if value && b[key] {
+			out[key] = true
+		}
+	}
+	return out
+}
+
+// pathFactKey builds the normalized narrowing-fact key of a path prefix
+// (story 27, ADR-0008).
+func pathFactKey(receiver string, fields []string) string {
+	return receiver + "." + strings.Join(fields, ".")
+}
+
+// condNarrowPath resolves the field path narrowed by a bare
+// `u.link != nil` condition (story 27, ADR-0008) - the path mirror of
+// condNarrowTarget. Empty when the condition carries no path narrowing.
+func (b *builder) condNarrowPath(statement *parser.Statement, scope *semantic.Scope) string {
+	parts := strings.SplitN(statement.Cond, "!=", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) != "nil" {
+		return ""
+	}
+	lhs := strings.TrimSpace(parts[0])
+	if !strings.Contains(lhs, ".") {
+		return ""
+	}
+	segments := strings.Split(lhs, ".")
+	for _, segment := range segments {
+		if segment == "" || strings.ContainsAny(segment, " \t") {
+			return ""
+		}
+	}
+	for _, ident := range statement.CondIdents {
+		if ident == segments[0] {
+			if scope.Resolve(ident) != 0 {
+				return strings.Join(segments, ".")
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+// killPathFacts invalidates the narrowing facts of an assignment to
+// target (story 27, ADR-0008): facts equal to the target or extending it
+// die; the target's own prefixes survive - writing `u.link.badge` does
+// not change `u.link`.
+func (b *builder) killPathFacts(target string) {
+	for key := range b.pathNN[b.cur] {
+		if key == target || strings.HasPrefix(key, target+".") {
+			delete(b.pathNN[b.cur], key)
+		}
+	}
+}
+
+// killAllPathFacts drops every path narrowing fact - the conservative
+// effect of any call statement and of loop entry (ADR-0008).
+func (b *builder) killAllPathFacts() {
+	b.pathNN[b.cur] = map[string]bool{}
 }
 
 func (b *builder) report(category semantic.DiagnosticCategory, span parser.Span) {
