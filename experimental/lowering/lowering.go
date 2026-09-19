@@ -24,11 +24,14 @@ func Lower(source string) (string, error) {
 	// The Run body lowers first, so the tracking maps are populated by the
 	// time the hoisted function bodies are rendered (captures stay
 	// visible); output order stays functions-first.
-	var bodyStatements, funcs []parser.Statement
+	var bodyStatements, funcs, types []parser.Statement
 	for _, statement := range program.Statements {
-		if statement.Kind == parser.Function {
+		switch statement.Kind {
+		case parser.Function:
 			funcs = append(funcs, statement)
-		} else {
+		case parser.TypeDecl:
+			types = append(types, statement)
+		default:
 			bodyStatements = append(bodyStatements, statement)
 		}
 	}
@@ -41,6 +44,11 @@ func Lower(source string) (string, error) {
 		fmt.Fprintf(&body, "\t_ = %s\n", last)
 	}
 	var decls strings.Builder
+	for i := range types {
+		if err := l.typeDecl(&decls, &types[i]); err != nil {
+			return "", err
+		}
+	}
 	for i := range funcs {
 		if err := l.function(&decls, &funcs[i]); err != nil {
 			return "", err
@@ -262,6 +270,11 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			// pass; a Function seen here is block-nested, which has no Go
 			// shape (kernel accepts it - a narrowing reject).
 			return "", fmt.Errorf("experimental lowering: nested function declaration is not supported")
+		case parser.TypeDecl:
+			// Top-level declarations are hoisted by Lower before the body
+			// pass; a TypeDecl seen here is block-nested, which has no Go
+			// shape (kernel accepts it - a narrowing reject).
+			return "", fmt.Errorf("experimental lowering: nested type declaration is not supported")
 		case parser.Return:
 			// Story 16: `return expr` exists only inside a function body
 			// with a declared result (the parser funcStack); the conversion
@@ -508,6 +521,27 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 		return err
 	}
 	l.returnCarrierElem = saved
+	b.WriteString("}\n")
+	decls.WriteString(b.String() + "\n")
+	return nil
+}
+
+// typeDecl lowers one hoisted struct declaration (story 21, RFC-014 §6.2,
+// §6.13): an ordinary Go struct with the field order preserved and the
+// field types through the representation rules. Construction literals
+// lower verbatim (§6.13 - "practically directly"); their completeness is
+// a kernel concern (story 22).
+func (l *lowerer) typeDecl(decls *strings.Builder, statement *parser.Statement) error {
+	sd := statement.Struct
+	var b strings.Builder
+	b.WriteString("type " + sd.Name + " struct {\n")
+	for _, field := range sd.Fields {
+		text, err := l.goType(field.TypeExpr)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "\t%s %s\n", field.Name, text)
+	}
 	b.WriteString("}\n")
 	decls.WriteString(b.String() + "\n")
 	return nil

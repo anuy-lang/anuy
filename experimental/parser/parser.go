@@ -83,6 +83,28 @@ type NavigationExpr struct {
 	Segments []NavigationSegment
 }
 
+// StructField is one direct field of a struct declaration (RFC-014 §6.2):
+// an ordered name plus a restricted structural type.
+type StructField struct {
+	Name     string
+	TypeExpr *TypeExpr
+	Span     Span
+}
+
+// StructDecl is a `type N struct { … }` declaration (RFC-014 §6.2).
+type StructDecl struct {
+	Name   string
+	Fields []StructField
+	Span   Span
+}
+
+// KeyedLiteral marks a keyed construction value `N{field: expression, …}`
+// (RFC-014 §6.3): the raw Text lowers verbatim; Name carries the type the
+// fields belong to.
+type KeyedLiteral struct {
+	Name string
+}
+
 type Kind uint8
 
 const (
@@ -97,6 +119,7 @@ const (
 	Call
 	Function
 	Return
+	TypeDecl
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -148,6 +171,11 @@ type Value struct {
 	Idents []string
 	// Navigation is non-nil when the value is a recognized selector chain.
 	Navigation *NavigationExpr
+	// Keyed is non-nil for a keyed construction value `N{field: expression,
+	// …}` (story 21, RFC-014 §6.3): the raw Text lowers verbatim and the
+	// Idents count only the field-value reads (keys and the type name are
+	// not reads).
+	Keyed *KeyedLiteral
 	// Closure is non-nil for closure literals.
 	Closure *Closure
 }
@@ -220,6 +248,10 @@ type Statement struct {
 	// 2026-09-17); a closure argument may span lines and close its
 	// parenthesis on the block closer line.
 	Call *NavigationExpr
+	// Struct is non-nil for a `type N struct { … }` declaration (story 21,
+	// RFC-014 §6.2): Names[0] carries the type name; the declaration hoists
+	// to a package-level Go type.
+	Struct *StructDecl
 }
 
 // A Loop statement reuses fields by loop form (spec 1-3-1-1): condition form
@@ -417,6 +449,8 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return Statement{}, newError(BlankIdentifierRead, tokens[0].start, "_ does not hold a value")
 	case isCallStatementStart(tokens):
 		return lp.parseCallStatement(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "type":
+		return lp.parseTypeDecl(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "else":
 		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "unexpected else")
 	case len(tokens) == 1 && tokens[0].kind == tokenIdent:
@@ -499,6 +533,59 @@ func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statem
 		Pure:           pure,
 		Span:           Span{Start: line.offset, End: line.offset + len(line.text)},
 	}, nil
+}
+
+// parseTypeDecl parses the `type N struct {` declaration (story 21,
+// RFC-014 §6.2): the header line opens the field block, each field line is
+// `name type` and the `}` line closes. Zero-field structs are valid;
+// duplicate, blank and reserved field names reject. Other type-declaration
+// forms (`type N T`, `type N = T`) are a follow-up slice.
+func (lp *lineParser) parseTypeDecl(tokens []token, line sourceLine) (Statement, error) {
+	if len(tokens) < 2 || tokens[1].kind != tokenIdent || tokens[1].text == "_" || reservedWords[tokens[1].text] {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "invalid type name")
+	}
+	if len(tokens) < 4 || tokens[2].kind != tokenIdent || tokens[2].text != "struct" || !isPunct(tokens[3], "{") {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "type declaration supports only `type N struct { ... }` in this slice")
+	}
+	decl := &StructDecl{Name: tokens[1].text, Span: Span{Start: tokens[0].start}}
+	lp.pos++
+	seen := map[string]bool{}
+	for {
+		if lp.pos >= len(lp.lines) {
+			return Statement{}, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
+		}
+		fieldLine := lp.lines[lp.pos]
+		if fieldLine.text == "" {
+			lp.pos++
+			continue
+		}
+		if fieldLine.text == "}" {
+			lp.pos++
+			decl.Span.End = fieldLine.offset + len(fieldLine.text)
+			return Statement{Kind: TypeDecl, Names: []string{decl.Name}, Struct: decl, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}, nil
+		}
+		if strings.HasPrefix(fieldLine.text, "//") {
+			lp.pos++
+			continue
+		}
+		fieldTokens, terr := tokenize(fieldLine.raw, fieldLine.offset)
+		if terr != nil {
+			return Statement{}, terr
+		}
+		if len(fieldTokens) < 2 || fieldTokens[0].kind != tokenIdent || fieldTokens[0].text == "_" || reservedWords[fieldTokens[0].text] {
+			return Statement{}, newError(UnsupportedSyntax, fieldTokens[0].start, "struct field requires a name and a type")
+		}
+		if seen[fieldTokens[0].text] {
+			return Statement{}, newError(UnsupportedSyntax, fieldTokens[0].start, fmt.Sprintf("duplicate field %q", fieldTokens[0].text))
+		}
+		typeExpr, terr := parseType(fieldTokens[1:])
+		if terr != nil {
+			return Statement{}, terr
+		}
+		seen[fieldTokens[0].text] = true
+		decl.Fields = append(decl.Fields, StructField{Name: fieldTokens[0].text, TypeExpr: typeExpr, Span: Span{Start: fieldTokens[0].start, End: typeExpr.Span.End}})
+		lp.pos++
+	}
 }
 
 // parseReturn parses the `return` statement. The bare form is an early
@@ -936,7 +1023,7 @@ type token struct {
 	start, end int // absolute byte offsets
 }
 
-var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true}
+var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true}
 
 // isStatementKeyword reports words rejected in expression and condition
 // positions. `in` is contextual: it is only recognized in a loop header
@@ -996,7 +1083,8 @@ func tokenize(line string, base int) ([]token, *Error) {
 			if i+1 < len(line) && line[i+1] == '=' {
 				return nil, newError(ShortDeclaration, base+i, ":= is a syntax error")
 			}
-			return nil, newError(UnsupportedSyntax, base+i, fmt.Sprintf("unexpected character %q", c))
+			tokens = append(tokens, token{kind: tokenPunct, text: string(c), start: base + i, end: base + i + 1})
+			i++
 		case c == '!':
 			if i+1 < len(line) && line[i+1] == '=' {
 				tokens = append(tokens, token{kind: tokenPunct, text: "!=", start: base + i, end: base + i + 2})
@@ -1384,7 +1472,7 @@ func isValueToken(t token) bool {
 	case tokenInt, tokenString, tokenIdent:
 		return true
 	case tokenPunct:
-		return strings.ContainsRune("()[].?*+-", rune(t.text[0])) || t.text == "==" || t.text == "!="
+		return strings.ContainsRune("()[].?*+-{}:", rune(t.text[0])) || t.text == "==" || t.text == "!="
 	default:
 		return false
 	}
@@ -1671,6 +1759,15 @@ func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error)
 				return nil, newError(UnsupportedSyntax, t.start, "unbalanced brackets")
 			}
 			delimiters = delimiters[:len(delimiters)-1]
+			// Story 21: a keyed literal's braces guard its commas - the comma
+			// inside is legal and never splits the value list.
+		case t.kind == tokenPunct && t.text == "{":
+			delimiters = append(delimiters, true)
+		case t.kind == tokenPunct && t.text == "}":
+			if len(delimiters) == 0 {
+				return nil, newError(UnsupportedSyntax, t.start, "unbalanced brackets")
+			}
+			delimiters = delimiters[:len(delimiters)-1]
 		case t.kind == tokenPunct && t.text == ",":
 			if len(delimiters) > 0 {
 				if delimiters[len(delimiters)-1] {
@@ -1708,6 +1805,17 @@ func valueGroup(tokens []token, lo, hi int, line sourceLine) (Value, *Error) {
 		return Value{}, newError(UnsupportedSyntax, listEnd(tokens), "missing expression")
 	}
 	group := tokens[lo:hi]
+	if keyed := keyedLiteralName(group); keyed != "" {
+		idents, identErr := keyedLiteralIdents(group)
+		if identErr != nil {
+			return Value{}, identErr
+		}
+		return Value{
+			Text:   line.raw[tokens[lo].start-line.offset : tokens[hi-1].end-line.offset],
+			Idents: idents,
+			Keyed:  &KeyedLiteral{Name: keyed},
+		}, nil
+	}
 	navigation, idents, recognized, navErr := navigationMetadata(group)
 	if navErr != nil {
 		return Value{}, navErr
@@ -1727,6 +1835,78 @@ func valueGroup(tokens []token, lo, hi int, line sourceLine) (Value, *Error) {
 		Idents:     idents,
 		Navigation: navigation,
 	}, nil
+}
+
+// keyedLiteralName reports the type name of a keyed construction group
+// `N{ … }` (RFC-014 §6.3); empty when the group has another shape.
+func keyedLiteralName(group []token) string {
+	if len(group) < 3 || group[0].kind != tokenIdent || reservedWords[group[0].text] || !isPunct(group[1], "{") || !isPunct(group[len(group)-1], "}") {
+		return ""
+	}
+	return group[0].text
+}
+
+// keyedLiteralIdents collects the binding reads of a keyed construction:
+// the type name and the field keys are not reads (they name declared
+// structure, not values); only the field-value expressions count, scanned
+// recursively so nested literals hide their keys too.
+func keyedLiteralIdents(group []token) ([]string, *Error) {
+	var idents []string
+	seen := map[string]bool{}
+	i := 2 // past the type name and the opening brace
+	for i < len(group)-1 {
+		t := group[i]
+		switch {
+		case t.kind == tokenIdent && !reservedWords[t.text] && i+1 < len(group)-1 && isPunct(group[i+1], ":"):
+			// The key names a declared field, not a value: counted never,
+			// duplicated never (RFC-014 §6.3 - exactly once).
+			if seen[t.text] {
+				return nil, newError(UnsupportedSyntax, t.start, fmt.Sprintf("duplicate field key %q", t.text))
+			}
+			seen[t.text] = true
+			i += 2 // past the key and the colon
+			start, depth := i, 0
+			for i < len(group)-1 && (depth > 0 || !isPunct(group[i], ",")) {
+				if isPunct(group[i], "{") || isPunct(group[i], "(") || isPunct(group[i], "[") {
+					depth++
+				} else if isPunct(group[i], "}") || isPunct(group[i], ")") || isPunct(group[i], "]") {
+					depth--
+				}
+				i++
+			}
+			segment := group[start:i]
+			if keyedLiteralName(segment) != "" {
+				nested, err := keyedLiteralIdents(segment)
+				if err != nil {
+					return nil, err
+				}
+				idents = append(idents, nested...)
+			} else {
+				segmentIdents, err := valueIdents(segment)
+				if err != nil {
+					return nil, err
+				}
+				idents = append(idents, segmentIdents...)
+			}
+		case isPunct(t, "{"):
+			depth := 1
+			for i < len(group)-1 && depth > 0 {
+				i++
+				if isPunct(group[i], "{") {
+					depth++
+				} else if isPunct(group[i], "}") {
+					depth--
+				}
+			}
+		case isPunct(t, ":"):
+			// A stray colon (no key) is skipped conservatively - its value
+			// identifiers are not collected.
+			i++
+		default:
+			i++
+		}
+	}
+	return idents, nil
 }
 
 // isElseIfHeader reports a `} else if` continuation line that closes the

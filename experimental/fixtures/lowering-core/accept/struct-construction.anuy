@@ -1,0 +1,7 @@
+type User struct {
+id int
+}
+func save(u User) {
+}
+var u = User{id: 1}
+save(u)

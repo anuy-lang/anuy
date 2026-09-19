@@ -1089,3 +1089,107 @@ func TestParseFunctionDeclRetainsResultTypeExpr(t *testing.T) {
 		t.Fatalf("void function: err=%v ResultTypeExpr=%#v, want nil", err, program.Statements[0].Closure.ResultTypeExpr)
 	}
 }
+
+func TestParseStructDeclaration(t *testing.T) {
+	// Story 21 (RFC-014 6.2): Go-syntax struct declarations with ordered
+	// typed fields.
+	program, err := Parse("type User struct {\nid UserID\nname string\nmanager *User?\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[0]
+	if s.Kind != TypeDecl || s.Struct == nil {
+		t.Fatalf("kind = %v, want TypeDecl with Struct", s.Kind)
+	}
+	if s.Struct.Name != "User" || len(s.Struct.Fields) != 3 {
+		t.Fatalf("struct = %+v, want User with 3 fields", s.Struct)
+	}
+	if s.Struct.Fields[0].Name != "id" || s.Struct.Fields[0].TypeExpr.Canonical() != "UserID" {
+		t.Fatalf("field 0 = %+v", s.Struct.Fields[0])
+	}
+	if s.Struct.Fields[2].Name != "manager" || s.Struct.Fields[2].TypeExpr.Canonical() != "*User?" {
+		t.Fatalf("field 2 = %+v", s.Struct.Fields[2])
+	}
+	if s.Struct.Fields[0].Span.Start > s.Struct.Fields[2].Span.Start {
+		t.Fatalf("field order not preserved: %#v", s.Struct.Fields)
+	}
+}
+
+func TestParseStructZeroField(t *testing.T) {
+	// RFC-014 6.2: a zero-field struct is valid.
+	program, err := Parse("type Marker struct {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := program.Statements[0]
+	if s.Kind != TypeDecl || s.Struct == nil || s.Struct.Name != "Marker" || len(s.Struct.Fields) != 0 {
+		t.Fatalf("struct = %#v, want zero-field Marker", s.Struct)
+	}
+}
+
+func TestParseStructDuplicateFieldRejected(t *testing.T) {
+	// RFC-014 6.2: two direct fields of one struct MUST NOT share a name.
+	if _, err := Parse("type User struct {\nid int\nid string\n}\n"); err == nil {
+		t.Fatal("duplicate field accepted")
+	}
+}
+
+func TestParseStructBlankAndReservedFieldNamesRejected(t *testing.T) {
+	if _, err := Parse("type User struct {\n_ int\n}\n"); err == nil {
+		t.Fatal("blank field name accepted")
+	}
+	if _, err := Parse("type User struct {\nreturn int\n}\n"); err == nil {
+		t.Fatal("reserved field name accepted")
+	}
+	if _, err := Parse("type User struct {\nname\n}\n"); err == nil {
+		t.Fatal("field without a type accepted")
+	}
+	if _, err := Parse("type User struct {\nname string\n"); err == nil {
+		t.Fatal("unclosed struct accepted")
+	}
+}
+
+func TestParseKeyedLiteralValue(t *testing.T) {
+	// RFC-014 6.3-6.4: keyed construction is one value - commas inside the
+	// braces do not split it, keys are not binding reads.
+	program, err := Parse("var u = User{id: 1, name: \"x\"}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := program.Statements[0].Values[0]
+	if v.Text != "User{id: 1, name: \"x\"}" {
+		t.Fatalf("text = %q", v.Text)
+	}
+	if v.Keyed == nil || v.Keyed.Name != "User" {
+		t.Fatalf("keyed = %#v, want User", v.Keyed)
+	}
+	if len(v.Idents) != 0 {
+		t.Fatalf("idents = %v, want none (keys and the type name are not reads)", v.Idents)
+	}
+}
+
+func TestParseKeyedLiteralValueIdents(t *testing.T) {
+	// Field values keep their reads, keys do not count; nested literals
+	// hide their keys recursively.
+	program, err := Parse("var u = User{id: x, name: n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idents := program.Statements[0].Values[0].Idents; len(idents) != 2 || idents[0] != "x" || idents[1] != "n" {
+		t.Fatalf("idents = %v, want [x n]", idents)
+	}
+	program, err = Parse("var o = Outer{inner: Inner{x: 1}, tag: tag}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idents := program.Statements[0].Values[0].Idents; len(idents) != 1 || idents[0] != "tag" {
+		t.Fatalf("idents = %v, want [tag]", idents)
+	}
+}
+
+func TestParseKeyedLiteralDuplicateKeyRejected(t *testing.T) {
+	// RFC-014 6.3: every direct field is initialized exactly once.
+	if _, err := Parse("var u = User{id: 1, id: 2}\n"); err == nil {
+		t.Fatal("duplicate key accepted")
+	}
+}

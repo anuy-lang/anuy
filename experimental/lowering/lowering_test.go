@@ -843,3 +843,43 @@ func TestLowerGeneratedFuncCarrierResultTypeChecks(t *testing.T) {
 func TestLowerGeneratedFuncCarrierParamTypeChecks(t *testing.T) {
 	typeCheckGenerated(t, "func show(n int?) {\n}\n")
 }
+
+func TestLowerStructDeclarationToGo(t *testing.T) {
+	// Story 21 (RFC-014 6.2, 6.13): a struct declaration hoists to an
+	// ordinary Go struct, field order preserved, field types through the
+	// representation rules (`*User?` keeps the plain Go pointer).
+	got, err := Lower("type User struct {\nid UserID\nname string\nmanager *User?\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\ntype User struct {\n\tid UserID\n\tname string\n\tmanager *User\n}\n\nfunc Run() {\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerStructFieldTagged(t *testing.T) {
+	// A nullable field of a value type takes the carrier (6.8.16).
+	got, err := Lower("type Holder struct {\nn int?\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package fixture\n\n" + anuyabiImport + "type Holder struct {\n\tn anuyabi.Nullable[int]\n}\n\nfunc Run() {\n}\n"
+	if got != want {
+		t.Fatalf("Lower() = %q, want %q", got, want)
+	}
+}
+
+func TestLowerNestedTypeDeclRejected(t *testing.T) {
+	// A block-nested declaration has no Go shape (kernel accepts it - a
+	// narrowing reject).
+	if _, err := Lower("{\ntype User struct {\n}\n}\n"); err == nil || !strings.Contains(err.Error(), "nested type declaration") {
+		t.Fatalf("err = %v, want nested type declaration reject", err)
+	}
+}
+
+func TestLowerGeneratedStructConstructionTypeChecks(t *testing.T) {
+	// The story-10 blocker closes end-to-end: a user type is declared,
+	// constructed and passed to a declared function.
+	typeCheckGenerated(t, "type User struct {\nid int\n}\nfunc save(u User) {\n}\nvar u = User{id: 1}\nsave(u)\n")
+}
