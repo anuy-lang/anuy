@@ -1671,3 +1671,52 @@ func TestAnalyzeSourcePathNarrowingInvalidation(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzeSourcePureCallPreservesNarrowing(t *testing.T) {
+	// Story 28 (ADR-0008 follow-up): a resolved `//anuy:pure` callee
+	// cannot invalidate the receiver - the narrowing facts survive the
+	// call.
+	source := "type Profile struct {\nbadge string\n}\ntype User struct {\nlink Profile?\n}\n//anuy:pure\nfunc User.report() {\n}\nvar u = User{link: nil}\nif u.link != nil {\nu.report()\nvar x = u.link.badge\n}\n"
+	result, err := AnalyzeSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceNonPureCallsKillNarrowing(t *testing.T) {
+	// Without the trusted annotation the method stays conservative, and
+	// unknown callees kill all facts (story 27 default). The unknown name
+	// additionally carries its own UnknownRead (D-01) - pre-existing.
+	base := "type Profile struct {\nbadge string\n}\ntype User struct {\nlink Profile?\n}\n"
+	cases := []struct{ name, source string }{
+		{"unannotated method", base + "func User.report() {\n}\nvar u = User{link: nil}\nif u.link != nil {\nu.report()\nvar x = u.link.badge\n}\n"},
+		{"unannotated function", base + "func touch() {\n}\nvar u = User{link: nil}\nif u.link != nil {\ntouch()\nvar x = u.link.badge\n}\n"},
+	}
+	for _, testCase := range cases {
+		result, err := AnalyzeSource(testCase.source)
+		if err != nil {
+			t.Fatalf("%s: %v", testCase.name, err)
+		}
+		if len(result.Diagnostics) != 1 || string(result.Diagnostics[0].Category) != "UnsafeMemberAccess" {
+			t.Fatalf("%s: result = %#v, want one UnsafeMemberAccess", testCase.name, result.Diagnostics)
+		}
+	}
+	// An unknown callee kills the facts too; its own UnknownRead stays.
+	unknown := base + "var u = User{link: nil}\nif u.link != nil {\ntouch()\nvar x = u.link.badge\n}\n"
+	result, err := AnalyzeSource(unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gated := false
+	for _, diagnostic := range result.Diagnostics {
+		if string(diagnostic.Category) == "UnsafeMemberAccess" {
+			gated = true
+		}
+	}
+	if !gated {
+		t.Fatalf("result = %#v, want the gate to fire", result.Diagnostics)
+	}
+}

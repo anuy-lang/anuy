@@ -742,8 +742,12 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		b.emitCall(statement, scope)
 		// Story 27 (ADR-0008): any call kills all path facts - the args
 		// were read with the facts alive, the call effect invalidates them
-		// for the statements that follow.
-		b.killAllPathFacts()
+		// for the statements that follow. Story 28: a resolved
+		// `//anuy:pure` callee cannot invalidate the receiver - its facts
+		// survive (ADR-0008 follow-up).
+		if !b.callPreservesPathFacts(statement, scope) {
+			b.killAllPathFacts()
+		}
 	case parser.Function:
 		b.emitFunction(statement, scope)
 	case parser.Return:
@@ -1592,6 +1596,30 @@ func (b *builder) killPathFacts(target string) {
 // effect of any call statement and of loop entry (ADR-0008).
 func (b *builder) killAllPathFacts() {
 	b.pathNN[b.cur] = map[string]bool{}
+}
+
+// callPreservesPathFacts reports whether the resolved callee is trusted
+// pure (`//anuy:pure`, story 07): a pure call cannot invalidate the
+// receiver, so the story 27 path facts survive. Unresolved and
+// unannotated callees stay conservative (story 28, ADR-0008 follow-up);
+// the callee resolution mirrors emitCall - flat method table by the last
+// segment, bare calls through the scope binding.
+func (b *builder) callPreservesPathFacts(statement *parser.Statement, scope *semantic.Scope) bool {
+	call := statement.Call
+	if call == nil {
+		return false
+	}
+	if len(call.Segments) == 0 {
+		if id := scope.Resolve(call.Receiver); id != 0 {
+			return b.pure[id]
+		}
+		return false
+	}
+	last := call.Segments[len(call.Segments)-1]
+	if info, ok := b.methods[last.Name]; ok {
+		return info.pure
+	}
+	return false
 }
 
 func (b *builder) report(category semantic.DiagnosticCategory, span parser.Span) {
