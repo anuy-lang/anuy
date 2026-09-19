@@ -1310,6 +1310,38 @@ func TestParseValueSwitchNestedRejected(t *testing.T) {
 	}
 }
 
+func TestParseReturnError(t *testing.T) {
+	// Story 34 (RFC-005 §6.4.2): `return error <expr>` - the failure
+	// return form; `error` is a contextual keyword in return position.
+	program, err := Parse("func Save() error? {\nreturn error nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := program.Statements[0].Closure.Body
+	if len(body) != 1 || body[0].Kind != Return || !body[0].ErrorReturn {
+		t.Fatalf("body = %+v, want a failure return", body)
+	}
+	if len(body[0].Values) != 1 || body[0].Values[0].Text != "nil" {
+		t.Fatalf("values = %#v, want the error expression", body[0].Values)
+	}
+}
+
+func TestParseTryStatement(t *testing.T) {
+	// Story 34 (RFC-005 §6.5.3): error-only `try <call>` - the call plus
+	// immediate propagation.
+	program, err := Parse("func Save() error? {\ntry Log(\"x\")\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := program.Statements[0].Closure.Body
+	if len(body) != 2 || body[0].Kind != Try || body[0].Call == nil {
+		t.Fatalf("body = %+v, want a Try with a call", body)
+	}
+	if body[0].Call.Receiver != "Log" {
+		t.Fatalf("call = %#v, want Log", body[0].Call)
+	}
+}
+
 func TestParseSwitchNilArm(t *testing.T) {
 	// Story 33 (RFC-006 §6.5): `case nil:` arms the nil case of a
 	// nullable-enum switch.

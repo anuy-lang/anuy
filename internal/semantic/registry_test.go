@@ -37,6 +37,7 @@ var approvedScheme = []struct {
 	{"DuplicateMatchArm", "ANUY4008", SeverityError},
 	{"UnknownMatchVariant", "ANUY4009", SeverityError},
 	{"NilArmOnNonNullEnum", "ANUY4010", SeverityError},
+	{"PropagationOutsideFallible", "ANUY6001", SeverityError},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 

@@ -166,6 +166,7 @@ const (
 	Return
 	TypeDecl
 	Switch
+	Try
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -309,6 +310,9 @@ type Statement struct {
 	// Switch is non-nil for a `switch <binding> { … }` statement (story
 	// 31, RFC-006 §6.3): exhaustive arms over an enum-typed binding.
 	Switch *SwitchDecl
+	// ErrorReturn marks the failure-return form `return error <expr>`
+	// (story 34, RFC-005 §6.4.2): the value is the propagated error.
+	ErrorReturn bool
 	// Target is non-nil for a field-mutation assignment `u.f = expr`
 	// (story 22, RFC-014 §6.7): an ordinary single-field navigation path;
 	// Names stays empty.
@@ -489,6 +493,19 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 	case tokens[0].kind == tokenIdent && tokens[0].text == "switch":
 		// Story 31 (RFC-006 §6.3): the exhaustive enum switch.
 		return lp.parseSwitch(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "try":
+		// Story 34 (RFC-005 §6.5.3): error-only `try <call>` - the call
+		// plus immediate propagation; fallibility is a kernel check
+		// (ANUY6001).
+		if len(tokens) == 1 {
+			return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "try requires a call")
+		}
+		statement, err := lp.parseCallStatement(tokens[1:], line)
+		if err != nil {
+			return Statement{}, err
+		}
+		statement.Kind = Try
+		return statement, nil
 	case tokens[0].kind == tokenIdent && tokens[0].text == "return":
 		// `return` is a contextual keyword in statement position (the `in`
 		// precedent, story 03).
@@ -906,6 +923,31 @@ func (lp *lineParser) parseReturn(tokens []token, line sourceLine) (Statement, e
 		return Statement{
 			Kind: Return,
 			Span: Span{Start: line.offset, End: line.offset + len(line.text)},
+		}, nil
+	}
+	if len(tokens) >= 2 && tokens[1].kind == tokenIdent && tokens[1].text == "error" {
+		// Story 34 (RFC-005 §6.4.2): the failure-return form
+		// `return error <expr>` - `error` is a contextual keyword in
+		// return position. Fallibility is a kernel check (ANUY6001).
+		if len(tokens) == 2 {
+			return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return error requires an error expression")
+		}
+		if len(lp.funcStack) == 0 {
+			return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return takes no value")
+		}
+		values, verr := parseValueList(tokens, 2, line)
+		if verr != nil {
+			return Statement{}, verr
+		}
+		if len(values) != 1 {
+			return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return error takes a single value")
+		}
+		lp.pos++
+		return Statement{
+			Kind:        Return,
+			ErrorReturn: true,
+			Values:      values,
+			Span:        Span{Start: line.offset, End: line.offset + len(line.text)},
 		}, nil
 	}
 	if len(lp.funcStack) == 0 || !lp.funcStack[len(lp.funcStack)-1] {

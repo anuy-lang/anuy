@@ -337,6 +337,25 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			// pass; a TypeDecl seen here is block-nested, which has no Go
 			// shape (kernel accepts it - a narrowing reject).
 			return "", fmt.Errorf("experimental lowering: nested type declaration is not supported")
+		case parser.Try:
+			// Story 34 (RFC-005 §6.5.3, RFC-009 §6.6.6): error-only try -
+			// the call plus immediate propagation; the if-initializer
+			// temporary preserves exactly-once evaluation (§6.5.8).
+			nav := statement.Call
+			args := make([]string, 0, len(statement.Values))
+			for _, value := range statement.Values {
+				text, err := l.value(value)
+				if err != nil {
+					return "", err
+				}
+				args = append(args, text)
+			}
+			expr := nav.Receiver
+			for _, segment := range nav.Segments {
+				expr += "." + segment.Name
+			}
+			fmt.Fprintf(body, "\tif err := %s(%s); err != nil {\n\t\treturn err\n\t}\n", expr, strings.Join(args, ", "))
+			last = ""
 		case parser.Return:
 			// Story 16: `return expr` exists only inside a function body
 			// with a declared result (the parser funcStack); the conversion

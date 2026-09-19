@@ -62,16 +62,17 @@ var (
 	MissingReturnDescriptor              = register(MissingReturn, "ANUY3003", SeverityError) // D-6: result is a binding read by the caller (RFC-001 §13.3)
 
 	// Nullability/narrowing block (4xxx).
-	UnsafeMemberAccessDescriptor      = register(UnsafeMemberAccess, "ANUY4001", SeverityError)        // R2
-	RedundantSafeNavigationDescriptor = register(RedundantSafeNavigation, "ANUY4002", SeverityWarning) // D-4, ADR-0005
-	NullableArgumentDescriptor        = register(NullableArgument, "ANUY4003", SeverityError)          // D-3
-	RedundantNilCheckDescriptor       = register(RedundantNilCheck, "ANUY4004", SeverityError)         // D-5
-	NilToNonNullDescriptor            = register(NilToNonNull, "ANUY4005", SeverityError)              // D-1
-	IncompleteConstructionDescriptor  = register(IncompleteConstruction, "ANUY4006", SeverityError)    // RFC-014 §6.3
-	MissingEnumVariantDescriptor      = register(MissingEnumVariant, "ANUY4007", SeverityError)        // RFC-006 §6.3.4
-	DuplicateMatchArmDescriptor       = register(DuplicateMatchArm, "ANUY4008", SeverityError)         // RFC-006 §6.3.5
-	UnknownMatchVariantDescriptor     = register(UnknownMatchVariant, "ANUY4009", SeverityError)       // RFC-006 §6.1
-	NilArmOnNonNullEnumDescriptor     = register(NilArmOnNonNullEnum, "ANUY4010", SeverityError)       // RFC-006 §6.5.3
+	UnsafeMemberAccessDescriptor         = register(UnsafeMemberAccess, "ANUY4001", SeverityError)         // R2
+	RedundantSafeNavigationDescriptor    = register(RedundantSafeNavigation, "ANUY4002", SeverityWarning)  // D-4, ADR-0005
+	NullableArgumentDescriptor           = register(NullableArgument, "ANUY4003", SeverityError)           // D-3
+	RedundantNilCheckDescriptor          = register(RedundantNilCheck, "ANUY4004", SeverityError)          // D-5
+	NilToNonNullDescriptor               = register(NilToNonNull, "ANUY4005", SeverityError)               // D-1
+	IncompleteConstructionDescriptor     = register(IncompleteConstruction, "ANUY4006", SeverityError)     // RFC-014 §6.3
+	MissingEnumVariantDescriptor         = register(MissingEnumVariant, "ANUY4007", SeverityError)         // RFC-006 §6.3.4
+	DuplicateMatchArmDescriptor          = register(DuplicateMatchArm, "ANUY4008", SeverityError)          // RFC-006 §6.3.5
+	UnknownMatchVariantDescriptor        = register(UnknownMatchVariant, "ANUY4009", SeverityError)        // RFC-006 §6.1
+	PropagationOutsideFallibleDescriptor = register(PropagationOutsideFallible, "ANUY6001", SeverityError) // RFC-005 §6.5.4
+	NilArmOnNonNullEnumDescriptor        = register(NilArmOnNonNullEnum, "ANUY4010", SeverityError)        // RFC-006 §6.5.3
 
 	// Lint block (5xxx): advisory analyzers.
 	UncheckedErrorDescriptor = register(UncheckedError, "ANUY5001", SeverityWarning) // R1
@@ -104,6 +105,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		DuplicateMatchArmDescriptor,
 		UnknownMatchVariantDescriptor,
 		NilArmOnNonNullEnumDescriptor,
+		PropagationOutsideFallibleDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -158,6 +160,7 @@ var catalog = map[Code]string{
 	"ANUY4008": "duplicate switch arm: the variant is already handled",
 	"ANUY4009": "switch case is not a variant of the scrutinee's enum",
 	"ANUY4010": "nil arm on a non-null enum scrutinee is unreachable",
+	"ANUY6001": "propagation outside a fallible function",
 	"ANUY5001": "error value is not checked",
 }
 

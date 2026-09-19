@@ -94,6 +94,7 @@ type builder struct {
 	facts       []map[semantic.BindingID]bool // initialization facts at the end of each block
 	nonNil      []map[semantic.BindingID]bool // non-nil narrowing facts, parallel to facts (story 05)
 	pathNN      []map[string]bool             // non-nil narrowing facts of field paths, parallel to facts (story 27, ADR-0008)
+	fallible    bool                          // the analyzed function body is fallible: declared result `error?` (story 34)
 	edges       []edge
 	cur         int // index into blocks
 	nextBlockID semantic.BlockID
@@ -749,6 +750,13 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		}
 	case parser.Switch:
 		b.emitSwitch(statement, scope)
+	case parser.Try:
+		// Story 34 (RFC-005 §6.5.4): try requires a fallible enclosing
+		// function; the call effects apply as for any call.
+		if !b.fallible {
+			b.report(semantic.PropagationOutsideFallible, statement.Span)
+		}
+		b.emitCall(statement, scope)
 	case parser.Var:
 		b.readIdents(statement, scope)
 		declared := make([]string, 0, len(statement.Names))
@@ -903,7 +911,7 @@ func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.S
 		if value.Closure == nil {
 			continue
 		}
-		mutators, _ := b.analyzeClosure(value.Closure, scope)
+		mutators, _ := b.analyzeClosure(value.Closure, scope, false)
 		if index < len(targets) {
 			// Решение 1 (2026-09-16): union across all assignments of the
 			// binding — a later closure must not erase an earlier mutator.
@@ -1391,7 +1399,7 @@ func (b *builder) readIdent(name string, scope *semantic.Scope, span parser.Span
 // captures, for §85 call invalidation - and whether the body can fall off
 // its end without a value-return (the D-6 measurement input, RFC-001
 // §13.18; meaningful only for declared non-null results).
-func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) ([]semantic.BindingID, bool) {
+func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fallible bool) ([]semantic.BindingID, bool) {
 	bodyScope := scope.Child()
 	var entry []semantic.Operation
 	paramIDs := map[semantic.BindingID]bool{}
@@ -1431,6 +1439,7 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope) ([]s
 		facts:        []map[semantic.BindingID]bool{{}},
 		nonNil:       []map[semantic.BindingID]bool{{}},
 		pathNN:       []map[string]bool{{}},
+		fallible:     fallible,
 		nextBlockID:  1,
 		nilable:      b.nilable,
 		classes:      b.classes,
@@ -1615,6 +1624,15 @@ func (b *builder) checkArgumentTypes(statement *parser.Statement, scope *semanti
 // story 07 §1). `//anuy:pure` marks the trusted no-writes contract. The
 // declared result type (story 08 Q4-A) feeds the RHS call-shape
 // classification. The method form dispatches to emitMethod.
+// isFallible reports whether a declared result makes the function
+// fallible (story 34, RFC-005 §6.2.3): the trailing result is `error?`.
+func isFallible(statement *parser.Statement) bool {
+	return statement.HasResult && statement.ResultNullable &&
+		statement.Closure != nil && statement.Closure.ResultTypeExpr != nil &&
+		statement.Closure.ResultTypeExpr.Kind == parser.NamedType &&
+		statement.Closure.ResultTypeExpr.Name == "error"
+}
+
 func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scope) {
 	if statement.Method != "" {
 		b.emitMethod(statement, scope)
@@ -1639,7 +1657,7 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	id := scope.Resolve(name)
 	b.declare(id)
 	b.initialize(id)
-	mutators, fallOff := b.analyzeClosure(statement.Closure, scope)
+	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, isFallible(statement))
 	b.closureMutates[id] = unionBindings(b.closureMutates[id], mutators)
 	if statement.Pure {
 		b.pure[id] = true
@@ -1682,7 +1700,7 @@ func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope)
 	// Registered before the body: a self-recursive call resolves like a
 	// function's self-recursion (story 07 precedent; the mutator set the
 	// self-call sees stays the one known at that point).
-	mutators, fallOff := b.analyzeClosure(statement.Closure, scope)
+	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, isFallible(statement))
 	b.methodMutates[name] = unionBindings(nil, mutators)
 	// D-6 (RFC-001 §13.18, ADR-0004): methods enforce missing-return like
 	// functions.
@@ -1702,6 +1720,11 @@ func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope)
 // a fresh block with no incoming edges - the analyzer skips unreachable
 // blocks, so their reads report nothing.
 func (b *builder) emitReturn(statement *parser.Statement, scope *semantic.Scope) {
+	// Story 34 (RFC-005 §6.4.2): the failure return requires a fallible
+	// enclosing function.
+	if statement.ErrorReturn && !b.fallible {
+		b.report(semantic.PropagationOutsideFallible, statement.Span)
+	}
 	if len(statement.Values) > 0 {
 		b.readIdents(statement, scope)
 		b.analyzeClosures(statement, scope, nil)
@@ -1750,9 +1773,18 @@ func closureIdents(statements []parser.Statement) []string {
 			out = append(out, s.Names...)
 		}
 		// A call statement's bare callee and navigation receiver are binding
-		// reads (CONTRACTS §2): they participate in capture seeding.
-		if s.Kind == parser.Call && s.Call != nil {
+		// reads (CONTRACTS §2): they participate in capture seeding. Story
+		// 34: the same for the try statement's propagated call.
+		if (s.Kind == parser.Call || s.Kind == parser.Try) && s.Call != nil {
 			out = append(out, s.Call.Receiver)
+		}
+		// Story 31/33: a switch reads its scrutinee and its arm bodies
+		// participate in capture seeding.
+		if s.Switch != nil {
+			out = append(out, s.Switch.Scrutinee)
+			for _, arm := range s.Switch.Arms {
+				out = append(out, closureIdents(arm.Body)...)
+			}
 		}
 		out = append(out, closureIdents(s.Body)...)
 		out = append(out, closureIdents(s.Else)...)

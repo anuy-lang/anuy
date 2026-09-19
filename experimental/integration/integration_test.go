@@ -1814,6 +1814,40 @@ func TestAnalyzeSourceEnumVariantEstablishes(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSourceErrorOnlyFunctions(t *testing.T) {
+	// Story 34 (RFC-005 §6.4.2/§6.5.3, RFC-009 §6.6.1/§6.6.8): the
+	// failure return and error-only try inside a fallible function stay
+	// clean and satisfy D-6; outside a fallible function they report.
+	clean, err := AnalyzeSource("func Save() error? {\nreturn error nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clean.Diagnostics) != 0 {
+		t.Fatalf("clean = %#v, want no diagnostics", clean.Diagnostics)
+	}
+	propagate, err := AnalyzeSource("func Log(msg string) error? {\nreturn nil\n}\nfunc Save() error? {\ntry Log(\"x\")\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(propagate.Diagnostics) != 0 {
+		t.Fatalf("propagate = %#v, want no diagnostics", propagate.Diagnostics)
+	}
+	outside, err := AnalyzeSource("func F() {\nreturn error nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outside.Diagnostics) != 1 || string(outside.Diagnostics[0].Category) != "PropagationOutsideFallible" {
+		t.Fatalf("outside = %#v, want one PropagationOutsideFallible", outside.Diagnostics)
+	}
+	tryOutside, err := AnalyzeSource("func Log(msg string) error? {\nreturn nil\n}\nfunc F() {\ntry Log(\"x\")\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tryOutside.Diagnostics) != 1 || string(tryOutside.Diagnostics[0].Category) != "PropagationOutsideFallible" {
+		t.Fatalf("tryOutside = %#v, want one PropagationOutsideFallible", tryOutside.Diagnostics)
+	}
+}
+
 func TestAnalyzeSourceEnumUnknownVariantStaysClean(t *testing.T) {
 	// F-G3 tolerance: an unknown variant reference classifies unknown -
 	// no verdict, no diagnostics.

@@ -938,6 +938,26 @@ func TestLowerNullableEnumSwitchToGo(t *testing.T) {
 	}
 }
 
+func TestLowerReturnErrorAndTry(t *testing.T) {
+	// Story 34 (RFC-005 §6.4.2/§6.5.3, RFC-009 §6.6.1/§6.6.6/§6.6.8): the
+	// failure return lowers to the plain error return (§6.6.1 - error-only,
+	// no padding); error-only try lowers to the exactly-once guard.
+	got, err := Lower("func Save() error? {\nreturn error nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "func Save() error {\n\treturn nil\n") {
+		t.Fatalf("Lower() = %q, wants the plain error return", got)
+	}
+	tryGot, err := Lower("func Log(msg string) error? {\nreturn nil\n}\nfunc Save() error? {\ntry Log(\"x\")\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tryGot, "\tif err := Log(\"x\"); err != nil {\n\t\treturn err\n\t}\n") {
+		t.Fatalf("tryGot = %q, wants the propagation guard", tryGot)
+	}
+}
+
 func TestLowerNestedTypeDeclRejected(t *testing.T) {
 	// A block-nested declaration has no Go shape (kernel accepts it - a
 	// narrowing reject).
