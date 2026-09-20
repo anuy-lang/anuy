@@ -133,6 +133,10 @@ const (
 	// a strict fallible return that is neither `values..., nil` nor
 	// `return error err`.
 	MixedReturn DiagnosticCategory = "MixedReturn"
+	// UnavailableSuccessResult is the RFC-005 §6.3/§8.1.4 category (story
+	// 36, D-4): a destructured success result read before the controlling
+	// error is proven nil.
+	UnavailableSuccessResult DiagnosticCategory = "UnavailableSuccessResult"
 )
 
 // SourceSpan locates a diagnostic in the source text.

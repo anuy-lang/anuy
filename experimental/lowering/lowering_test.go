@@ -1045,3 +1045,22 @@ func TestLowerValueTryErrorOnlyEnclosing(t *testing.T) {
 		t.Fatalf("Lower() = %q, wants the error-only propagation", got)
 	}
 }
+
+func TestLowerFallibleDestructuring(t *testing.T) {
+	// Story 36 (RFC-005 §6.3, RFC-009 §6.6.9): the flat destructuring
+	// lowers to the ordinary Go comma-ok assignment; the guard-join stays
+	// verbatim (the failure branch carries the §6.6.3 padding).
+	got, err := Lower("type Data struct {\nid int\n}\nfunc LoadData(path string) (Data, error?) {\nreturn Data{id: 1}, nil\n}\nfunc Load(path string) (Data, error?) {\nvar data, err = LoadData(path)\nif err != nil {\nreturn error err\n}\nreturn data, nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"\tdata, err := LoadData(path)\n",
+		"\tvar __anuy_pad0 Data\n\treturn __anuy_pad0, err\n",
+		"\treturn data, nil\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+}

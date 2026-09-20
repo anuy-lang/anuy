@@ -1609,3 +1609,20 @@ func TestParseValueTry(t *testing.T) {
 		t.Fatalf("try = %+v, want Op() into two bindings", body[1])
 	}
 }
+
+func TestParseFallibleDestructuring(t *testing.T) {
+	// Story 36 (RFC-005 §6.3, §6.9.1): the flat destructuring
+	// `var data, err = Load(p)` - two names, one call value; the
+	// correlation is a kernel concern, the grammar already accepts it.
+	program, err := Parse("func F() (Data, error?) {\nvar data, err = Load(\"x\")\nreturn data, nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := program.Statements[0].Closure.Body
+	if len(body) != 2 || body[0].Kind != Var || len(body[0].Names) != 2 || body[0].Names[1] != "err" {
+		t.Fatalf("body = %+v, want a two-name declaration", body)
+	}
+	if len(body[0].Values) != 1 || body[0].Values[0].Text != "Load(\"x\")" {
+		t.Fatalf("values = %#v, want the single call value", body[0].Values)
+	}
+}

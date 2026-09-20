@@ -2044,3 +2044,89 @@ func TestAnalyzeSourceStrictFallibleFunctions(t *testing.T) {
 		t.Fatalf("errorOnlyFallOff = %#v, want no diagnostics (implicit return nil)", errorOnlyFallOff.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceConditionalCorrelation(t *testing.T) {
+	// Story 36 (RFC-005 §6.3, §6.9.1, RFC-009 §6.6.9): destructured
+	// success results are conditionally initialized - guard
+	// `(err == nil)`; the §6.3.1-6.3.7 truth table.
+	base := "type Data struct {\nid int\n}\nfunc LoadData(path string) (Data, error?) {\nvar d = Data{id: 1}\nreturn d, nil\n}\n"
+	clean, err := AnalyzeSource(base + "func Load() (Data, error?) {\nvar data, err = LoadData(\"x\")\nif err != nil {\nreturn error err\n}\nvar e = data\nreturn e, nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clean.Diagnostics) != 0 {
+		t.Fatalf("clean = %#v, want no diagnostics (§6.3.2)", clean.Diagnostics)
+	}
+	beforeProof, err := AnalyzeSource(base + "func F() {\nvar data, err = LoadData(\"x\")\nvar e = data\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// D-4 on the unproven read plus the R1 lint - the err binding is
+	// never read in this body.
+	if len(beforeProof.Diagnostics) != 2 || string(beforeProof.Diagnostics[0].Category) != "UnavailableSuccessResult" || string(beforeProof.Diagnostics[1].Category) != "UncheckedError" {
+		t.Fatalf("beforeProof = %#v, want UnavailableSuccessResult + UncheckedError (§6.3.1)", beforeProof.Diagnostics)
+	}
+	inFailureBranch, err := AnalyzeSource(base + "func F() {\nvar data, err = LoadData(\"x\")\nif err != nil {\nvar e = data\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inFailureBranch.Diagnostics) != 1 || string(inFailureBranch.Diagnostics[0].Category) != "UnavailableSuccessResult" {
+		t.Fatalf("inFailureBranch = %#v, want one UnavailableSuccessResult (§6.2.5)", inFailureBranch.Diagnostics)
+	}
+	branchLocal, err := AnalyzeSource(base + "func F() {\nvar data, err = LoadData(\"x\")\nif err == nil {\nvar e = data\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branchLocal.Diagnostics) != 0 {
+		t.Fatalf("branchLocal = %#v, want no diagnostics (§6.3.3)", branchLocal.Diagnostics)
+	}
+	openGuard, err := AnalyzeSource(base + "func F() {\nvar data, err = LoadData(\"x\")\nif err != nil {\nvar x = 1\n}\nvar e = data\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openGuard.Diagnostics) != 1 || string(openGuard.Diagnostics[0].Category) != "UnavailableSuccessResult" {
+		t.Fatalf("openGuard = %#v, want one UnavailableSuccessResult (§6.3.3 negative)", openGuard.Diagnostics)
+	}
+	replaced, err := AnalyzeSource(base + "func F() {\nvar data, err = LoadData(\"x\")\nif err != nil {\ndata = Data{id: 2}\n}\nvar e = data\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced.Diagnostics) != 0 {
+		t.Fatalf("replaced = %#v, want no diagnostics (§6.3.4)", replaced.Diagnostics)
+	}
+	killed, err := AnalyzeSource(base + "func F() {\nvar data, err = LoadData(\"x\")\nerr = make()\nif err == nil {\nvar e = data\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(killed.Diagnostics) != 1 || string(killed.Diagnostics[0].Category) != "UnavailableSuccessResult" {
+		t.Fatalf("killed = %#v, want one UnavailableSuccessResult (§6.3.6)", killed.Diagnostics)
+	}
+	loopConfined, err := AnalyzeSource(base + "func F() {\nvar data, err = LoadData(\"x\")\nfor err != nil {\nvar e = data\n}\nvar e2 = data\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loopConfined.Diagnostics) != 2 || string(loopConfined.Diagnostics[0].Category) != "UnavailableSuccessResult" || string(loopConfined.Diagnostics[1].Category) != "UnavailableSuccessResult" {
+		t.Fatalf("loopConfined = %#v, want two UnavailableSuccessResult (§6.3.7)", loopConfined.Diagnostics)
+	}
+	multiClean, err := AnalyzeSource(base + "func Op2(p string) (Data, Data, error?) {\nvar d = Data{id: 1}\nreturn d, d, nil\n}\nfunc F() {\nvar a, b, err = Op2(\"x\")\nif err != nil {\nreturn\n}\nvar x = a\nvar y = b\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(multiClean.Diagnostics) != 0 {
+		t.Fatalf("multiClean = %#v, want no diagnostics", multiClean.Diagnostics)
+	}
+	arity, err := AnalyzeSource(base + "func F() {\nvar a = LoadData(\"x\")\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(arity.Diagnostics) != 1 || string(arity.Diagnostics[0].Category) != "ArityMismatch" {
+		t.Fatalf("arity = %#v, want one ArityMismatch", arity.Diagnostics)
+	}
+	elseSuccess, err := AnalyzeSource(base + "func F() {\nvar data, err = LoadData(\"x\")\nif err != nil {\nvar x = 1\n} else {\nvar e = data\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(elseSuccess.Diagnostics) != 0 {
+		t.Fatalf("elseSuccess = %#v, want no diagnostics (else is the success side)", elseSuccess.Diagnostics)
+	}
+}

@@ -1,0 +1,13 @@
+type Data struct {
+id int
+}
+func LoadData(path string) (Data, error?) {
+return Data{id: 1}, nil
+}
+func Load(path string) (Data, error?) {
+var data, err = LoadData(path)
+if err != nil {
+return error err
+}
+return data, nil
+}

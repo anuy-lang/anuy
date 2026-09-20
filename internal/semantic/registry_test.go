@@ -42,6 +42,8 @@ var approvedScheme = []struct {
 	{"InvalidFailureReturn", "ANUY6002", SeverityError},
 	{"InvalidTry", "ANUY6003", SeverityError},
 	{"MixedReturn", "ANUY6004", SeverityError},
+	// Story 36 (RFC-005 §8.1.4): conditional correlation.
+	{"UnavailableSuccessResult", "ANUY6005", SeverityError},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 

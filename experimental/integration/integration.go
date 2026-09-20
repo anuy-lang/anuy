@@ -103,11 +103,23 @@ type builder struct {
 	pathNN       []map[string]bool             // non-nil narrowing facts of field paths, parallel to facts (story 27, ADR-0008)
 	fallible     bool                          // the analyzed function body is fallible: declared result `error?` (story 34)
 	successCount int                           // story 35 (RFC-005 §6.2.3): fallible success results; 0 for error-only and non-fallible bodies
-	edges        []edge
-	cur          int // index into blocks
-	nextBlockID  semantic.BlockID
-	loops        []loopContext
-	diagnostics  []semantic.Diagnostic
+	// correlated carries the conditional initialization of destructured
+	// success results (story 36, RFC-005 §6.3): value binding -> its
+	// controlling error binding. The entry exists until the value is
+	// initialized outright (§6.3.4) or the guard is reassigned (§6.3.6);
+	// the §6.3.5 FallibleResultID collapses to the guard binding id in
+	// this layer.
+	correlated map[semantic.BindingID]semantic.BindingID
+	// terminated marks blocks whose flow does not continue to joined code
+	// (story 36): a `return` block and the fresh block after it. emitIf
+	// excludes terminated branch exits from the facts join - the surviving
+	// path proves the branch condition (§6.3.2).
+	terminated  []bool
+	edges       []edge
+	cur         int // index into blocks
+	nextBlockID semantic.BlockID
+	loops       []loopContext
+	diagnostics []semantic.Diagnostic
 	// nilable marks bindings declared with a nullable `T?` type - the only
 	// nilability evidence in the type-free experimental layer.
 	nilable map[semantic.BindingID]bool
@@ -171,7 +183,9 @@ func newBuilder() *builder {
 		facts:          []map[semantic.BindingID]bool{{}},
 		nonNil:         []map[semantic.BindingID]bool{{}},
 		pathNN:         []map[string]bool{{}},
+		terminated:     []bool{false},
 		nextBlockID:    1,
+		correlated:     map[semantic.BindingID]semantic.BindingID{},
 		nilable:        map[semantic.BindingID]bool{},
 		classes:        map[semantic.BindingID]semantic.Nullability{},
 		flowNullable:   map[semantic.BindingID]bool{},
@@ -197,6 +211,7 @@ func (b *builder) appendBlock() {
 	b.facts = append(b.facts, map[semantic.BindingID]bool{})
 	b.nonNil = append(b.nonNil, map[semantic.BindingID]bool{})
 	b.pathNN = append(b.pathNN, map[string]bool{})
+	b.terminated = append(b.terminated, false)
 	b.cur = len(b.blocks) - 1
 }
 
@@ -225,6 +240,56 @@ func (b *builder) initialize(id semantic.BindingID) {
 	// emits the Assume after this invalidation (story 08).
 	b.nonNil[b.cur][id] = false
 	b.assigned[id] = true
+	// Story 36 (RFC-005 §6.3.4/§6.3.6): an outright initialization
+	// releases the value from its conditional state - the correlation
+	// entry is stale from this point. A reassignment of the controlling
+	// error kills the correlation of every still-conditional dependent
+	// (§6.3.6): the entry turns dead (guard 0) so later `err == nil`
+	// proofs cannot materialize it, while reads keep reporting D-4.
+	// Already-materialized values keep their facts - they exist as
+	// ordinary initialized values.
+	delete(b.correlated, id)
+	for valueID, guard := range b.correlated {
+		if guard == id {
+			b.correlated[valueID] = 0
+		}
+	}
+}
+
+// materializeCorrelations proves `guard == nil` on the current path
+// (story 36, RFC-005 §6.3.2/§6.3.3): every still-conditional success
+// result of this guard becomes definitely initialized in the current
+// block's facts. Branch-local by construction - joins intersect the
+// branch facts back to conditional.
+func (b *builder) materializeCorrelations(guard semantic.BindingID) {
+	for valueID, controlled := range b.correlated {
+		if controlled == guard {
+			b.facts[b.cur][valueID] = true
+		}
+	}
+}
+
+// condNilComparison resolves a bare `x != nil` / `x == nil` condition to
+// the narrowed binding and its polarity (story 36): negated=true for the
+// `!=` form. Zero means the condition carries no bare nil comparison -
+// field-path forms stay with condNarrowPath/nilCheckOperand.
+func (b *builder) condNilComparison(statement *parser.Statement, scope *semantic.Scope) (semantic.BindingID, bool) {
+	for _, op := range []struct {
+		text    string
+		negated bool
+	}{{"!=", true}, {"==", false}} {
+		parts := strings.SplitN(statement.Cond, op.text, 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[1]) != "nil" || strings.Contains(parts[0], ".") {
+			continue
+		}
+		name := strings.TrimSpace(parts[0])
+		for _, ident := range statement.CondIdents {
+			if ident == name {
+				return scope.Resolve(ident), op.negated
+			}
+		}
+	}
+	return 0, false
 }
 
 // assume establishes the non-nil narrowing fact for the lowering of a
@@ -774,6 +839,15 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			b.emitTryDecl(statement, scope)
 			return
 		}
+		if statement.TypeExpr == nil && len(statement.Values) == 1 && callCalleePrefix(statement.Values[0].Text) != "" {
+			// Story 36 (RFC-005 §6.3, §6.9.1): a fallible-call
+			// destructuring `var data, err = Load()` creates conditional
+			// success bindings; any other shape falls through to the
+			// generic path.
+			if b.emitVarDestructuring(statement, scope) {
+				return
+			}
+		}
 		b.readIdents(statement, scope)
 		declared := make([]string, 0, len(statement.Names))
 		targets := make([]semantic.BindingID, 0, len(statement.Names))
@@ -1003,9 +1077,19 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	beforeNN := copyFacts(b.nonNil[b.cur])
 	beforePath := copyPathFacts(b.pathNN[b.cur])
 	start := b.blocks[b.cur].ID
+	// Story 36 (RFC-005 §6.3): a bare nil comparison carries correlation
+	// polarity - the `!=` branch is the failure side, the `==` branch and
+	// the opposite path prove `guard == nil` and materialize the
+	// conditional success results (§6.3.2/§6.3.3).
+	guardID, negated := b.condNilComparison(statement, scope)
 	b.appendBlock()
 	thenID := b.blocks[b.cur].ID
 	b.facts[b.cur] = copyFacts(before)
+	if !negated && guardID != 0 {
+		// `x == nil` branch: the success side - conditional results of x
+		// exist here.
+		b.materializeCorrelations(guardID)
+	}
 	b.nonNil[b.cur] = copyFacts(beforeNN)
 	b.pathNN[b.cur] = copyPathFacts(beforePath)
 	if narrowID := b.condNarrowTarget(statement, scope); narrowID != 0 {
@@ -1021,15 +1105,28 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	thenNN := copyFacts(b.nonNil[b.cur])
 	thenPath := copyPathFacts(b.pathNN[b.cur])
 	thenExit := b.blocks[b.cur].ID
+	thenTerminated := b.terminated[b.cur]
+
+	// The implicit (or explicit) else side of `x != nil` proves `x == nil`
+	// - conditional results materialize there (§6.3.4: a plain assignment
+	// in the `!=` branch joins with the proven success path).
+	elseBase := before
+	if negated && guardID != 0 {
+		elseBase = copyFacts(before)
+		b.facts[b.cur] = elseBase
+		b.materializeCorrelations(guardID)
+		elseBase = copyFacts(b.facts[b.cur])
+	}
 
 	hasElse := statement.Else != nil
 	var elseID, elseExit semantic.BlockID
 	var elseFacts, elseNN map[semantic.BindingID]bool
 	var elsePath map[string]bool
+	elseTerminated := false
 	if hasElse {
 		b.appendBlock()
 		elseID = b.blocks[b.cur].ID
-		b.facts[b.cur] = copyFacts(before)
+		b.facts[b.cur] = copyFacts(elseBase)
 		b.nonNil[b.cur] = copyFacts(beforeNN)
 		b.pathNN[b.cur] = copyPathFacts(beforePath)
 		b.emit(statement.Else, scope.Child())
@@ -1037,12 +1134,29 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 		elseNN = copyFacts(b.nonNil[b.cur])
 		elsePath = copyPathFacts(b.pathNN[b.cur])
 		elseExit = b.blocks[b.cur].ID
+		elseTerminated = b.terminated[b.cur]
+	} else {
+		elseFacts = elseBase
+		elseNN = beforeNN
+		elsePath = beforePath
 	}
 
-	joinFacts := intersectFacts(thenFacts, before)
-	joinNN := intersectFacts(thenNN, beforeNN)
-	joinPath := intersectPathFacts(thenPath, beforePath)
-	if hasElse {
+	// Story 36 (§6.3.2): a terminated branch contributes no facts to the
+	// join - the surviving path carries the proof (its correlation side
+	// was materialized above). Both branches diverging leaves the join
+	// unreachable (D-6 sees no fall-off); without an else the implicit
+	// else path always survives.
+	joinUnreachable := hasElse && thenTerminated && elseTerminated
+	var joinFacts, joinNN map[semantic.BindingID]bool
+	var joinPath map[string]bool
+	switch {
+	case thenTerminated && !elseTerminated:
+		joinFacts, joinNN, joinPath = elseFacts, elseNN, elsePath
+	case elseTerminated && !thenTerminated:
+		joinFacts, joinNN, joinPath = thenFacts, thenNN, thenPath
+	case thenTerminated && elseTerminated:
+		joinFacts, joinNN, joinPath = elseFacts, elseNN, elsePath
+	default:
 		joinFacts = intersectFacts(thenFacts, elseFacts)
 		joinNN = intersectFacts(thenNN, elseNN)
 		joinPath = intersectPathFacts(thenPath, elsePath)
@@ -1054,10 +1168,14 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	b.pathNN[b.cur] = joinPath
 	joinID := b.blocks[b.cur].ID
 	b.connect(start, thenID)
-	b.connect(thenExit, joinID)
+	if !thenTerminated && !joinUnreachable {
+		b.connect(thenExit, joinID)
+	}
 	if hasElse {
 		b.connect(start, elseID)
-		b.connect(elseExit, joinID)
+		if !elseTerminated && !joinUnreachable {
+			b.connect(elseExit, joinID)
+		}
 	} else {
 		b.connect(start, joinID)
 	}
@@ -1311,12 +1429,21 @@ func (b *builder) emitJump(isBreak bool) {
 // callees, for which the grammar has no declaration form yet — stay
 // invisible here: recorded conformance sources pin them as accepted.
 func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope) {
+	unavailable := map[semantic.BindingID]bool{}
 	for _, value := range statement.Values {
 		if value.Closure != nil {
 			continue
 		}
 		for _, ident := range value.Idents {
 			if id := scope.Resolve(ident); id != 0 {
+				// Story 36 (RFC-005 §6.3/§8.1.4, D-4): a still-conditional
+				// success result does not exist until the controlling
+				// error is proven nil on this path - one report per
+				// binding per statement.
+				if _, conditional := b.correlated[id]; conditional && !b.facts[b.cur][id] && !unavailable[id] {
+					unavailable[id] = true
+					b.report(semantic.UnavailableSuccessResult, statement.Span)
+				}
 				b.add(semantic.Read(id))
 			}
 		}
@@ -1477,6 +1604,12 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		bindingTypes: map[semantic.BindingID]string{},
 		funcParams:   b.funcParams,
 		funcResults:  b.funcResults,
+		// Story 36: correlation does not cross the closure boundary (the
+		// guard-kill-in-captures question is a follow-up) - the body
+		// starts with no conditional bindings; terminated tracking is
+		// per-body.
+		correlated: map[semantic.BindingID]semantic.BindingID{},
+		terminated: []bool{false},
 	}
 	cb.emit(cl.Body, bodyScope)
 	// Closure bodies participate in the same lint and read accounting:
@@ -1881,6 +2014,87 @@ func (b *builder) checkStrictReturn(statement *parser.Statement, scope *semantic
 	}
 }
 
+// callCalleePrefix extracts the callee prefix (`Load`, `obj.method`) of a
+// raw call value text; empty when the value is not a call shape.
+func callCalleePrefix(text string) string {
+	open := strings.Index(text, "(")
+	if open <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(text[:open])
+}
+
+// emitVarDestructuring analyzes the fallible-call destructuring
+// `var data, err = Load()` (story 36, RFC-005 §6.3, §6.9.1): the trailing
+// binding receives the error result (initialized, `error?` class, R1
+// tracked), every preceding binding is conditionally initialized - guard
+// `(err == nil)` (§6.3.1). Reports handled=false for any other shape:
+// unknown or non-fallible callees keep the generic unconditional path
+// (F-G3), a result-count mismatch reports ANUY1006 and recovers the same
+// way.
+func (b *builder) emitVarDestructuring(statement *parser.Statement, scope *semantic.Scope) bool {
+	res, ok := b.calleeResultsForPrefix(callCalleePrefix(statement.Values[0].Text))
+	if !ok || !res.fallible {
+		return false
+	}
+	b.readIdents(statement, scope)
+	b.analyzeClosures(statement, scope, nil)
+	if len(statement.Names) != len(res.successClasses)+1 {
+		b.report(semantic.DiagnosticCategory("ArityMismatch"), statement.Span)
+		return false
+	}
+	errID := semantic.BindingID(0)
+	errName := statement.Names[len(statement.Names)-1]
+	if errName != "_" {
+		if serr := scope.Declare(errName); serr != nil {
+			b.report(serr.Category, statement.Span)
+			return false
+		}
+		errID = scope.Resolve(errName)
+		b.declare(errID)
+		b.classes[errID] = semantic.NullabilityNullable
+		b.nilable[errID] = true
+		b.errSpans[errID] = statement.Span
+		b.initialize(errID)
+	}
+	success := statement.Names[:len(statement.Names)-1]
+	targets := make([]semantic.BindingID, 0, len(success))
+	for i, name := range success {
+		if name == "_" {
+			// GB-3 variant A: the blank success target receives nothing
+			// and creates no binding.
+			continue
+		}
+		if serr := scope.Declare(name); serr != nil {
+			b.report(serr.Category, statement.Span)
+			continue
+		}
+		id := scope.Resolve(name)
+		targets = append(targets, id)
+		b.declare(id)
+		// Story 36: the op stream stays analyzer-optimistic - the
+		// declaration carries Assign, so the kernel never fires
+		// ANUY3001 for a correlated binding; the builder facts keep the
+		// real conditional state and D-4 is the sound diagnostic.
+		b.add(semantic.Assign(id))
+		b.assigned[id] = true
+		if i < len(res.successClasses) {
+			b.classes[id] = res.successClasses[i]
+			if res.successClasses[i] == semantic.NullabilityNullable {
+				b.nilable[id] = true
+			}
+		}
+	}
+	// Entries register after the guard exists and is initialized:
+	// initialize() kills dependents (§6.3.6) and must not fire here.
+	for _, id := range targets {
+		if errID != 0 {
+			b.correlated[id] = errID
+		}
+	}
+	return true
+}
+
 // calleeResults resolves the strict fallible shape of a try operand (story
 // 35): plain calls through funcResults, method calls through the flat
 // table. ok=false marks the tolerance zone - an unresolved callee stays
@@ -1897,6 +2111,26 @@ func (b *builder) calleeResults(call *parser.NavigationExpr) (declResult, bool) 
 	}
 	if info, ok := b.methods[call.Segments[len(call.Segments)-1].Name]; ok {
 		return declResult{hasResult: info.hasResult, resultNullable: info.resultNullable, fallible: info.fallible, successClasses: info.successClasses}, true
+	}
+	return declResult{}, false
+}
+
+// calleeResultsForPrefix is the raw-text mirror of calleeResults (story
+// 36): a destructuring RHS keeps its call as raw text (`Load(p)`), so the
+// callee prefix resolves through the same tables. ok=false marks the
+// tolerance zone (F-G3).
+func (b *builder) calleeResultsForPrefix(prefix string) (declResult, bool) {
+	if prefix == "" {
+		return declResult{}, false
+	}
+	if i := strings.LastIndex(prefix, "."); i >= 0 {
+		if info, ok := b.methods[prefix[i+1:]]; ok {
+			return declResult{hasResult: info.hasResult, resultNullable: info.resultNullable, fallible: info.fallible, successClasses: info.successClasses}, true
+		}
+		return declResult{}, false
+	}
+	if res, ok := b.funcResults[prefix]; ok {
+		return res, true
 	}
 	return declResult{}, false
 }
@@ -1936,6 +2170,9 @@ func (b *builder) emitReturn(statement *parser.Statement, scope *semantic.Scope)
 	b.appendBlock()
 	b.facts[b.cur] = copyFacts(b.facts[cur])
 	b.nonNil[b.cur] = copyFacts(b.nonNil[cur])
+	// Story 36: flow does not continue past a return - the fresh block is
+	// the terminated branch exit emitIf excludes from the join (§6.3.2).
+	b.terminated[b.cur] = true
 }
 
 // condNarrowTarget resolves the binding narrowed by a bare `x != nil`
