@@ -84,6 +84,27 @@ type methodInfo struct {
 	params         []semantic.Nullability
 	fallible       bool
 	successClasses []semantic.Nullability
+	// Story 39 (RFC-004 §6.2.1): the declaring receiver form - the
+	// normalized type name and whether the spelling was `*T`. The method
+	// set of *T carries both forms, the set of T only value receivers.
+	receiver string
+	pointer  bool
+}
+
+// ifaceMethod is one interface method signature (story 39, RFC-004
+// §6.1.1) reduced to the nullability-level match this layer compares.
+type ifaceMethod struct {
+	name           string
+	params         []semantic.Nullability
+	hasResult      bool
+	resultNullable bool
+}
+
+// ifaceInfo is a declared interface (story 39): nominal identity plus
+// the ordered method signatures.
+type ifaceInfo struct {
+	name    string
+	methods []ifaceMethod
 }
 
 // declResult mirrors a declared function result type (story 08 Q4-A).
@@ -175,6 +196,13 @@ type builder struct {
 	// funcResults records declared function result types (story 08 Q4-A)
 	// for the RHS call-shape classification (§26 establishment).
 	funcResults map[string]declResult
+	// interfaces carries the declared interface table (story 39, RFC-004
+	// §6.1.1): name -> ordered method signatures.
+	interfaces map[string]*ifaceInfo
+	// impls records explicit conformances (story 39, RFC-004 §6.1.3):
+	// interface -> target key (`Type` or `*Type`) -> declared. The
+	// foundation of the slice-2 conversion checks.
+	impls map[string]map[string]bool
 }
 
 func newBuilder() *builder {
@@ -202,6 +230,8 @@ func newBuilder() *builder {
 		structs:        map[string]*structInfo{},
 		enums:          map[string][]string{},
 		bindingTypes:   map[semantic.BindingID]string{},
+		interfaces:     map[string]*ifaceInfo{},
+		impls:          map[string]map[string]bool{},
 	}
 }
 
@@ -358,7 +388,7 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 				}
 			}
 		}
-		return b.classifyNavigationValue(value.Navigation)
+		return b.classifyNavigationValue(value.Navigation, scope)
 	}
 	if value.Text == "nil" {
 		return semantic.NullabilityNullable
@@ -388,16 +418,54 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 	return semantic.NullabilityUnknown
 }
 
+// methodKey builds the per-type method-set key (story 39, RFC-004
+// §6.1.5): the normalized receiver type (pointer spelling stripped) and
+// the method name.
+func methodKey(receiver, name string) string {
+	return strings.TrimPrefix(receiver, "*") + "." + name
+}
+
+// resolveMethod resolves a method by name with the receiver's declared
+// type (story 39): bindingTypes give the `Type.name` key; an unknown
+// receiver falls back to the name-only match when exactly one method
+// carries the name. Ambiguity and absence stay in the tolerance zone.
+func (b *builder) resolveMethod(name string, receiver semantic.BindingID) (string, methodInfo, bool) {
+	if receiver != 0 {
+		if typeName := b.bindingTypes[receiver]; typeName != "" {
+			key := methodKey(typeName, name)
+			if info, ok := b.methods[key]; ok {
+				return key, info, true
+			}
+		}
+	}
+	var foundKey string
+	var found methodInfo
+	count := 0
+	for key, info := range b.methods {
+		if strings.HasSuffix(key, "."+name) {
+			foundKey, found = key, info
+			count++
+			if count > 1 {
+				return "", methodInfo{}, false
+			}
+		}
+	}
+	if count == 1 {
+		return foundKey, found, true
+	}
+	return "", methodInfo{}, false
+}
+
 // classifyNavigationValue classifies a selector-chain value: a plain
 // member read has no model (no fields, §28) and stays unknown; a resolved
 // method call carries its declared result (story 08 Q4-A), lifted to
 // nullable through safe navigation (RFC-002 §38).
-func (b *builder) classifyNavigationValue(nav *parser.NavigationExpr) semantic.Nullability {
+func (b *builder) classifyNavigationValue(nav *parser.NavigationExpr, scope *semantic.Scope) semantic.Nullability {
 	last := nav.Segments[len(nav.Segments)-1]
 	if !last.Call {
 		return semantic.NullabilityUnknown
 	}
-	info, ok := b.methods[last.Name]
+	_, info, ok := b.resolveMethod(last.Name, scope.Resolve(nav.Receiver))
 	if !ok || !info.hasResult {
 		return semantic.NullabilityUnknown
 	}
@@ -413,7 +481,13 @@ func (b *builder) classifyNavigationValue(nav *parser.NavigationExpr) semantic.N
 // null; void and unresolved shapes stay unknown and never establish.
 func (b *builder) classifyCallShape(prefix string) semantic.Nullability {
 	if i := strings.LastIndex(prefix, "."); i >= 0 {
-		if info, ok := b.methods[prefix[i+1:]]; ok {
+		// Story 39: the prefix carries the receiver type (`File.Read`) -
+		// the per-type key resolves directly, the name-only fallback
+		// covers unknown receivers.
+		if info, ok := b.methods[methodKey(prefix[:i], prefix[i+1:])]; ok {
+			return classifyDeclResult(info.hasResult, info.resultNullable)
+		}
+		if _, info, ok := b.resolveMethod(prefix[i+1:], 0); ok {
 			return classifyDeclResult(info.hasResult, info.resultNullable)
 		}
 		return semantic.NullabilityUnknown
@@ -499,6 +573,81 @@ type structInfo struct {
 // registerStruct adds a declared struct to the table (story 22); story 25
 // records each field's declared type name so the path walk can continue
 // through named struct fields (empty for every other shape).
+// registerInterface records a declared interface (story 39, RFC-004
+// §6.1.1): nominal identity plus ordered method signatures reduced to the
+// nullability-level match. A duplicate interface name rejects.
+func (b *builder) registerInterface(decl *parser.InterfaceDecl) {
+	if _, exists := b.interfaces[decl.Name]; exists {
+		b.report(semantic.SameScopeRedeclaration, decl.Span)
+		return
+	}
+	info := &ifaceInfo{name: decl.Name}
+	for _, method := range decl.Methods {
+		sig := ifaceMethod{name: method.Name, hasResult: method.HasResult, resultNullable: method.ResultNullable}
+		for _, p := range method.Params {
+			sig.params = append(sig.params, nullabilityOfParam(p))
+		}
+		info.methods = append(info.methods, sig)
+	}
+	b.interfaces[decl.Name] = info
+}
+
+// emitImpl validates one explicit conformance (story 39, RFC-004
+// §6.1.3): every interface method must exist in the target's effective
+// method set (§6.2.1 - *T carries value and pointer receivers, T only
+// value receivers) with a matching nullability-level signature. The
+// conformance record feeds the slice-2 conversion checks; unknown
+// interfaces report and stop.
+func (b *builder) emitImpl(decl *parser.ImplDecl) {
+	iface, ok := b.interfaces[decl.Interface]
+	if !ok {
+		b.report(semantic.ImplUnknownInterface, decl.Span)
+		return
+	}
+	target := decl.Type
+	if decl.Pointer {
+		target = "*" + target
+	}
+	if b.impls[decl.Interface] == nil {
+		b.impls[decl.Interface] = map[string]bool{}
+	}
+	if b.impls[decl.Interface][target] {
+		// §6.5.1 coherence: one impl per (interface, target type).
+		b.report(semantic.DuplicateImpl, decl.Span)
+		return
+	}
+	b.impls[decl.Interface][target] = true
+	for _, method := range iface.methods {
+		key := methodKey(decl.Type, method.name)
+		info, found := b.methods[key]
+		if !found || (decl.Pointer == false && info.pointer) {
+			// §6.2.1: a value-type method set carries only value
+			// receivers; the pointer-type set carries both forms.
+			b.report(semantic.InterfaceMethodMissing, decl.Span)
+			continue
+		}
+		if !ifaceSignatureMatch(method, info) {
+			b.report(semantic.InterfaceMethodMismatch, decl.Span)
+		}
+	}
+}
+
+// ifaceSignatureMatch compares an interface signature against a method at
+// the nullability level (story 39): parameter count, per-parameter
+// classes and the result class. Full type identity stays outside this
+// slice - the experimental layer keeps types as raw text.
+func ifaceSignatureMatch(method ifaceMethod, info methodInfo) bool {
+	if len(method.params) != len(info.params) {
+		return false
+	}
+	for i := range method.params {
+		if method.params[i] != info.params[i] {
+			return false
+		}
+	}
+	return method.hasResult == info.hasResult && method.resultNullable == info.resultNullable
+}
+
 func (b *builder) registerStruct(sd *parser.StructDecl) {
 	info := &structInfo{}
 	for _, field := range sd.Fields {
@@ -821,6 +970,13 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		} else {
 			b.registerStruct(statement.Struct)
 		}
+	case parser.Interface:
+		// Story 39 (RFC-004 §6.1.1): the nominal interface table.
+		b.registerInterface(statement.Interface)
+	case parser.Impl:
+		// Story 39 (RFC-004 §6.1.3): conformance validation at the
+		// declaration point; the record feeds slice-2 conversions.
+		b.emitImpl(statement.Impl)
 	case parser.Switch:
 		b.emitSwitch(statement, scope)
 	case parser.Try:
@@ -830,7 +986,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		if !b.fallible {
 			b.report(semantic.PropagationOutsideFallible, statement.Span)
 		}
-		if res, ok := b.calleeResults(statement.Call); ok && !res.fallible {
+		if res, ok := b.calleeResults(statement.Call, scope); ok && !res.fallible {
 			b.report(semantic.InvalidTry, statement.Span)
 		}
 		b.emitCall(statement, scope)
@@ -1691,7 +1847,7 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 	// error result. `discard` is the explicit opt-out (§6.6.2); `try`
 	// propagates instead of ignoring (story 34) - neither reports.
 	if !statement.Discard && statement.Kind != parser.Try {
-		if res, ok := b.calleeResults(call); ok && res.fallible {
+		if res, ok := b.calleeResults(call, scope); ok && res.fallible {
 			b.report(semantic.IgnoredError, statement.Span)
 		}
 	}
@@ -1742,9 +1898,9 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 		// (Q2-A) - no receiver invalidation (3b), no capture mutators (3a);
 		// otherwise the call invalidates the receiver and the method's
 		// mutated captures.
-		if info, ok := b.methods[call.Segments[len(call.Segments)-1].Name]; ok {
+		if key, info, ok := b.resolveMethod(call.Segments[len(call.Segments)-1].Name, id); ok {
 			if !info.pure {
-				mutators := append([]semantic.BindingID{id}, b.methodMutates[call.Segments[len(call.Segments)-1].Name]...)
+				mutators := append([]semantic.BindingID{id}, b.methodMutates[key]...)
 				b.add(semantic.Call(mutators...))
 			}
 			return
@@ -1770,7 +1926,9 @@ func (b *builder) checkArgumentTypes(statement *parser.Statement, scope *semanti
 	if len(call.Segments) == 0 {
 		params = b.funcParams[call.Receiver]
 	} else {
-		params = b.methods[call.Segments[len(call.Segments)-1].Name].params
+		if _, info, ok := b.resolveMethod(call.Segments[len(call.Segments)-1].Name, scope.Resolve(call.Receiver)); ok {
+			params = info.params
+		}
 	}
 	if len(params) == 0 {
 		return
@@ -1858,12 +2016,9 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 		paramClasses = append(paramClasses, nullabilityOfParam(p))
 	}
 	b.funcParams[name] = paramClasses
-	// One flat namespace (story 08 Q1-A): a function name colliding with a
-	// declared method rejects.
-	if _, exists := b.methods[name]; exists {
-		b.report(semantic.SameScopeRedeclaration, statement.Span)
-		return
-	}
+	// Story 39 (RFC-004 §6.1.5/§6.1.6): functions and methods live in
+	// separate namespaces - a bare call resolves the function, a receiver
+	// call the per-type method set; the flat Q1-A collision is gone.
 	if serr := scope.Declare(name); serr != nil {
 		b.report(serr.Category, statement.Span)
 		return
@@ -1894,39 +2049,40 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 }
 
 // emitMethod lowers a story 08 method declaration (RFC-002 §40 form):
-// methods bind no scope name - the flat table resolves calls by unique
-// name; duplicates and collisions with scope names reject (Q1-A). The body
-// analyzes through the closure path (receiver access is not modeled in
-// v1); its mutated captures register as the method's 3a mutator set.
-// `//anuy:pure` opts the method out of both call effects (Q2-A, F-C2).
+// methods bind no scope name - the per-type method set resolves calls
+// (story 39, RFC-004 §6.1.5); a duplicate within one type rejects
+// (§6.1.6 - the pointer spelling does not create a second namespace).
+// The body analyzes through the closure path (receiver access is not
+// modeled in v1); its mutated captures register as the method's 3a
+// mutator set. `//anuy:pure` opts the method out of both call effects
+// (Q2-A, F-C2).
 func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope) {
 	name := statement.Names[0]
 	var paramClasses []semantic.Nullability
 	for _, p := range statement.Closure.Params {
 		paramClasses = append(paramClasses, nullabilityOfParam(p))
 	}
-	if _, exists := b.methods[name]; exists {
-		b.report(semantic.SameScopeRedeclaration, statement.Span)
-		return
-	}
-	if scope.Resolve(name) != 0 {
+	key := methodKey(statement.Method, name)
+	if _, exists := b.methods[key]; exists {
 		b.report(semantic.SameScopeRedeclaration, statement.Span)
 		return
 	}
 	fallible, successClasses := strictResults(statement)
-	b.methods[name] = methodInfo{
+	b.methods[key] = methodInfo{
 		hasResult:      statement.HasResult,
 		resultNullable: statement.ResultNullable,
 		pure:           statement.Pure,
 		params:         paramClasses,
 		fallible:       fallible,
 		successClasses: successClasses,
+		receiver:       statement.Method,
+		pointer:        statement.MethodPointer,
 	}
 	// Registered before the body: a self-recursive call resolves like a
 	// function's self-recursion (story 07 precedent; the mutator set the
 	// self-call sees stays the one known at that point).
 	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, fallible)
-	b.methodMutates[name] = unionBindings(nil, mutators)
+	b.methodMutates[key] = unionBindings(nil, mutators)
 	// D-6 (RFC-001 §13.18, ADR-0004): methods enforce missing-return like
 	// functions; story 35 adds the §6.4.7 strict fallible fall-off.
 	if statement.HasResult && !statement.ResultNullable && fallOff {
@@ -1950,7 +2106,7 @@ func (b *builder) emitTryDecl(statement *parser.Statement, scope *semantic.Scope
 	}
 	b.readIdents(statement, scope)
 	b.analyzeClosures(statement, scope, nil)
-	res, ok := b.calleeResults(statement.TryCall)
+	res, ok := b.calleeResults(statement.TryCall, scope)
 	if ok && !res.fallible {
 		b.report(semantic.InvalidTry, statement.Span)
 	}
@@ -2116,10 +2272,10 @@ func (b *builder) emitVarDestructuring(statement *parser.Statement, scope *seman
 }
 
 // calleeResults resolves the strict fallible shape of a try operand (story
-// 35): plain calls through funcResults, method calls through the flat
-// table. ok=false marks the tolerance zone - an unresolved callee stays
-// unchecked (F-G3).
-func (b *builder) calleeResults(call *parser.NavigationExpr) (declResult, bool) {
+// 35): plain calls through funcResults, method calls through the per-type
+// method sets (story 39). ok=false marks the tolerance zone - an
+// unresolved callee stays unchecked (F-G3).
+func (b *builder) calleeResults(call *parser.NavigationExpr, scope *semantic.Scope) (declResult, bool) {
 	if call == nil {
 		return declResult{}, false
 	}
@@ -2129,7 +2285,7 @@ func (b *builder) calleeResults(call *parser.NavigationExpr) (declResult, bool) 
 		}
 		return declResult{}, false
 	}
-	if info, ok := b.methods[call.Segments[len(call.Segments)-1].Name]; ok {
+	if _, info, ok := b.resolveMethod(call.Segments[len(call.Segments)-1].Name, scope.Resolve(call.Receiver)); ok {
 		return declResult{hasResult: info.hasResult, resultNullable: info.resultNullable, fallible: info.fallible, successClasses: info.successClasses}, true
 	}
 	return declResult{}, false
@@ -2144,7 +2300,10 @@ func (b *builder) calleeResultsForPrefix(prefix string) (declResult, bool) {
 		return declResult{}, false
 	}
 	if i := strings.LastIndex(prefix, "."); i >= 0 {
-		if info, ok := b.methods[prefix[i+1:]]; ok {
+		if info, ok := b.methods[methodKey(prefix[:i], prefix[i+1:])]; ok {
+			return declResult{hasResult: info.hasResult, resultNullable: info.resultNullable, fallible: info.fallible, successClasses: info.successClasses}, true
+		}
+		if _, info, ok := b.resolveMethod(prefix[i+1:], 0); ok {
 			return declResult{hasResult: info.hasResult, resultNullable: info.resultNullable, fallible: info.fallible, successClasses: info.successClasses}, true
 		}
 		return declResult{}, false
@@ -2368,7 +2527,7 @@ func (b *builder) callPreservesPathFacts(statement *parser.Statement, scope *sem
 		return false
 	}
 	last := call.Segments[len(call.Segments)-1]
-	if info, ok := b.methods[last.Name]; ok {
+	if _, info, ok := b.resolveMethod(last.Name, scope.Resolve(call.Receiver)); ok {
 		return info.pure
 	}
 	return false

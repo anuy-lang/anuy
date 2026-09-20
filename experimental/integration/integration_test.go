@@ -963,27 +963,42 @@ func TestAnalyzeSourceMethodMutatorsInvalidateCaptures(t *testing.T) {
 }
 
 func TestAnalyzeSourceDuplicateMethodReports(t *testing.T) {
-	// Q1-A: the flat method namespace - a duplicate method name rejects.
-	result, err := AnalyzeSource("func T.m() {\n}\nfunc U.m() {\n}\n")
+	// Story 39 flip (RFC-004 §6.1.6): methods live in per-type method
+	// sets - the same name on different types is legal (two types may
+	// implement one interface); a duplicate within one type, including
+	// the pointer spelling, still rejects.
+	sameName, err := AnalyzeSource("func T.m() {\n}\nfunc U.m() {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSingleDiagnostic(t, result, "SameScopeRedeclaration")
+	if len(sameName.Diagnostics) != 0 {
+		t.Fatalf("sameName = %#v, want no diagnostics", sameName.Diagnostics)
+	}
+	duplicate, err := AnalyzeSource("func T.m() {\n}\nfunc *T.m() {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, duplicate, "SameScopeRedeclaration")
 }
 
 func TestAnalyzeSourceMethodNameCollisionWithFunctionReports(t *testing.T) {
-	// Q1-A: one flat namespace - a method name colliding with a declared
-	// function rejects, in both orders.
+	// Story 39 flip (RFC-004 §6.1.5/§6.1.6): functions and per-type
+	// methods are separate namespaces - a bare call resolves the
+	// function, a receiver call the method set; both orders stay clean.
 	result, err := AnalyzeSource("func f() {\n}\nfunc T.f() {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSingleDiagnostic(t, result, "SameScopeRedeclaration")
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
 	result, err = AnalyzeSource("func T.g() {\n}\nfunc g() {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSingleDiagnostic(t, result, "SameScopeRedeclaration")
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
+	}
 }
 
 func TestAnalyzeSourceBareMethodNameIsUnknownRead(t *testing.T) {
@@ -2191,5 +2206,75 @@ func TestAnalyzeSourceMustConsumeDiscard(t *testing.T) {
 	}
 	if len(methodIgnored.Diagnostics) != 1 || string(methodIgnored.Diagnostics[0].Category) != "IgnoredError" {
 		t.Fatalf("methodIgnored = %#v, want one IgnoredError", methodIgnored.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceInterfacesImpl(t *testing.T) {
+	// Story 39 (RFC-004 §6.1-6.2, §6.5.1): interface declarations,
+	// per-type method sets and explicit impl with completeness and
+	// signature validation at the declaration point.
+	base := "type Data struct {\nid int\n}\n"
+	valid, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(valid.Diagnostics) != 0 {
+		t.Fatalf("valid = %#v, want no diagnostics", valid.Diagnostics)
+	}
+	missing, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nimpl Reader for File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing.Diagnostics) != 1 || string(missing.Diagnostics[0].Category) != "InterfaceMethodMissing" {
+		t.Fatalf("missing = %#v, want one InterfaceMethodMissing (§6.1.3)", missing.Diagnostics)
+	}
+	mismatch, err := AnalyzeSource(base + "interface Reader {\nRead(a Data, b Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mismatch.Diagnostics) != 1 || string(mismatch.Diagnostics[0].Category) != "InterfaceMethodMismatch" {
+		t.Fatalf("mismatch = %#v, want one InterfaceMethodMismatch (§6.1.3)", mismatch.Diagnostics)
+	}
+	duplicate, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nimpl Reader for File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(duplicate.Diagnostics) != 1 || string(duplicate.Diagnostics[0].Category) != "DuplicateImpl" {
+		t.Fatalf("duplicate = %#v, want one DuplicateImpl (§6.5.1)", duplicate.Diagnostics)
+	}
+	unknown, err := AnalyzeSource(base + "type File struct {\nid int\n}\nimpl Ghost for File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unknown.Diagnostics) != 1 || string(unknown.Diagnostics[0].Category) != "ImplUnknownInterface" {
+		t.Fatalf("unknown = %#v, want one ImplUnknownInterface", unknown.Diagnostics)
+	}
+	pointerOnlyValueTarget, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc *File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pointerOnlyValueTarget.Diagnostics) != 1 || string(pointerOnlyValueTarget.Diagnostics[0].Category) != "InterfaceMethodMissing" {
+		t.Fatalf("pointerOnlyValueTarget = %#v, want one InterfaceMethodMissing (§6.2.1)", pointerOnlyValueTarget.Diagnostics)
+	}
+	pointerTarget, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc *File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for *File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pointerTarget.Diagnostics) != 0 {
+		t.Fatalf("pointerTarget = %#v, want no diagnostics (§6.2.1)", pointerTarget.Diagnostics)
+	}
+	twoInterfaces, err := AnalyzeSource(base + "interface A {\nSay()\n}\ninterface B {\nSay()\n}\ntype MyType struct {\nid int\n}\nfunc MyType.Say() {\n}\nimpl A for MyType\nimpl B for MyType\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(twoInterfaces.Diagnostics) != 0 {
+		t.Fatalf("twoInterfaces = %#v, want no diagnostics (§6.1.4)", twoInterfaces.Diagnostics)
+	}
+	perTypeDispatch, err := AnalyzeSource("type Log struct {\n}\ntype Other struct {\n}\nfunc Log.write() {\n}\nfunc Other.write() {\n}\nfunc F() {\nvar l = Log{}\nl.write()\nvar o = Other{}\no.write()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(perTypeDispatch.Diagnostics) != 0 {
+		t.Fatalf("perTypeDispatch = %#v, want no diagnostics (§6.1.5)", perTypeDispatch.Diagnostics)
 	}
 }

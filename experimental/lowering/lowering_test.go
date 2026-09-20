@@ -1076,3 +1076,31 @@ func TestLowerDiscardStatement(t *testing.T) {
 		t.Fatalf("Lower() = %q, wants the verbatim call", got)
 	}
 }
+
+func TestLowerInterfaceDeclAndImpl(t *testing.T) {
+	// Story 39 (RFC-004 §6.8.1–6.8.3, RFC-009 §6.5.1–6.5.4): the
+	// interface lowers to an ordinary Go interface; impl erases; the
+	// pointer receiver lowers to the Go pointer form.
+	got, err := Lower("type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc *File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for *File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"type Reader interface {\n\tRead(d Data) Data\n}\n",
+		"func (anuyRecv *File) Read(d Data) Data {",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+	if strings.Contains(got, "impl") {
+		t.Fatalf("Lower() = %q, wants impl erased (§6.8.2)", got)
+	}
+}
+
+func TestLowerGeneratedInterfaceTypeChecks(t *testing.T) {
+	// Story 39: the interface, its Go method set and the conformance
+	// conversion type-check end-to-end (value receiver - the Go method
+	// set of File carries Read).
+	typeCheckGenerated(t, "type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar r Reader = File{id: 1}\nvar x = r\n")
+}

@@ -1662,3 +1662,75 @@ func TestParseDiscardStatement(t *testing.T) {
 		t.Fatalf("cBody = %+v, want a call of the binding named discard", cBody)
 	}
 }
+
+func TestParseInterfaceDecl(t *testing.T) {
+	// Story 39 (RFC-004 §6.1.1): the nominal interface declaration -
+	// ordered method signatures without receivers; the optional result
+	// mirrors nullability; duplicate method names reject.
+	program, err := Parse("interface Reader {\nRead(d Data) Data?\nWrite(b []byte)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decl := program.Statements[0].Interface
+	if decl == nil || decl.Name != "Reader" || len(decl.Methods) != 2 {
+		t.Fatalf("decl = %+v, want Reader with two methods", decl)
+	}
+	if decl.Methods[0].Name != "Read" || !decl.Methods[0].HasResult || !decl.Methods[0].ResultNullable {
+		t.Fatalf("Read = %+v, want nullable Data result", decl.Methods[0])
+	}
+	if decl.Methods[1].HasResult {
+		t.Fatalf("Write = %+v, want no result", decl.Methods[1])
+	}
+	if _, err := Parse("interface Reader {\nRead(d Data) Data\nRead(x int)\n}\n"); err == nil {
+		t.Fatal("duplicate interface method accepted")
+	}
+	if _, err := Parse("interface Reader {\n}\n"); err != nil {
+		t.Fatalf("zero-method interface rejected: %v", err)
+	}
+}
+
+func TestParseImplStatement(t *testing.T) {
+	// Story 39 (RFC-004 §6.1.3): `impl Iface for [*]Type` - no body; both
+	// receiver forms parse, malformed forms reject.
+	pointer, err := Parse("impl Reader for *File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decl := pointer.Statements[0].Impl
+	if decl == nil || decl.Interface != "Reader" || decl.Type != "File" || !decl.Pointer {
+		t.Fatalf("decl = %+v, want Reader for *File", decl)
+	}
+	value, err := Parse("impl Reader for File\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Statements[0].Impl.Pointer {
+		t.Fatal("value target parsed as pointer")
+	}
+	if _, err := Parse("impl Reader\n"); err == nil {
+		t.Fatal("impl without target accepted")
+	}
+	if _, err := Parse("impl Reader File\n"); err == nil {
+		t.Fatal("impl without for accepted")
+	}
+}
+
+func TestParsePointerReceiverMethod(t *testing.T) {
+	// Story 39 (RFC-004 §6.2.1): `func *T.name` - the pointer-receiver
+	// spelling feeds the method set (§6.2.1).
+	program, err := Parse("func *File.Read(d Data) Data {\nreturn d\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := program.Statements[0]
+	if statement.Method != "File" || !statement.MethodPointer || statement.Names[0] != "Read" {
+		t.Fatalf("method = %+v, want pointer receiver File.Read", statement)
+	}
+	value, err := Parse("func File.Read(d Data) Data {\nreturn d\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Statements[0].MethodPointer {
+		t.Fatal("value receiver parsed as pointer")
+	}
+}

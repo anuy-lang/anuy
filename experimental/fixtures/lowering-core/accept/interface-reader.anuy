@@ -1,0 +1,13 @@
+type Data struct {
+id int
+}
+interface Reader {
+Read(d Data) Data
+}
+type File struct {
+id int
+}
+func File.Read(d Data) Data {
+return d
+}
+impl Reader for File

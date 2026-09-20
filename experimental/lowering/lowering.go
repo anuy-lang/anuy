@@ -29,8 +29,11 @@ func Lower(source string) (string, error) {
 		switch statement.Kind {
 		case parser.Function:
 			funcs = append(funcs, statement)
-		case parser.TypeDecl:
+		case parser.TypeDecl, parser.Interface:
 			types = append(types, statement)
+		case parser.Impl:
+			// Story 39 (RFC-004 §6.8.2): impl is semantic metadata -
+			// after checking it erases from the generated Go.
 		default:
 			bodyStatements = append(bodyStatements, statement)
 		}
@@ -728,7 +731,13 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 	var b strings.Builder
 	b.WriteString("func ")
 	if statement.Method != "" {
-		b.WriteString("(" + methodReceiver + " " + statement.Method + ") ")
+		// Story 39 (RFC-004 §6.2.1): the pointer-receiver spelling lowers
+		// to the Go pointer receiver.
+		receiverType := statement.Method
+		if statement.MethodPointer {
+			receiverType = "*" + receiverType
+		}
+		b.WriteString("(" + methodReceiver + " " + receiverType + ") ")
 	}
 	b.WriteString(statement.Names[0] + "(")
 	for i, p := range cl.Params {
@@ -804,12 +813,51 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 	return nil
 }
 
+// interfaceDecl lowers one interface declaration (story 39, RFC-004
+// §6.8.1, RFC-009 §6.5.1): an ordinary Go interface with the equivalent
+// lowered method signatures - ordinary Go interface dispatch, no Anuy
+// runtime machinery (§6.5.2 no vtable).
+func (l *lowerer) interfaceDecl(decls *strings.Builder, statement *parser.Statement) error {
+	decl := statement.Interface
+	var b strings.Builder
+	b.WriteString("type " + decl.Name + " interface {\n")
+	for _, method := range decl.Methods {
+		parts := make([]string, 0, len(method.Params))
+		for _, p := range method.Params {
+			typeText := p.Type
+			if p.TypeExpr != nil {
+				text, err := l.goType(p.TypeExpr)
+				if err != nil {
+					return err
+				}
+				typeText = text
+			}
+			parts = append(parts, p.Name+" "+typeText)
+		}
+		b.WriteString("\t" + method.Name + "(" + strings.Join(parts, ", ") + ")")
+		if method.HasResult && method.ResultTypeExpr != nil {
+			text, err := l.goType(method.ResultTypeExpr)
+			if err != nil {
+				return err
+			}
+			b.WriteString(" " + text)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("}\n")
+	decls.WriteString(b.String() + "\n")
+	return nil
+}
+
 // typeDecl lowers one hoisted struct declaration (story 21, RFC-014 §6.2,
 // §6.13): an ordinary Go struct with the field order preserved and the
 // field types through the representation rules. Construction literals
 // lower verbatim (§6.13 - "practically directly"); their completeness is
 // a kernel concern (story 22).
 func (l *lowerer) typeDecl(decls *strings.Builder, statement *parser.Statement) error {
+	if statement.Interface != nil {
+		return l.interfaceDecl(decls, statement)
+	}
 	if statement.Enum != nil {
 		return l.enumDecl(decls, statement)
 	}

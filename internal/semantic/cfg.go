@@ -141,6 +141,18 @@ const (
 	// a fallible call statement silently drops its error result, or a
 	// blank error target bypasses must-consume (§6.6.5).
 	IgnoredError DiagnosticCategory = "IgnoredError"
+	// InterfaceMethodMissing is the RFC-004 §6.1.3 category (story 39):
+	// an impl target does not provide an interface method.
+	InterfaceMethodMissing DiagnosticCategory = "InterfaceMethodMissing"
+	// InterfaceMethodMismatch is the RFC-004 §6.1.3 category (story 39):
+	// an impl target provides the method with a mismatching signature.
+	InterfaceMethodMismatch DiagnosticCategory = "InterfaceMethodMismatch"
+	// DuplicateImpl is the RFC-004 §6.5.1 category (story 39): a second
+	// impl for the same (interface, target type) pair.
+	DuplicateImpl DiagnosticCategory = "DuplicateImpl"
+	// ImplUnknownInterface is the RFC-004 §6.1.3 category (story 39):
+	// impl references an undeclared interface.
+	ImplUnknownInterface DiagnosticCategory = "ImplUnknownInterface"
 )
 
 // SourceSpan locates a diagnostic in the source text.

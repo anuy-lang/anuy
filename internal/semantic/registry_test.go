@@ -46,6 +46,11 @@ var approvedScheme = []struct {
 	{"UnavailableSuccessResult", "ANUY6005", SeverityError},
 	// Story 37 (RFC-005 §8.1.1): must-consume.
 	{"IgnoredError", "ANUY6006", SeverityError},
+	// Story 39 (RFC-004): interfaces and explicit impl.
+	{"InterfaceMethodMissing", "ANUY7001", SeverityError},
+	{"InterfaceMethodMismatch", "ANUY7002", SeverityError},
+	{"DuplicateImpl", "ANUY7003", SeverityError},
+	{"ImplUnknownInterface", "ANUY7004", SeverityError},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 

@@ -116,6 +116,37 @@ type EnumDecl struct {
 	Span     Span
 }
 
+// InterfaceMethod is one signature line of an interface declaration (story
+// 39, RFC-004 §6.1.1): `name(params) [result]` - no receiver, no body.
+type InterfaceMethod struct {
+	Name   string
+	Params []Param
+	// HasResult/ResultNullable/ResultTypeExpr mirror the optional result
+	// type (single result in this slice).
+	HasResult      bool
+	ResultNullable bool
+	ResultTypeExpr *TypeExpr
+	Span           Span
+}
+
+// InterfaceDecl is an `interface Name { … }` declaration (story 39,
+// RFC-004 §6.1.1): a nominal interface with ordered method signatures.
+type InterfaceDecl struct {
+	Name    string
+	Methods []InterfaceMethod
+	Span    Span
+}
+
+// ImplDecl is the conformance statement `impl Iface for [*]Type` (story
+// 39, RFC-004 §6.1.3): no body - the interface methods are ordinary
+// methods of the target type.
+type ImplDecl struct {
+	Interface string
+	Type      string // the target type as written, without the leading "*"
+	Pointer   bool
+	Span      Span
+}
+
 // SwitchArm is one `case Enum.Variant:` arm of a switch (story 31/32,
 // RFC-006 §6.3–6.4): the pattern names an enum variant; statement arms
 // carry a Body, value arms a single Value.
@@ -167,6 +198,8 @@ const (
 	TypeDecl
 	Switch
 	Try
+	Interface
+	Impl
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -290,9 +323,13 @@ type Statement struct {
 	// Method is non-empty for a method declaration (story 08, owner
 	// decision 2026-09-17, task-1-8-1-2): the receiver type name as written
 	// (`User` in `func User.age() int`). The declared name is Names[0];
-	// methods bind no scope name - resolution goes through the flat method
-	// table.
+	// methods bind no scope name - resolution goes through the per-type
+	// method sets (story 39).
 	Method string
+	// MethodPointer records the pointer-receiver spelling `func *T.name`
+	// (story 39, RFC-004 §6.2.1): the receiver kind feeds the method set
+	// (impl for T requires value receivers, impl for *T both forms).
+	MethodPointer bool
 	// HasResult records a declared result type (`func f() User`, RFC-002
 	// §40 spelling): `return expr` is valid only inside such a declaration.
 	HasResult bool
@@ -314,6 +351,12 @@ type Statement struct {
 	// RFC-006 §6.1): the declaration hoists to a package-level Go type
 	// with discriminant constants.
 	Enum *EnumDecl
+	// Interface is non-nil for an `interface Name { … }` declaration
+	// (story 39, RFC-004 §6.1.1): ordered method signatures, no receivers.
+	Interface *InterfaceDecl
+	// Impl is non-nil for the conformance statement `impl Iface for
+	// [*]Type` (story 39, RFC-004 §6.1.3); erased from generated Go.
+	Impl *ImplDecl
 	// Switch is non-nil for a `switch <binding> { … }` statement (story
 	// 31, RFC-006 §6.3): exhaustive arms over an enum-typed binding.
 	Switch *SwitchDecl
@@ -512,8 +555,9 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return lp.parseLoop(tokens, line)
 	case tokens[0].kind == tokenIdent && (tokens[0].text == "break" || tokens[0].text == "continue"):
 		return lp.parseJump(tokens, line)
-	case tokens[0].kind == tokenIdent && tokens[0].text == "func" && len(tokens) >= 2 && tokens[1].kind == tokenIdent:
-		// `func name(params) {` — the story 07 declaration form. `func (`
+	case tokens[0].kind == tokenIdent && tokens[0].text == "func" && len(tokens) >= 2 && (tokens[1].kind == tokenIdent || isPunct(tokens[1], "*")):
+		// `func name(params) {` — the story 07 declaration form; `func *`
+		// opens the story 39 pointer-receiver method form. `func (`
 		// without a name stays a closure literal and is rejected below by
 		// the call-statement path.
 		return lp.parseFunctionDecl(tokens, line)
@@ -578,6 +622,12 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return lp.parseCallStatement(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "type":
 		return lp.parseTypeDecl(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "interface":
+		// Story 39 (RFC-004 §6.1.1): the nominal interface declaration.
+		return lp.parseInterfaceDecl(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "impl":
+		// Story 39 (RFC-004 §6.1.3): the explicit conformance statement.
+		return lp.parseImplDecl(tokens, line)
 	case tokens[0].kind == tokenIdent && len(tokens) >= 2 && isPunct(tokens[1], ".") && hasTopLevelAssign(tokens):
 		return lp.parseFieldAssignment(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "else":
@@ -629,15 +679,26 @@ func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statem
 		return Statement{}, newError(UnsupportedSyntax, name.start, "invalid function name")
 	}
 	method := ""
+	methodPointer := false
 	params := 2
 	if len(tokens) >= 4 && isPunct(tokens[2], ".") {
 		// `func T.name(params) …` - the method form; the receiver type stays
-		// raw text (the flat method table resolves by name alone).
+		// raw text (the per-type method set resolves calls, story 39).
 		m := tokens[3]
 		if m.kind != tokenIdent || m.text == "_" || reservedWords[m.text] {
 			return Statement{}, newError(UnsupportedSyntax, m.start, "invalid method name")
 		}
 		method, name, params = tokens[1].text, m, 4
+	} else if len(tokens) >= 5 && isPunct(tokens[1], "*") && isPunct(tokens[3], ".") {
+		// Story 39 (RFC-004 §6.2.1): `func *T.name(params) …` - the
+		// pointer-receiver spelling; the receiver kind feeds the method
+		// set (impl for T requires value receivers).
+		m := tokens[4]
+		if m.kind != tokenIdent || m.text == "_" || reservedWords[m.text] {
+			return Statement{}, newError(UnsupportedSyntax, m.start, "invalid method name")
+		}
+		methodPointer = true
+		method, name, params = tokens[2].text, m, 5
 	}
 	if params >= len(tokens) || !isPunct(tokens[params], "(") {
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "function declaration requires a parameter list")
@@ -656,6 +717,7 @@ func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statem
 		Kind:           Function,
 		Names:          []string{name.text},
 		Method:         method,
+		MethodPointer:  methodPointer,
 		HasResult:      cl.HasResult,
 		ResultNullable: cl.ResultNullable,
 		Closure:        &cl,
@@ -1428,7 +1490,7 @@ type token struct {
 	start, end int // absolute byte offsets
 }
 
-var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true}
+var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true, "interface": true, "impl": true}
 
 // isStatementKeyword reports words rejected in expression and condition
 // positions. `in` is contextual: it is only recognized in a loop header
@@ -1994,6 +2056,100 @@ func parseResultList(tokens []token, open int) ([]*TypeExpr, int, *Error) {
 		return nil, 0, newError(UnsupportedSyntax, last.Span.Start, "result list requires a trailing error? in this slice")
 	}
 	return list, closeIdx + 1, nil
+}
+
+// parseInterfaceDecl parses `interface Name {` plus the signature block
+// (story 39, RFC-004 §6.1.1): each body line is `name(params) [result]`,
+// the `}` line closes. Zero-method interfaces are valid; duplicate method
+// names reject at the parse level (§6.1.6 structural).
+func (lp *lineParser) parseInterfaceDecl(tokens []token, line sourceLine) (Statement, error) {
+	if len(tokens) < 2 || tokens[1].kind != tokenIdent || tokens[1].text == "_" || reservedWords[tokens[1].text] {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "invalid interface name")
+	}
+	if len(tokens) < 3 || !isPunct(tokens[2], "{") {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "interface declaration requires `{`")
+	}
+	decl := &InterfaceDecl{Name: tokens[1].text, Span: Span{Start: tokens[0].start}}
+	seen := map[string]bool{}
+	lp.pos++
+	for {
+		if lp.pos >= len(lp.lines) {
+			return Statement{}, newError(UnsupportedSyntax, lp.lines[len(lp.lines)-1].offset, "missing closing }")
+		}
+		sigLine := lp.lines[lp.pos]
+		if sigLine.text == "" || strings.HasPrefix(sigLine.text, "//") {
+			lp.pos++
+			continue
+		}
+		if sigLine.text == "}" {
+			lp.pos++
+			decl.Span.End = sigLine.offset + len(sigLine.text)
+			return Statement{Kind: Interface, Names: []string{decl.Name}, Interface: decl, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}, nil
+		}
+		sigTokens, terr := tokenize(sigLine.raw, sigLine.offset)
+		if terr != nil {
+			return Statement{}, terr
+		}
+		method, merr := parseInterfaceMethod(sigTokens, sigLine)
+		if merr != nil {
+			return Statement{}, merr
+		}
+		if seen[method.Name] {
+			return Statement{}, newError(UnsupportedSyntax, method.Span.Start, "duplicate interface method "+method.Name)
+		}
+		seen[method.Name] = true
+		decl.Methods = append(decl.Methods, method)
+		lp.pos++
+	}
+}
+
+// parseInterfaceMethod parses one signature line `name(params) [result]`.
+func parseInterfaceMethod(tokens []token, line sourceLine) (InterfaceMethod, *Error) {
+	if len(tokens) < 2 || tokens[0].kind != tokenIdent || tokens[0].text == "_" || reservedWords[tokens[0].text] {
+		return InterfaceMethod{}, newError(UnsupportedSyntax, listEnd(tokens), "interface method requires a name")
+	}
+	if !isPunct(tokens[1], "(") {
+		return InterfaceMethod{}, newError(UnsupportedSyntax, tokens[1].start, "interface method requires a parameter list")
+	}
+	i, params, err := parseClosureParamGroups(tokens, 1, line)
+	if err != nil {
+		return InterfaceMethod{}, err
+	}
+	m := InterfaceMethod{Name: tokens[0].text, Params: params, Span: Span{Start: tokens[0].start, End: listEnd(tokens)}}
+	if i < len(tokens) {
+		typeExpr, typeErr := parseType(tokens[i:])
+		if typeErr != nil {
+			return InterfaceMethod{}, typeErr
+		}
+		m.HasResult = true
+		m.ResultNullable = typeExpr.Nullable
+		m.ResultTypeExpr = typeExpr
+	}
+	return m, nil
+}
+
+// parseImplDecl parses the conformance statement `impl Iface for [*]Type`
+// (story 39, RFC-004 §6.1.3): no body - the statement only asserts that
+// the target type's method set satisfies the interface.
+func (lp *lineParser) parseImplDecl(tokens []token, line sourceLine) (Statement, error) {
+	if len(tokens) < 2 || tokens[1].kind != tokenIdent || tokens[1].text == "_" || reservedWords[tokens[1].text] {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "impl requires `impl Iface for Type`")
+	}
+	if len(tokens) < 4 || tokens[2].kind != tokenIdent || tokens[2].text != "for" {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "impl requires `impl Iface for Type`")
+	}
+	pointer := false
+	ti := 3
+	if isPunct(tokens[ti], "*") {
+		pointer = true
+		ti++
+	}
+	if ti != len(tokens)-1 || tokens[ti].kind != tokenIdent || tokens[ti].text == "_" || reservedWords[tokens[ti].text] {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "impl target must be a named type")
+	}
+	decl := &ImplDecl{Interface: tokens[1].text, Type: tokens[ti].text, Pointer: pointer, Span: Span{Start: tokens[0].start, End: listEnd(tokens)}}
+	lp.pos++
+	return Statement{Kind: Impl, Names: []string{tokens[1].text}, Impl: decl, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}, nil
 }
 
 // parseClosureParamGroups parses the parenthesized parameter list of a

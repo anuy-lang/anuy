@@ -79,6 +79,12 @@ var (
 	IgnoredErrorDescriptor               = register(IgnoredError, "ANUY6006", SeverityError)               // RFC-005 §8.1.1 (D-1)
 	NilArmOnNonNullEnumDescriptor        = register(NilArmOnNonNullEnum, "ANUY4010", SeverityError)        // RFC-006 §6.5.3
 
+	// Interfaces/impl block (7xxx).
+	InterfaceMethodMissingDescriptor  = register(InterfaceMethodMissing, "ANUY7001", SeverityError)  // RFC-004 §6.1.3
+	InterfaceMethodMismatchDescriptor = register(InterfaceMethodMismatch, "ANUY7002", SeverityError) // RFC-004 §6.1.3
+	DuplicateImplDescriptor           = register(DuplicateImpl, "ANUY7003", SeverityError)           // RFC-004 §6.5.1
+	ImplUnknownInterfaceDescriptor    = register(ImplUnknownInterface, "ANUY7004", SeverityError)    // RFC-004 §6.1.3
+
 	// Lint block (5xxx): advisory analyzers.
 	UncheckedErrorDescriptor = register(UncheckedError, "ANUY5001", SeverityWarning) // R1
 )
@@ -116,6 +122,10 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		MixedReturnDescriptor,
 		UnavailableSuccessResultDescriptor,
 		IgnoredErrorDescriptor,
+		InterfaceMethodMissingDescriptor,
+		InterfaceMethodMismatchDescriptor,
+		DuplicateImplDescriptor,
+		ImplUnknownInterfaceDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -176,6 +186,10 @@ var catalog = map[Code]string{
 	"ANUY6004": "mixed return is neither a success nor a failure form",
 	"ANUY6005": "success result is not available before the controlling error is proven nil",
 	"ANUY6006": "fallible result is ignored; handle it, propagate with try, or discard explicitly",
+	"ANUY7001": "impl target does not provide an interface method",
+	"ANUY7002": "interface method signature does not match the target method",
+	"ANUY7003": "duplicate impl for the same interface and target type",
+	"ANUY7004": "impl references an undeclared interface",
 	"ANUY5001": "error value is not checked",
 }
 
