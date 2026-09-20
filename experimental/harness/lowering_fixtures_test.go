@@ -51,6 +51,7 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"error-try.anuy", "if err := Log(\"done\"); err != nil {", true},
 		{"error-strict-fallible.anuy", "func Load(path string, cause error) (Data, error) {", true},
 		{"error-correlation.anuy", "data, err := LoadData(path)", true},
+		{"error-discard.anuy", "Log(\"done\")", true},
 		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
 		{"native-nil-map.anuy", "var m map[string]User", true},
 		{"native-nil-error.anuy", "var err error", true},

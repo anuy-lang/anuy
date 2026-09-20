@@ -1064,3 +1064,15 @@ func TestLowerFallibleDestructuring(t *testing.T) {
 		}
 	}
 }
+
+func TestLowerDiscardStatement(t *testing.T) {
+	// Story 37 (RFC-005 §6.6.2): the discarded call lowers verbatim - Go
+	// discards return values naturally, the flag is a source-level intent.
+	got, err := Lower("func Log(msg string) error? {\nreturn nil\n}\nfunc Save() error? {\ndiscard Log(\"done\")\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\tLog(\"done\")\n") {
+		t.Fatalf("Lower() = %q, wants the verbatim call", got)
+	}
+}

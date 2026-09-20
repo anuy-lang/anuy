@@ -76,6 +76,7 @@ var (
 	InvalidTryDescriptor                 = register(InvalidTry, "ANUY6003", SeverityError)                 // RFC-005 §8.1.2 (D-2)
 	MixedReturnDescriptor                = register(MixedReturn, "ANUY6004", SeverityError)                // RFC-005 §8.1.7 (D-7)
 	UnavailableSuccessResultDescriptor   = register(UnavailableSuccessResult, "ANUY6005", SeverityError)   // RFC-005 §8.1.4 (D-4)
+	IgnoredErrorDescriptor               = register(IgnoredError, "ANUY6006", SeverityError)               // RFC-005 §8.1.1 (D-1)
 	NilArmOnNonNullEnumDescriptor        = register(NilArmOnNonNullEnum, "ANUY4010", SeverityError)        // RFC-006 §6.5.3
 
 	// Lint block (5xxx): advisory analyzers.
@@ -114,6 +115,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		InvalidTryDescriptor,
 		MixedReturnDescriptor,
 		UnavailableSuccessResultDescriptor,
+		IgnoredErrorDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -173,6 +175,7 @@ var catalog = map[Code]string{
 	"ANUY6003": "try requires a call with a trailing error? result",
 	"ANUY6004": "mixed return is neither a success nor a failure form",
 	"ANUY6005": "success result is not available before the controlling error is proven nil",
+	"ANUY6006": "fallible result is ignored; handle it, propagate with try, or discard explicitly",
 	"ANUY5001": "error value is not checked",
 }
 

@@ -44,6 +44,8 @@ var approvedScheme = []struct {
 	{"MixedReturn", "ANUY6004", SeverityError},
 	// Story 36 (RFC-005 §8.1.4): conditional correlation.
 	{"UnavailableSuccessResult", "ANUY6005", SeverityError},
+	// Story 37 (RFC-005 §8.1.1): must-consume.
+	{"IgnoredError", "ANUY6006", SeverityError},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 

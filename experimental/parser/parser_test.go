@@ -1626,3 +1626,39 @@ func TestParseFallibleDestructuring(t *testing.T) {
 		t.Fatalf("values = %#v, want the single call value", body[0].Values)
 	}
 }
+
+func TestParseDiscardStatement(t *testing.T) {
+	// Story 37 (RFC-005 §6.6.2): the explicit-ignore form - the Discard
+	// flag rides on the call statement shape; `discard` without a call
+	// rejects, and `discard()` stays a call of a binding named discard.
+	program, err := Parse("func F() {\ndiscard Close()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := program.Statements[0].Closure.Body
+	if len(body) != 1 || body[0].Kind != Call || !body[0].Discard || body[0].Call == nil || body[0].Call.Receiver != "Close" {
+		t.Fatalf("body = %+v, want a discarded Close call", body)
+	}
+	method, err := Parse("func F() {\ndiscard obj.Close(\"x\")\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mBody := method.Statements[0].Closure.Body
+	if len(mBody) != 1 || !mBody[0].Discard || mBody[0].Call == nil || len(mBody[0].Call.Segments) != 1 {
+		t.Fatalf("method body = %+v, want a discarded method call", mBody)
+	}
+	if _, err := Parse("func F() {\ndiscard value\n}\n"); err == nil {
+		t.Fatal("discard of a non-call accepted")
+	}
+	if _, err := Parse("func F() {\ndiscard\n}\n"); err == nil {
+		t.Fatal("bare discard accepted")
+	}
+	call, err := Parse("func F() {\ndiscard()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cBody := call.Statements[0].Closure.Body
+	if len(cBody) != 1 || cBody[0].Kind != Call || cBody[0].Discard || cBody[0].Call == nil || cBody[0].Call.Receiver != "discard" {
+		t.Fatalf("cBody = %+v, want a call of the binding named discard", cBody)
+	}
+}

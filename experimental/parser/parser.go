@@ -326,6 +326,10 @@ type Statement struct {
 	// enclosing fallible function (kernel: ANUY6001, D-2). Values holds
 	// the call arguments.
 	TryCall *NavigationExpr
+	// Discard marks the explicit-ignore form `discard <call>` (story 37,
+	// RFC-005 §6.6.2): the call's effects apply, its error result is
+	// intentionally ignored - no D-1 (kernel).
+	Discard bool
 	// Target is non-nil for a field-mutation assignment `u.f = expr`
 	// (story 22, RFC-014 §6.7): an ordinary single-field navigation path;
 	// Names stays empty.
@@ -528,6 +532,21 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 			return Statement{}, err
 		}
 		statement.Kind = Try
+		return statement, nil
+	case tokens[0].kind == tokenIdent && tokens[0].text == "discard" && !(len(tokens) >= 2 && isPunct(tokens[1], "(")):
+		// Story 37 (RFC-005 §6.6.2): the explicit-ignore form
+		// `discard <call>` - the call plus the programmer's intent to drop
+		// every result. `discard(` stays a call of a binding named
+		// discard (the `try` contextual-keyword precedent), so the case
+		// requires the next token to open a call chain.
+		if len(tokens) < 2 || !isCallStatementStart(tokens[1:]) {
+			return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "discard requires a call")
+		}
+		statement, err := lp.parseCallStatement(tokens[1:], line)
+		if err != nil {
+			return Statement{}, err
+		}
+		statement.Discard = true
 		return statement, nil
 	case tokens[0].kind == tokenIdent && tokens[0].text == "return":
 		// `return` is a contextual keyword in statement position (the `in`

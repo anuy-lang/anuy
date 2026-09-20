@@ -137,6 +137,10 @@ const (
 	// 36, D-4): a destructured success result read before the controlling
 	// error is proven nil.
 	UnavailableSuccessResult DiagnosticCategory = "UnavailableSuccessResult"
+	// IgnoredError is the RFC-005 §6.6/§8.1.1 category (story 37, D-1):
+	// a fallible call statement silently drops its error result, or a
+	// blank error target bypasses must-consume (§6.6.5).
+	IgnoredError DiagnosticCategory = "IgnoredError"
 )
 
 // SourceSpan locates a diagnostic in the source text.

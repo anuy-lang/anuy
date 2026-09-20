@@ -1604,6 +1604,12 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		bindingTypes: map[semantic.BindingID]string{},
 		funcParams:   b.funcParams,
 		funcResults:  b.funcResults,
+		// Story 37: the method table is shared too - D-1/D-3 and purity
+		// for method calls inside a function body resolve the methods
+		// declared before the enclosing one (same rationale as
+		// funcResults in story 35).
+		methods:       b.methods,
+		methodMutates: b.methodMutates,
 		// Story 36: correlation does not cross the closure boundary (the
 		// guard-kill-in-captures question is a follow-up) - the body
 		// starts with no conditional bindings; terminated tracking is
@@ -1681,6 +1687,14 @@ func unionBindings(existing, added []semantic.BindingID) []semantic.BindingID {
 // annotated `//anuy:pure` callee applies no mutator set (trusted contract).
 func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 	call := statement.Call
+	// Story 37 (RFC-005 §6.6.1, D-1): a call statement silently drops its
+	// error result. `discard` is the explicit opt-out (§6.6.2); `try`
+	// propagates instead of ignoring (story 34) - neither reports.
+	if !statement.Discard && statement.Kind != parser.Try {
+		if res, ok := b.calleeResults(call); ok && res.fallible {
+			b.report(semantic.IgnoredError, statement.Span)
+		}
+	}
 	// A bare-identifier argument is a read (D-01): unresolved, it reports
 	// exactly one UnknownRead per name. Compound and navigation arguments
 	// keep the readIdents tolerance - unresolved idents there stay invisible
@@ -2045,7 +2059,13 @@ func (b *builder) emitVarDestructuring(statement *parser.Statement, scope *seman
 	}
 	errID := semantic.BindingID(0)
 	errName := statement.Names[len(statement.Names)-1]
-	if errName != "_" {
+	if errName == "_" {
+		// Story 37 (RFC-005 §6.6.5, D-1): blank does not bypass
+		// must-consume - the error result is silently dropped. The value
+		// bindings turn dead-guard correlated: data exists on no path,
+		// reads report D-4, no later proof can materialize them.
+		b.report(semantic.IgnoredError, statement.Span)
+	} else {
 		if serr := scope.Declare(errName); serr != nil {
 			b.report(serr.Category, statement.Span)
 			return false
@@ -2087,10 +2107,10 @@ func (b *builder) emitVarDestructuring(statement *parser.Statement, scope *seman
 	}
 	// Entries register after the guard exists and is initialized:
 	// initialize() kills dependents (§6.3.6) and must not fire here.
+	// A blank error target leaves errID = 0 (story 37, §6.6.5) - the
+	// dead guard keeps reads reporting D-4 and never materializes.
 	for _, id := range targets {
-		if errID != 0 {
-			b.correlated[id] = errID
-		}
+		b.correlated[id] = errID
 	}
 	return true
 }

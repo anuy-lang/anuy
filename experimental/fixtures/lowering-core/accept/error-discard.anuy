@@ -1,0 +1,7 @@
+func Log(msg string) error? {
+return nil
+}
+func Save() error? {
+discard Log("done")
+return nil
+}

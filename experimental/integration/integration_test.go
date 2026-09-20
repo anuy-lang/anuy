@@ -2130,3 +2130,66 @@ func TestAnalyzeSourceConditionalCorrelation(t *testing.T) {
 		t.Fatalf("elseSuccess = %#v, want no diagnostics (else is the success side)", elseSuccess.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceMustConsumeDiscard(t *testing.T) {
+	// Story 37 (RFC-005 §6.6, §8.1.1, D-1): a fallible call statement
+	// silently drops its error result; `discard` and `try` are the
+	// explicit opt-outs; blank error targets bypass must-consume (§6.6.5).
+	base := "func Close() error? {\nreturn nil\n}\nfunc Save() {\n}\ntype Data struct {\nid int\n}\nfunc LoadData(path string) (Data, error?) {\nvar d = Data{id: 1}\nreturn d, nil\n}\n"
+	ignored, err := AnalyzeSource(base + "func F() {\nClose()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ignored.Diagnostics) != 1 || string(ignored.Diagnostics[0].Category) != "IgnoredError" {
+		t.Fatalf("ignored = %#v, want one IgnoredError (§6.6.1)", ignored.Diagnostics)
+	}
+	discarded, err := AnalyzeSource(base + "func F() {\ndiscard Close()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discarded.Diagnostics) != 0 {
+		t.Fatalf("discarded = %#v, want no diagnostics (§6.6.2)", discarded.Diagnostics)
+	}
+	tryForm, err := AnalyzeSource(base + "func F() error? {\ntry Close()\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tryForm.Diagnostics) != 0 {
+		t.Fatalf("tryForm = %#v, want no diagnostics", tryForm.Diagnostics)
+	}
+	nonFallible, err := AnalyzeSource(base + "func F() {\nSave()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nonFallible.Diagnostics) != 0 {
+		t.Fatalf("nonFallible = %#v, want no diagnostics", nonFallible.Diagnostics)
+	}
+	strictCall, err := AnalyzeSource(base + "func F() {\nLoadData(\"x\")\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strictCall.Diagnostics) != 1 || string(strictCall.Diagnostics[0].Category) != "IgnoredError" {
+		t.Fatalf("strictCall = %#v, want one IgnoredError (§6.6.1)", strictCall.Diagnostics)
+	}
+	blankError, err := AnalyzeSource(base + "func F() {\nvar data, _ = LoadData(\"x\")\nvar e = data\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blankError.Diagnostics) != 2 || string(blankError.Diagnostics[0].Category) != "IgnoredError" || string(blankError.Diagnostics[1].Category) != "UnavailableSuccessResult" {
+		t.Fatalf("blankError = %#v, want IgnoredError + UnavailableSuccessResult (§6.6.5)", blankError.Diagnostics)
+	}
+	blankSuccess, err := AnalyzeSource(base + "func F() {\nvar _, err = LoadData(\"x\")\nif err != nil {\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blankSuccess.Diagnostics) != 0 {
+		t.Fatalf("blankSuccess = %#v, want no diagnostics", blankSuccess.Diagnostics)
+	}
+	methodIgnored, err := AnalyzeSource(base + "type Server struct {\n}\nfunc Server.Stop() error? {\nreturn nil\n}\nfunc F() {\nvar s = Server{}\ns.Stop()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(methodIgnored.Diagnostics) != 1 || string(methodIgnored.Diagnostics[0].Category) != "IgnoredError" {
+		t.Fatalf("methodIgnored = %#v, want one IgnoredError", methodIgnored.Diagnostics)
+	}
+}
