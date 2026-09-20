@@ -38,6 +38,10 @@ var approvedScheme = []struct {
 	{"UnknownMatchVariant", "ANUY4009", SeverityError},
 	{"NilArmOnNonNullEnum", "ANUY4010", SeverityError},
 	{"PropagationOutsideFallible", "ANUY6001", SeverityError},
+	// Story 35 (RFC-005 §8.1): the strict fallible diagnostics block.
+	{"InvalidFailureReturn", "ANUY6002", SeverityError},
+	{"InvalidTry", "ANUY6003", SeverityError},
+	{"MixedReturn", "ANUY6004", SeverityError},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 

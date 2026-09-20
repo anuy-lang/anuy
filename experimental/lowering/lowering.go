@@ -80,6 +80,17 @@ type lowerer struct {
 	// result is tagged, empty for native-nil and non-null results (raw
 	// returns). Save/restored around each body.
 	returnCarrierElem string
+	// returnTypes/returnElems are the per-position result contexts of a
+	// result-list declaration (story 35, RFC-005 §6.2.3): the Go type per
+	// position drives the failure padding slots (RFC-009 §6.6.3–6.6.5),
+	// the carrier element the success-return conversions (empty = raw).
+	// Both save/restored around each body.
+	returnTypes []string
+	returnElems []string
+	// temps mints fresh synthetic names (`__anuy_errN`, `__anuy_vN`,
+	// `__anuy_padN`) for try temporaries and padding slots - collision
+	// free across one program (RFC-009 §6.6.6 naming).
+	temps int
 }
 
 func (l *lowerer) statements(body *strings.Builder, statements []parser.Statement) (string, error) {
@@ -88,6 +99,18 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 		names := strings.Join(statement.Names, ", ")
 		switch statement.Kind {
 		case parser.Var:
+			if statement.TryCall != nil {
+				// Story 35 (RFC-005 §6.5.1–6.5.2, RFC-009 §6.6.6): the
+				// value-try declaration - call temporaries, the immediate
+				// propagation branch, then the plain binding of each
+				// success value (definitely initialized on the success
+				// path, §6.9.2).
+				if err := l.tryDecl(body, &statement); err != nil {
+					return "", err
+				}
+				last = ""
+				continue
+			}
 			typeText := ""
 			var carrierElem string
 			if statement.TypeExpr != nil {
@@ -360,9 +383,40 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 			// Story 16: `return expr` exists only inside a function body
 			// with a declared result (the parser funcStack); the conversion
 			// follows the result representation. A bare return stays
-			// verbatim in every shape.
+			// verbatim in every shape. Story 35 (RFC-005 §6.4.2,
+			// RFC-009 §6.6.3–6.6.5): the failure form in a strict fallible
+			// function materializes one padding slot per success result;
+			// story 35 §6.4.1 adds the multi-value success return with
+			// per-position conversions.
 			if len(statement.Values) == 0 {
 				body.WriteString("\treturn\n")
+			} else if statement.ErrorReturn && len(l.returnTypes) > 1 {
+				operand, err := l.value(statement.Values[0])
+				if err != nil {
+					return "", err
+				}
+				pads := make([]string, 0, len(l.returnTypes)-1)
+				for i := 0; i < len(l.returnTypes)-1; i++ {
+					pad := fmt.Sprintf("__anuy_pad%d", l.temps)
+					l.temps++
+					fmt.Fprintf(body, "\tvar %s %s\n", pad, l.returnTypes[i])
+					pads = append(pads, pad)
+				}
+				fmt.Fprintf(body, "\treturn %s, %s\n", strings.Join(pads, ", "), operand)
+			} else if len(l.returnElems) > 1 {
+				parts := make([]string, 0, len(statement.Values))
+				for i, value := range statement.Values {
+					elem := ""
+					if i < len(l.returnElems) {
+						elem = l.returnElems[i]
+					}
+					text, err := l.convert(value, elem)
+					if err != nil {
+						return "", err
+					}
+					parts = append(parts, text)
+				}
+				fmt.Fprintf(body, "\treturn %s\n", strings.Join(parts, ", "))
 			} else {
 				text, err := l.convert(statement.Values[0], l.returnCarrierElem)
 				if err != nil {
@@ -386,6 +440,66 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 		}
 	}
 	return last, nil
+}
+
+// tryDecl lowers the value-try declaration `var v = try F(x)` (story 35,
+// RFC-005 §6.5.1–6.5.2) to the §6.6.6 golden shape: call temporaries, the
+// immediate propagation branch (padding slots in a strict fallible
+// function, RFC-009 §6.6.3–6.6.5), then the plain binding of each success
+// value. Exactly-once evaluation survives through the temporaries
+// (§6.6.7); the synthetic `__anuy_` names cannot collide with source
+// bindings.
+func (l *lowerer) tryDecl(body *strings.Builder, statement *parser.Statement) error {
+	call := statement.TryCall
+	args := make([]string, 0, len(statement.Values))
+	for _, value := range statement.Values {
+		text, err := l.value(value)
+		if err != nil {
+			return err
+		}
+		args = append(args, text)
+	}
+	expr := call.Receiver
+	for _, segment := range call.Segments {
+		expr += "." + segment.Name
+	}
+	errTmp := fmt.Sprintf("__anuy_err%d", l.temps)
+	l.temps++
+	vtemps := make([]string, 0, len(statement.Names))
+	lhs := make([]string, 0, len(statement.Names)+1)
+	for range statement.Names {
+		vtmp := fmt.Sprintf("__anuy_v%d", l.temps)
+		l.temps++
+		vtemps = append(vtemps, vtmp)
+		lhs = append(lhs, vtmp)
+	}
+	lhs = append(lhs, errTmp)
+	fmt.Fprintf(body, "\t%s := %s(%s)\n", strings.Join(lhs, ", "), expr, strings.Join(args, ", "))
+	if len(l.returnTypes) > 1 {
+		// Strict fallible enclosing function: the propagation branch
+		// materializes one padding slot per success result.
+		body.WriteString("\tif " + errTmp + " != nil {\n")
+		pads := make([]string, 0, len(l.returnTypes)-1)
+		for i := 0; i < len(l.returnTypes)-1; i++ {
+			pad := fmt.Sprintf("__anuy_pad%d", l.temps)
+			l.temps++
+			fmt.Fprintf(body, "\t\tvar %s %s\n", pad, l.returnTypes[i])
+			pads = append(pads, pad)
+		}
+		fmt.Fprintf(body, "\t\treturn %s, %s\n", strings.Join(pads, ", "), errTmp)
+		body.WriteString("\t}\n")
+	} else {
+		// Error-only enclosing function (§6.5.3): the propagated error is
+		// the whole result.
+		fmt.Fprintf(body, "\tif %s != nil {\n\t\treturn %s\n\t}\n", errTmp, errTmp)
+	}
+	for i, name := range statement.Names {
+		if name == "_" {
+			continue
+		}
+		fmt.Fprintf(body, "\t%s := %s\n", name, vtemps[i])
+	}
+	return nil
 }
 
 // fieldMutation lowers `u.f = expr` verbatim (story 22, RFC-014 §6.13):
@@ -632,7 +746,19 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 		b.WriteString(p.Name + " " + typeText)
 	}
 	b.WriteString(")")
-	if statement.HasResult && cl.ResultTypeExpr != nil {
+	if len(cl.ResultList) > 0 {
+		// Story 35 (RFC-005 §6.2.3, RFC-009 §6.6.2): the strict fallible
+		// Go ABI - one Go result per declared position, trailing `error`.
+		parts := make([]string, 0, len(cl.ResultList))
+		for _, t := range cl.ResultList {
+			text, err := l.goType(t)
+			if err != nil {
+				return err
+			}
+			parts = append(parts, text)
+		}
+		b.WriteString(" (" + strings.Join(parts, ", ") + ")")
+	} else if statement.HasResult && cl.ResultTypeExpr != nil {
 		text, err := l.goType(cl.ResultTypeExpr)
 		if err != nil {
 			return err
@@ -641,16 +767,38 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 	}
 	b.WriteString(" {\n")
 	saved := l.returnCarrierElem
-	if statement.HasResult && cl.ResultTypeExpr != nil {
+	savedTypes, savedElems := l.returnTypes, l.returnElems
+	if len(cl.ResultList) > 0 {
+		// Story 35: per-position conversion context - the Go type drives
+		// the failure padding, the carrier element the success-return
+		// conversions (empty string = raw position, e.g. the trailing
+		// error).
+		for _, t := range cl.ResultList {
+			text, err := l.goType(t)
+			if err != nil {
+				l.returnCarrierElem = saved
+				l.returnTypes, l.returnElems = savedTypes, savedElems
+				return err
+			}
+			elem := ""
+			if carrierElem, ok := l.carrier(t); ok {
+				elem = carrierElem
+			}
+			l.returnTypes = append(l.returnTypes, text)
+			l.returnElems = append(l.returnElems, elem)
+		}
+	} else if statement.HasResult && cl.ResultTypeExpr != nil {
 		if elem, ok := l.carrier(cl.ResultTypeExpr); ok {
 			l.returnCarrierElem = elem
 		}
 	}
 	if _, err := l.statements(&b, cl.Body); err != nil {
 		l.returnCarrierElem = saved
+		l.returnTypes, l.returnElems = savedTypes, savedElems
 		return err
 	}
 	l.returnCarrierElem = saved
+	l.returnTypes, l.returnElems = savedTypes, savedElems
 	b.WriteString("}\n")
 	decls.WriteString(b.String() + "\n")
 	return nil

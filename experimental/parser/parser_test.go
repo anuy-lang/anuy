@@ -1551,3 +1551,61 @@ func TestParseDeepFieldMutationSafeSegmentRejected(t *testing.T) {
 		t.Fatalf("err = %v, want safe target reject", err)
 	}
 }
+
+func TestParseResultList(t *testing.T) {
+	// Story 35 (RFC-005 §6.2.3): the strict fallible signature
+	// `(Data, error?)` - the list parses positionally, the trailing
+	// element mirrors the single-result fields, and the multi-value
+	// success return `return d, nil` fits the declared count (§6.4.1).
+	program, err := Parse("func Load() (Data, error?) {\nreturn d, nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := program.Statements[0].Closure
+	if len(cl.ResultList) != 2 || cl.ResultList[0].Name != "Data" || cl.ResultList[0].Nullable {
+		t.Fatalf("ResultList = %+v, want (Data, error?)", cl.ResultList)
+	}
+	if cl.ResultList[1].Name != "error" || !cl.ResultList[1].Nullable {
+		t.Fatalf("trailing = %+v, want error?", cl.ResultList[1])
+	}
+	if !cl.HasResult || !cl.ResultNullable {
+		t.Fatalf("mirror fields = (%v, %v), want (true, true)", cl.HasResult, cl.ResultNullable)
+	}
+	body := program.Statements[0].Closure.Body
+	if len(body) != 1 || body[0].Kind != Return || len(body[0].Values) != 2 {
+		t.Fatalf("body = %+v, want a two-value return", body)
+	}
+}
+
+func TestParseResultListRequiresTrailingError(t *testing.T) {
+	// §6.2.4 slice gate: only the fallible shape parses - non-fallible
+	// lists and unusual shapes `(error?, int)` reject at the parse layer.
+	if _, err := Parse("func F() (A, B) {\nreturn a, b\n}\n"); err == nil {
+		t.Fatal("non-fallible result list accepted")
+	}
+	if _, err := Parse("func F() (error?, int) {\nreturn e, 1\n}\n"); err == nil {
+		t.Fatal("unusual result shape accepted")
+	}
+	if _, err := Parse("func F() (Data, error?) {\nreturn d\n}\n"); err == nil {
+		t.Fatal("return arity mismatch accepted")
+	}
+}
+
+func TestParseValueTry(t *testing.T) {
+	// Story 35 (RFC-005 §6.5.1–6.5.2): the value-try declaration - single
+	// and multi-name forms carry the operand call and its arguments.
+	program, err := Parse("func F() (Data, error?) {\nvar d = try Load(\"x\")\nvar a, b = try Op()\nreturn d, nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := program.Statements[0].Closure.Body
+	if len(body) != 3 || body[0].Kind != Var || body[0].TryCall == nil {
+		t.Fatalf("body = %+v, want a value-try declaration", body)
+	}
+	if body[0].TryCall.Receiver != "Load" || len(body[0].Names) != 1 || body[0].Values[0].Text != "\"x\"" {
+		t.Fatalf("try = %+v, want Load(\"x\") into one binding", body[0])
+	}
+	if body[1].TryCall == nil || body[1].TryCall.Receiver != "Op" || len(body[1].Names) != 2 {
+		t.Fatalf("try = %+v, want Op() into two bindings", body[1])
+	}
+}

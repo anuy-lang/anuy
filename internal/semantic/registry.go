@@ -72,6 +72,9 @@ var (
 	DuplicateMatchArmDescriptor          = register(DuplicateMatchArm, "ANUY4008", SeverityError)          // RFC-006 §6.3.5
 	UnknownMatchVariantDescriptor        = register(UnknownMatchVariant, "ANUY4009", SeverityError)        // RFC-006 §6.1
 	PropagationOutsideFallibleDescriptor = register(PropagationOutsideFallible, "ANUY6001", SeverityError) // RFC-005 §6.5.4
+	InvalidFailureReturnDescriptor       = register(InvalidFailureReturn, "ANUY6002", SeverityError)       // RFC-005 §8.1.5 (D-5)
+	InvalidTryDescriptor                 = register(InvalidTry, "ANUY6003", SeverityError)                 // RFC-005 §8.1.2 (D-2)
+	MixedReturnDescriptor                = register(MixedReturn, "ANUY6004", SeverityError)                // RFC-005 §8.1.7 (D-7)
 	NilArmOnNonNullEnumDescriptor        = register(NilArmOnNonNullEnum, "ANUY4010", SeverityError)        // RFC-006 §6.5.3
 
 	// Lint block (5xxx): advisory analyzers.
@@ -106,6 +109,9 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		UnknownMatchVariantDescriptor,
 		NilArmOnNonNullEnumDescriptor,
 		PropagationOutsideFallibleDescriptor,
+		InvalidFailureReturnDescriptor,
+		InvalidTryDescriptor,
+		MixedReturnDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -161,6 +167,9 @@ var catalog = map[Code]string{
 	"ANUY4009": "switch case is not a variant of the scrutinee's enum",
 	"ANUY4010": "nil arm on a non-null enum scrutinee is unreachable",
 	"ANUY6001": "propagation outside a fallible function",
+	"ANUY6002": "failure return requires a non-null error",
+	"ANUY6003": "try requires a call with a trailing error? result",
+	"ANUY6004": "mixed return is neither a success nor a failure form",
 	"ANUY5001": "error value is not checked",
 }
 

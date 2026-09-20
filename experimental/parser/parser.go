@@ -243,6 +243,13 @@ type Closure struct {
 	// ResultTypeExpr is the structural result type (story 16): lowering
 	// spells the carrier from it. Nil without a declared result.
 	ResultTypeExpr *TypeExpr
+	// ResultList is the parenthesized result list `(T1, …, Tn, error?)`
+	// (story 35, RFC-005 §6.2.3): non-empty only when the declaration
+	// spells one. HasResult/ResultNullable/ResultTypeExpr mirror the
+	// trailing element, so single-result consumers keep working; the list
+	// gate (trailing `error?`) is parse-level, fallibility stays a kernel
+	// verdict. Result-less and single-type declarations leave it empty.
+	ResultList []*TypeExpr
 }
 
 // Param is a closure parameter. Type preserves source spelling; TypeExpr is
@@ -313,6 +320,12 @@ type Statement struct {
 	// ErrorReturn marks the failure-return form `return error <expr>`
 	// (story 34, RFC-005 §6.4.2): the value is the propagated error.
 	ErrorReturn bool
+	// TryCall is non-nil for a value-try declaration `var v = try F(x)`
+	// (story 35, RFC-005 §6.5.1–6.5.2): Names receive the success results
+	// on the success path; the trailing `error?` propagates from the
+	// enclosing fallible function (kernel: ANUY6001, D-2). Values holds
+	// the call arguments.
+	TryCall *NavigationExpr
 	// Target is non-nil for a field-mutation assignment `u.f = expr`
 	// (story 22, RFC-014 §6.7): an ordinary single-field navigation path;
 	// Names stays empty.
@@ -362,12 +375,22 @@ type lineParser struct {
 	// It resets to zero inside closure literals: a jump never crosses a
 	// function boundary.
 	loopDepth int
-	// funcStack tracks declared result types of the enclosing
+	// funcStack tracks the declared results of the enclosing
 	// function/method bodies (story 08): `return expr` is valid only when
-	// the top frame carries a result. Closure-literal frames push false,
-	// so a `return expr` binds to the nearest declaration, never to an
-	// outer one.
-	funcStack []bool
+	// the top frame carries a result. Closure-literal frames push a
+	// result-less frame, so a `return expr` binds to the nearest
+	// declaration, never to an outer one. Since story 35 the frame also
+	// carries the result count (multi-value return arity, RFC-005 §6.4.1)
+	// and the parse-level fallibility spelling (trailing `error?`).
+	funcStack []returnFrame
+}
+
+// returnFrame is one funcStack entry: the enclosing declaration's result
+// shape as far as the parse layer knows it.
+type returnFrame struct {
+	hasResult bool
+	results   int
+	fallible  bool
 }
 
 func (lp *lineParser) parseStatements() ([]Statement, error) {
@@ -916,7 +939,9 @@ func (lp *lineParser) parseSwitchValue(tokens []token, start int, line sourceLin
 // parseReturn parses the `return` statement. The bare form is an early
 // exit of the enclosing function (story 07); `return expr` (story 08) is
 // valid only inside a declaration with a declared result type - the
-// funcStack frame of the nearest closure/function boundary decides.
+// funcStack frame of the nearest closure/function boundary decides. Since
+// story 35 (RFC-005 §6.4.1) a result list takes `return v1, …, nil`: the
+// value count must equal the declared result count (ANUY1006).
 func (lp *lineParser) parseReturn(tokens []token, line sourceLine) (Statement, error) {
 	if len(tokens) == 1 {
 		lp.pos++
@@ -928,9 +953,10 @@ func (lp *lineParser) parseReturn(tokens []token, line sourceLine) (Statement, e
 	if len(tokens) >= 2 && tokens[1].kind == tokenIdent && tokens[1].text == "error" {
 		// Story 34 (RFC-005 §6.4.2): the failure-return form
 		// `return error <expr>` - `error` is a contextual keyword in
-		// return position. Fallibility is a kernel check (ANUY6001).
+		// return position. Fallibility is a kernel check (ANUY6001). A
+		// binding spelled `error` cannot be returned bare (ADR-0009 §6).
 		if len(tokens) == 2 {
-			return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return error requires an error expression")
+			return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return error requires an error expression; rename the binding (convention: err) or write return error <expr>")
 		}
 		if len(lp.funcStack) == 0 {
 			return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return takes no value")
@@ -950,14 +976,24 @@ func (lp *lineParser) parseReturn(tokens []token, line sourceLine) (Statement, e
 			Span:        Span{Start: line.offset, End: line.offset + len(line.text)},
 		}, nil
 	}
-	if len(lp.funcStack) == 0 || !lp.funcStack[len(lp.funcStack)-1] {
+	frame := returnFrame{}
+	if len(lp.funcStack) > 0 {
+		frame = lp.funcStack[len(lp.funcStack)-1]
+	}
+	if len(lp.funcStack) == 0 || !frame.hasResult {
 		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return takes no value")
 	}
 	values, verr := parseValueList(tokens, 1, line)
 	if verr != nil {
 		return Statement{}, verr
 	}
-	if len(values) != 1 {
+	if frame.results > 1 {
+		// Story 35 (RFC-005 §6.4.1): `return v1, …, nil` - one value per
+		// declared result, the trailing one the error slot.
+		if len(values) != frame.results {
+			return Statement{}, newError(ArityMismatch, tokens[1].start, fmt.Sprintf("return takes %d values, got %d", frame.results, len(values)))
+		}
+	} else if len(values) != 1 {
 		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "return takes a single value")
 	}
 	lp.pos++
@@ -1636,6 +1672,21 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 			statement.Values = []Value{{Closure: &cl}}
 			return statement, nil
 		}
+		if len(tokens) > i+2 && tokens[i+1].kind == tokenIdent && tokens[i+1].text == "try" && tokens[i+2].kind == tokenIdent {
+			// Story 35 (RFC-005 §6.5.1–6.5.2): the value-try declaration
+			// `var v = try F(x)` - Names receive the success results on the
+			// success path; the trailing `error?` propagates. Fallibility
+			// of the enclosing function and of the callee is a kernel
+			// check (ANUY6001, D-2). parseCallStatement advances lp.pos
+			// past this line.
+			callStatement, cerr := lp.parseCallStatement(tokens[i+2:], line)
+			if cerr != nil {
+				return Statement{}, cerr
+			}
+			statement.TryCall = callStatement.Call
+			statement.Values = callStatement.Values
+			return statement, nil
+		}
 		values, verr := lp.parseRHS(tokens, i+1, line)
 		if verr != nil {
 			return Statement{}, verr
@@ -1796,38 +1847,58 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine, a
 	}
 	hasResult, resultNullable := false, false
 	var resultTypeExpr *TypeExpr
+	var resultList []*TypeExpr
+	resultCount := 0
+	frameFallible := false
 	if i < len(tokens) && !(tokens[i].kind == tokenPunct && tokens[i].text == "{") {
 		// An optional result type before the block (story 08 Q4-A, RFC-002
 		// §40 spelling: `func f() User? {`). Types carry no braces in this
-		// grammar, so the block opener terminates the type.
+		// grammar, so the block opener terminates the type. Story 35
+		// (RFC-005 §6.2.3): a `(` opens a result list `(T1, …, Tn, error?)`.
 		if !allowResult {
 			return Closure{}, newError(UnsupportedSyntax, tokens[i].start, "closure literal takes no result type")
 		}
-		j := i
-		for j < len(tokens) && !(tokens[j].kind == tokenPunct && tokens[j].text == "{") {
-			j++
+		if tokens[i].kind == tokenPunct && tokens[i].text == "(" {
+			list, closeIdx, listErr := parseResultList(tokens, i)
+			if listErr != nil {
+				return Closure{}, listErr
+			}
+			last := list[len(list)-1]
+			hasResult, resultNullable = true, last.Nullable
+			resultTypeExpr = last
+			resultList = list
+			resultCount = len(list)
+			frameFallible = true
+			i = closeIdx
+		} else {
+			j := i
+			for j < len(tokens) && !(tokens[j].kind == tokenPunct && tokens[j].text == "{") {
+				j++
+			}
+			if j >= len(tokens) {
+				return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
+			}
+			typeExpr, typeErr := parseType(tokens[i:j])
+			if typeErr != nil {
+				return Closure{}, typeErr
+			}
+			hasResult, resultNullable = true, typeExpr.Nullable
+			resultTypeExpr = typeExpr
+			resultCount = 1
+			frameFallible = typeExpr.Kind == NamedType && typeExpr.Name == "error" && typeExpr.Nullable
+			i = j
 		}
-		if j >= len(tokens) {
-			return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
-		}
-		typeExpr, typeErr := parseType(tokens[i:j])
-		if typeErr != nil {
-			return Closure{}, typeErr
-		}
-		hasResult, resultNullable = true, typeExpr.Nullable
-		resultTypeExpr = typeExpr
-		i = j
 	}
 	if i >= len(tokens) || tokens[i].kind != tokenPunct || tokens[i].text != "{" {
 		return Closure{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
 	}
-	cl := Closure{Params: params, HasResult: hasResult, ResultNullable: resultNullable, ResultTypeExpr: resultTypeExpr, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
+	cl := Closure{Params: params, HasResult: hasResult, ResultNullable: resultNullable, ResultTypeExpr: resultTypeExpr, ResultList: resultList, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
 	lp.pos++
 	// A closure body is a function boundary: loop depth does not carry in,
 	// and the result-type frame scopes `return expr` (story 08).
 	savedDepth := lp.loopDepth
 	lp.loopDepth = 0
-	lp.funcStack = append(lp.funcStack, hasResult)
+	lp.funcStack = append(lp.funcStack, returnFrame{hasResult: hasResult, results: resultCount, fallible: frameFallible})
 	body, berr := lp.parseBlock()
 	lp.funcStack = lp.funcStack[:len(lp.funcStack)-1]
 	lp.loopDepth = savedDepth
@@ -1836,6 +1907,74 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine, a
 	}
 	cl.Body = body
 	return cl, nil
+}
+
+// parseResultList parses the parenthesized result list `(T1, …, Tn)` whose
+// opening `(` is at index open (story 35, RFC-005 §6.2.3). It returns the
+// parsed types and the index just after the closing `)`. The slice gate
+// accepts only the fallible shape - the trailing element must be `error?`
+// (§6.2.4: unusual shapes like `(error?, int)` are not fallible signatures,
+// and non-fallible multi-result functions are RFC-003 work).
+func parseResultList(tokens []token, open int) ([]*TypeExpr, int, *Error) {
+	depth := 0
+	closeIdx := -1
+	for i := open; i < len(tokens); i++ {
+		t := tokens[i]
+		if t.kind != tokenPunct {
+			continue
+		}
+		if t.text == "(" {
+			depth++
+			continue
+		}
+		if t.text == ")" {
+			depth--
+			if depth == 0 {
+				closeIdx = i
+				break
+			}
+		}
+	}
+	if closeIdx < 0 {
+		return nil, 0, newError(UnsupportedSyntax, listEnd(tokens), "unterminated result list")
+	}
+	var groups [][]token
+	cur := []token{}
+	depth = 1 // reuse the scanner depth, now inside the opening parenthesis
+	for i := open + 1; i < closeIdx; i++ {
+		t := tokens[i]
+		if t.kind == tokenPunct && t.text == "," && depth == 1 {
+			groups = append(groups, cur)
+			cur = []token{}
+			continue
+		}
+		if t.kind == tokenPunct && (t.text == "(" || t.text == "[") {
+			depth++
+		}
+		if t.kind == tokenPunct && (t.text == ")" || t.text == "]") {
+			depth--
+		}
+		cur = append(cur, t)
+	}
+	if len(cur) > 0 {
+		groups = append(groups, cur)
+	}
+	if len(groups) < 2 {
+		return nil, 0, newError(UnsupportedSyntax, tokens[open].start, "result list requires at least two results in this slice")
+	}
+	var list []*TypeExpr
+	for _, g := range groups {
+		typeExpr, typeErr := parseType(g)
+		if typeErr != nil {
+			return nil, 0, typeErr
+		}
+		list = append(list, typeExpr)
+	}
+	last := list[len(list)-1]
+	if last.Kind != NamedType || last.Name != "error" || !last.Nullable {
+		return nil, 0, newError(UnsupportedSyntax, last.Span.Start, "result list requires a trailing error? in this slice")
+	}
+	return list, closeIdx + 1, nil
 }
 
 // parseClosureParamGroups parses the parenthesized parameter list of a

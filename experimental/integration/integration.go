@@ -75,31 +75,39 @@ type loopContext struct {
 // methodInfo is the flat-table entry of a declared method (story 08):
 // result nullability feeds the call-shape classification, parameter
 // nullabilities feed the D-3 argument check (story 18), purity opts the
-// call out of both effects (3a+3b).
+// call out of both effects (3a+3b). Since story 35 the fallible shape
+// feeds the D-2 check on try operands.
 type methodInfo struct {
 	hasResult      bool
 	resultNullable bool
 	pure           bool
 	params         []semantic.Nullability
+	fallible       bool
+	successClasses []semantic.Nullability
 }
 
 // declResult mirrors a declared function result type (story 08 Q4-A).
+// Since story 35 (RFC-005 §6.2.3) it carries the strict fallible shape:
+// the trailing `error?` flag and the per-success-result classes.
 type declResult struct {
 	hasResult      bool
 	resultNullable bool
+	fallible       bool
+	successClasses []semantic.Nullability
 }
 
 type builder struct {
-	blocks      []semantic.Block
-	facts       []map[semantic.BindingID]bool // initialization facts at the end of each block
-	nonNil      []map[semantic.BindingID]bool // non-nil narrowing facts, parallel to facts (story 05)
-	pathNN      []map[string]bool             // non-nil narrowing facts of field paths, parallel to facts (story 27, ADR-0008)
-	fallible    bool                          // the analyzed function body is fallible: declared result `error?` (story 34)
-	edges       []edge
-	cur         int // index into blocks
-	nextBlockID semantic.BlockID
-	loops       []loopContext
-	diagnostics []semantic.Diagnostic
+	blocks       []semantic.Block
+	facts        []map[semantic.BindingID]bool // initialization facts at the end of each block
+	nonNil       []map[semantic.BindingID]bool // non-nil narrowing facts, parallel to facts (story 05)
+	pathNN       []map[string]bool             // non-nil narrowing facts of field paths, parallel to facts (story 27, ADR-0008)
+	fallible     bool                          // the analyzed function body is fallible: declared result `error?` (story 34)
+	successCount int                           // story 35 (RFC-005 §6.2.3): fallible success results; 0 for error-only and non-fallible bodies
+	edges        []edge
+	cur          int // index into blocks
+	nextBlockID  semantic.BlockID
+	loops        []loopContext
+	diagnostics  []semantic.Diagnostic
 	// nilable marks bindings declared with a nullable `T?` type - the only
 	// nilability evidence in the type-free experimental layer.
 	nilable map[semantic.BindingID]bool
@@ -752,12 +760,20 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		b.emitSwitch(statement, scope)
 	case parser.Try:
 		// Story 34 (RFC-005 §6.5.4): try requires a fallible enclosing
-		// function; the call effects apply as for any call.
+		// function; the call effects apply as for any call. Story 35
+		// (§6.5.1, D-2): the operand call must carry the trailing `error?`.
 		if !b.fallible {
 			b.report(semantic.PropagationOutsideFallible, statement.Span)
 		}
+		if res, ok := b.calleeResults(statement.Call); ok && !res.fallible {
+			b.report(semantic.InvalidTry, statement.Span)
+		}
 		b.emitCall(statement, scope)
 	case parser.Var:
+		if statement.TryCall != nil {
+			b.emitTryDecl(statement, scope)
+			return
+		}
 		b.readIdents(statement, scope)
 		declared := make([]string, 0, len(statement.Names))
 		targets := make([]semantic.BindingID, 0, len(statement.Names))
@@ -1440,6 +1456,7 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		nonNil:       []map[semantic.BindingID]bool{{}},
 		pathNN:       []map[string]bool{{}},
 		fallible:     fallible,
+		successCount: successCount(cl),
 		nextBlockID:  1,
 		nilable:      b.nilable,
 		classes:      b.classes,
@@ -1451,11 +1468,15 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		pure:         b.pure,
 		// Story 22: the field model maps are shared read-only (the closure
 		// body reads field classes; its own declarations register in fresh
-		// maps).
+		// maps). Story 35: funcResults/funcParams are shared too - try
+		// operands and D-3 argument checks inside a function body resolve
+		// the functions declared before the enclosing one; nested
+		// declarations do not exist (the parser rejects them).
 		structs:      b.structs,
 		enums:        b.enums,
 		bindingTypes: map[semantic.BindingID]string{},
-		funcParams:   map[string][]semantic.Nullability{},
+		funcParams:   b.funcParams,
+		funcResults:  b.funcResults,
 	}
 	cb.emit(cl.Body, bodyScope)
 	// Closure bodies participate in the same lint and read accounting:
@@ -1627,10 +1648,56 @@ func (b *builder) checkArgumentTypes(statement *parser.Statement, scope *semanti
 // isFallible reports whether a declared result makes the function
 // fallible (story 34, RFC-005 §6.2.3): the trailing result is `error?`.
 func isFallible(statement *parser.Statement) bool {
-	return statement.HasResult && statement.ResultNullable &&
+	fallible, _ := strictResults(statement)
+	return fallible
+}
+
+// strictResults resolves the strict fallible shape of a declaration
+// (story 35, RFC-005 §6.2.3): the fallible flag plus the per-success-result
+// nullability classes. A parenthesized result list is fallible when its
+// trailing element is `error?` (the parse layer gates the spelling); the
+// single-type spelling mirrors the story 34 rule. Success classes follow
+// the G1 declared-class rule: named types classify by their `?`, composite
+// spellings stay unknown.
+func strictResults(statement *parser.Statement) (bool, []semantic.Nullability) {
+	cl := statement.Closure
+	if cl != nil && len(cl.ResultList) > 0 {
+		last := cl.ResultList[len(cl.ResultList)-1]
+		fallible := last.Kind == parser.NamedType && last.Name == "error" && last.Nullable
+		var classes []semantic.Nullability
+		for _, t := range cl.ResultList[:len(cl.ResultList)-1] {
+			classes = append(classes, nullabilityOfTypeExpr(t))
+		}
+		return fallible, classes
+	}
+	fallible := statement.HasResult && statement.ResultNullable &&
 		statement.Closure != nil && statement.Closure.ResultTypeExpr != nil &&
 		statement.Closure.ResultTypeExpr.Kind == parser.NamedType &&
 		statement.Closure.ResultTypeExpr.Name == "error"
+	return fallible, nil
+}
+
+// nullabilityOfTypeExpr classifies a structural type expression by the G1
+// declared-class rule (story 08): a named type is non-null or nullable by
+// its `?`, every composite spelling stays unknown.
+func nullabilityOfTypeExpr(t *parser.TypeExpr) semantic.Nullability {
+	if t == nil || t.Kind != parser.NamedType {
+		return semantic.NullabilityUnknown
+	}
+	if t.Nullable {
+		return semantic.NullabilityNullable
+	}
+	return semantic.NullabilityNonNull
+}
+
+// successCount counts the strict fallible success results of a declaration
+// body (story 35, RFC-005 §6.2.3): 0 for error-only and non-fallible
+// shapes - the D-7 mixed-return gate applies only to strict functions.
+func successCount(cl *parser.Closure) int {
+	if cl == nil || len(cl.ResultList) < 2 {
+		return 0
+	}
+	return len(cl.ResultList) - 1
 }
 
 func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scope) {
@@ -1657,7 +1724,9 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	id := scope.Resolve(name)
 	b.declare(id)
 	b.initialize(id)
-	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, isFallible(statement))
+	fallible, successClasses := strictResults(statement)
+	b.funcResults[name] = declResult{hasResult: statement.HasResult, resultNullable: statement.ResultNullable, fallible: fallible, successClasses: successClasses}
+	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, fallible)
 	b.closureMutates[id] = unionBindings(b.closureMutates[id], mutators)
 	if statement.Pure {
 		b.pure[id] = true
@@ -1668,7 +1737,13 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	if statement.HasResult && !statement.ResultNullable && fallOff {
 		b.report(semantic.MissingReturn, statement.Span)
 	}
-	b.funcResults[name] = declResult{hasResult: statement.HasResult, resultNullable: statement.ResultNullable}
+	// Story 35 (RFC-005 §6.4.7): a strict fallible function may not fall
+	// off its end - neither success (`v, nil`) nor failure is implied, and
+	// the success results have no value to fabricate. Error-only fall-off
+	// stays an implicit `return nil`.
+	if fallible && len(successClasses) > 0 && fallOff {
+		b.report(semantic.MissingReturn, statement.Span)
+	}
 }
 
 // emitMethod lowers a story 08 method declaration (RFC-002 §40 form):
@@ -1691,22 +1766,139 @@ func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope)
 		b.report(semantic.SameScopeRedeclaration, statement.Span)
 		return
 	}
+	fallible, successClasses := strictResults(statement)
 	b.methods[name] = methodInfo{
 		hasResult:      statement.HasResult,
 		resultNullable: statement.ResultNullable,
 		pure:           statement.Pure,
 		params:         paramClasses,
+		fallible:       fallible,
+		successClasses: successClasses,
 	}
 	// Registered before the body: a self-recursive call resolves like a
 	// function's self-recursion (story 07 precedent; the mutator set the
 	// self-call sees stays the one known at that point).
-	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, isFallible(statement))
+	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, fallible)
 	b.methodMutates[name] = unionBindings(nil, mutators)
 	// D-6 (RFC-001 §13.18, ADR-0004): methods enforce missing-return like
-	// functions.
+	// functions; story 35 adds the §6.4.7 strict fallible fall-off.
 	if statement.HasResult && !statement.ResultNullable && fallOff {
 		b.report(semantic.MissingReturn, statement.Span)
 	}
+	if fallible && len(successClasses) > 0 && fallOff {
+		b.report(semantic.MissingReturn, statement.Span)
+	}
+}
+
+// emitTryDecl analyzes the value-try declaration `var v = try F(x)` and
+// `var a, b = try Op()` (story 35, RFC-005 §6.5.1–6.5.2). The enclosing
+// function must be fallible (ANUY6001, §6.5.4); the callee must carry the
+// trailing `error?` (D-2, ANUY6003); the binding count must equal the
+// callee's success results; every binding is definitely initialized after
+// the declaration (§6.9.2 - try eliminates the conditional state), with
+// the declared class of its success result.
+func (b *builder) emitTryDecl(statement *parser.Statement, scope *semantic.Scope) {
+	if !b.fallible {
+		b.report(semantic.PropagationOutsideFallible, statement.Span)
+	}
+	b.readIdents(statement, scope)
+	b.analyzeClosures(statement, scope, nil)
+	res, ok := b.calleeResults(statement.TryCall)
+	if ok && !res.fallible {
+		b.report(semantic.InvalidTry, statement.Span)
+	}
+	if ok && res.fallible && len(statement.Names) != len(res.successClasses) {
+		// One binding per success result (RFC-003 multi-value declaration;
+		// the ANUY1006 registry category, parser-block code).
+		b.report(semantic.DiagnosticCategory("ArityMismatch"), statement.Span)
+	}
+	if ok && res.fallible {
+		targets := make([]semantic.BindingID, 0, len(statement.Names))
+		for i, name := range statement.Names {
+			if name == "_" {
+				// GB-3 variant A: the blank target receives its success
+				// value without creating a binding.
+				continue
+			}
+			if serr := scope.Declare(name); serr != nil {
+				b.report(serr.Category, statement.Span)
+				continue
+			}
+			id := scope.Resolve(name)
+			targets = append(targets, id)
+			b.declare(id)
+			if i < len(res.successClasses) {
+				b.classes[id] = res.successClasses[i]
+				if res.successClasses[i] == semantic.NullabilityNullable {
+					b.nilable[id] = true
+				}
+			}
+		}
+		// §6.9.2: the success path proves every success result exists -
+		// definite initialization, no conditional state (the §6.3
+		// correlation slice introduces that).
+		for _, id := range targets {
+			b.initialize(id)
+		}
+	}
+}
+
+// checkFailureOperand reports D-5 (RFC-005 §8.1.5, story 35): the
+// `return error` operand must be a proven non-null error. A literal `nil`
+// operand is never a failure; a nullable binding needs a live narrowing
+// fact (`if err != nil`); unknown classes stay trusted (the §6.4.2
+// `errors.New(...)` shape).
+func (b *builder) checkFailureOperand(statement *parser.Statement, scope *semantic.Scope) {
+	if len(statement.Values) == 1 && statement.Values[0].Text == "nil" {
+		b.report(semantic.InvalidFailureReturn, statement.Span)
+		return
+	}
+	for _, value := range statement.Values {
+		for _, ident := range value.Idents {
+			if ident == "nil" {
+				continue
+			}
+			id := scope.Resolve(ident)
+			if id != 0 && b.classes[id] == semantic.NullabilityNullable && !b.nonNil[b.cur][id] {
+				b.report(semantic.InvalidFailureReturn, statement.Span)
+				return
+			}
+		}
+	}
+}
+
+// checkStrictReturn reports D-7 (RFC-005 §6.4.5/§8.1.7, story 35): in a
+// strict fallible function the ordinary return must spell the success form
+// `v1, …, nil` - the trailing slot is the literal `nil`, never an error
+// value. The failure form is checked by D-5; the bare return is the
+// fall-off case (§6.4.7, measured at the function end).
+func (b *builder) checkStrictReturn(statement *parser.Statement, scope *semantic.Scope) {
+	if len(statement.Values) == 0 {
+		return
+	}
+	if statement.Values[len(statement.Values)-1].Text != "nil" {
+		b.report(semantic.MixedReturn, statement.Span)
+	}
+}
+
+// calleeResults resolves the strict fallible shape of a try operand (story
+// 35): plain calls through funcResults, method calls through the flat
+// table. ok=false marks the tolerance zone - an unresolved callee stays
+// unchecked (F-G3).
+func (b *builder) calleeResults(call *parser.NavigationExpr) (declResult, bool) {
+	if call == nil {
+		return declResult{}, false
+	}
+	if len(call.Segments) == 0 {
+		if res, ok := b.funcResults[call.Receiver]; ok {
+			return res, true
+		}
+		return declResult{}, false
+	}
+	if info, ok := b.methods[call.Segments[len(call.Segments)-1].Name]; ok {
+		return declResult{hasResult: info.hasResult, resultNullable: info.resultNullable, fallible: info.fallible, successClasses: info.successClasses}, true
+	}
+	return declResult{}, false
 }
 
 // emitReturn lowers the `return` statement: the flow of the enclosing
@@ -1724,6 +1916,16 @@ func (b *builder) emitReturn(statement *parser.Statement, scope *semantic.Scope)
 	// enclosing function.
 	if statement.ErrorReturn && !b.fallible {
 		b.report(semantic.PropagationOutsideFallible, statement.Span)
+	}
+	// Story 35 (RFC-005 §6.4.2/§8.1.5, D-5): the failure-return operand
+	// must be a proven non-null error.
+	if statement.ErrorReturn && b.fallible {
+		b.checkFailureOperand(statement, scope)
+	}
+	// Story 35 (RFC-005 §6.4.5/§8.1.7, D-7): a strict fallible success
+	// return must terminate in the literal `nil` error slot.
+	if b.successCount > 0 && !statement.ErrorReturn {
+		b.checkStrictReturn(statement, scope)
 	}
 	if len(statement.Values) > 0 {
 		b.readIdents(statement, scope)
@@ -1774,9 +1976,13 @@ func closureIdents(statements []parser.Statement) []string {
 		}
 		// A call statement's bare callee and navigation receiver are binding
 		// reads (CONTRACTS §2): they participate in capture seeding. Story
-		// 34: the same for the try statement's propagated call.
+		// 34: the same for the try statement's propagated call. Story 35:
+		// the value-try declaration's operand call.
 		if (s.Kind == parser.Call || s.Kind == parser.Try) && s.Call != nil {
 			out = append(out, s.Call.Receiver)
+		}
+		if s.TryCall != nil {
+			out = append(out, s.TryCall.Receiver)
 		}
 		// Story 31/33: a switch reads its scrutinee and its arm bodies
 		// participate in capture seeding.

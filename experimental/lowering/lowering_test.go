@@ -1002,3 +1002,46 @@ func TestLowerGeneratedMultilineConstructionTypeChecks(t *testing.T) {
 	// literal valid Go: the generated file parses and type-checks.
 	typeCheckGenerated(t, "type User struct {\nid int\nname string\n}\nvar u = User{\nid: 1,\nname: \"Ann\",\n}\n")
 }
+
+func TestLowerStrictFallibleFunctions(t *testing.T) {
+	// Story 35 (RFC-005 §6.2.3/§6.4.1/§6.4.2, RFC-009 §6.6.2–6.6.6): the
+	// strict fallible Go ABI `(Data, error)`, the failure-return padding
+	// slots (§6.6.3–6.6.5), and the value-try temporaries with the
+	// immediate propagation branch (§6.6.6).
+	got, err := Lower("type Data struct {\nid int\n}\nfunc LoadData(path string) (Data, error?) {\nreturn Data{id: 1}, nil\n}\nfunc Load(path string) (Data, error?) {\nif path == \"\" {\nreturn error errors.New(\"empty path\")\n}\nvar d = try LoadData(path)\nreturn d, nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"func LoadData(path string) (Data, error) {",
+		"func Load(path string) (Data, error) {",
+		"\tvar __anuy_pad0 Data\n\treturn __anuy_pad0, errors.New(\"empty path\")\n",
+		"\t__anuy_v2, __anuy_err1 := LoadData(path)\n\tif __anuy_err1 != nil {\n\t\tvar __anuy_pad3 Data\n\t\treturn __anuy_pad3, __anuy_err1\n\t}\n\td := __anuy_v2\n",
+		"\treturn d, nil\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+}
+
+func TestLowerGeneratedStrictFallibleTypeChecks(t *testing.T) {
+	// Story 35: the strict fallible shape compiles end-to-end - the Go
+	// ABI, the padding slots and the value-try temporaries type-check
+	// against the declared struct. The failure operand comes from a
+	// declared non-null parameter (the errors package is not imported by
+	// the minimal generator).
+	typeCheckGenerated(t, "type Data struct {\nid int\n}\nfunc LoadData(path string) (Data, error?) {\nreturn Data{id: 1}, nil\n}\nfunc Load(path string, cause error) (Data, error?) {\nif path == \"\" {\nreturn error cause\n}\nvar d = try LoadData(path)\nreturn d, nil\n}\n")
+}
+
+func TestLowerValueTryErrorOnlyEnclosing(t *testing.T) {
+	// Story 35 (RFC-009 §6.6.6): a value-try inside an error-only
+	// function propagates the bare error - no padding slots.
+	got, err := Lower("func Load() (Data, error?) {\nreturn Data{}, nil\n}\nfunc Save() error? {\nvar d = try Load()\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\t__anuy_v1, __anuy_err0 := Load()\n\tif __anuy_err0 != nil {\n\t\treturn __anuy_err0\n\t}\n\td := __anuy_v1\n") {
+		t.Fatalf("Lower() = %q, wants the error-only propagation", got)
+	}
+}

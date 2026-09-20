@@ -123,6 +123,16 @@ const (
 	// (story 34): `try` or `return error` outside a fallible function
 	// (working code; the final one belongs to RFC-011).
 	PropagationOutsideFallible DiagnosticCategory = "PropagationOutsideFallible"
+	// InvalidFailureReturn is the RFC-005 §6.4.2/§8.1.5 category (story
+	// 35, D-5): the failure-return operand is not a proven non-null error.
+	InvalidFailureReturn DiagnosticCategory = "InvalidFailureReturn"
+	// InvalidTry is the RFC-005 §6.5.1/§8.1.2 category (story 35, D-2):
+	// `try` on a call whose signature has no trailing `error?`.
+	InvalidTry DiagnosticCategory = "InvalidTry"
+	// MixedReturn is the RFC-005 §6.4.5/§8.1.7 category (story 35, D-7):
+	// a strict fallible return that is neither `values..., nil` nor
+	// `return error err`.
+	MixedReturn DiagnosticCategory = "MixedReturn"
 )
 
 // SourceSpan locates a diagnostic in the source text.

@@ -1818,12 +1818,29 @@ func TestAnalyzeSourceErrorOnlyFunctions(t *testing.T) {
 	// Story 34 (RFC-005 §6.4.2/§6.5.3, RFC-009 §6.6.1/§6.6.8): the
 	// failure return and error-only try inside a fallible function stay
 	// clean and satisfy D-6; outside a fallible function they report.
-	clean, err := AnalyzeSource("func Save() error? {\nreturn error nil\n}\n")
+	// Story 35 flip (D-5, ANUY6002): the failure operand must be a proven
+	// non-null error - `return error nil` reports, a declared non-null
+	// error stays clean.
+	clean, err := AnalyzeSource("func Save() error? {\nvar e error = newErr()\nreturn error e\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(clean.Diagnostics) != 0 {
 		t.Fatalf("clean = %#v, want no diagnostics", clean.Diagnostics)
+	}
+	nilFailure, err := AnalyzeSource("func Save() error? {\nreturn error nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nilFailure.Diagnostics) != 1 || string(nilFailure.Diagnostics[0].Category) != "InvalidFailureReturn" {
+		t.Fatalf("nilFailure = %#v, want one InvalidFailureReturn", nilFailure.Diagnostics)
+	}
+	narrowed, err := AnalyzeSource("func Save() error? {\nvar e error? = nil\nif e != nil {\nreturn error e\n}\nreturn nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(narrowed.Diagnostics) != 0 {
+		t.Fatalf("narrowed = %#v, want no diagnostics", narrowed.Diagnostics)
 	}
 	propagate, err := AnalyzeSource("func Log(msg string) error? {\nreturn nil\n}\nfunc Save() error? {\ntry Log(\"x\")\nreturn nil\n}\n")
 	if err != nil {
@@ -1969,5 +1986,61 @@ func TestAnalyzeSourceSwitchDiagnostics(t *testing.T) {
 	}
 	if len(nonEnum.Diagnostics) != 0 {
 		t.Fatalf("non-enum scrutinee = %#v, want no diagnostics", nonEnum.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceStrictFallibleFunctions(t *testing.T) {
+	// Story 35 (RFC-005 §6.2.3/§6.4–6.5, RFC-009 §6.6.2–6.6.6): the
+	// strict fallible shape - value-try with definite initialization,
+	// success return `d, nil`, and the new diagnostics block.
+	base := "type Data struct {\nid int\n}\nfunc LoadData() (Data, error?) {\nvar d = Data{id: 1}\nreturn d, nil\n}\n"
+	clean, err := AnalyzeSource(base + "func Load() (Data, error?) {\nvar d = try LoadData()\nvar e = d\nreturn d, nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clean.Diagnostics) != 0 {
+		t.Fatalf("clean = %#v, want no diagnostics", clean.Diagnostics)
+	}
+	tryOutside, err := AnalyzeSource(base + "func F() {\nvar d = try LoadData()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tryOutside.Diagnostics) != 1 || string(tryOutside.Diagnostics[0].Category) != "PropagationOutsideFallible" {
+		t.Fatalf("tryOutside = %#v, want one PropagationOutsideFallible", tryOutside.Diagnostics)
+	}
+	invalidTry, err := AnalyzeSource(base + "func Pure() int {\nreturn 1\n}\nfunc Load() (Data, error?) {\nvar x = try Pure()\nvar d = Data{id: 1}\nreturn d, nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invalidTry.Diagnostics) != 1 || string(invalidTry.Diagnostics[0].Category) != "InvalidTry" {
+		t.Fatalf("invalidTry = %#v, want one InvalidTry", invalidTry.Diagnostics)
+	}
+	arity, err := AnalyzeSource(base + "func Load() (Data, error?) {\nvar a, b = try LoadData()\nreturn a, nil\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(arity.Diagnostics) != 1 || string(arity.Diagnostics[0].Category) != "ArityMismatch" {
+		t.Fatalf("arity = %#v, want one ArityMismatch", arity.Diagnostics)
+	}
+	mixed, err := AnalyzeSource(base + "func Load() (Data, error?) {\nvar e error? = nil\nvar d = Data{id: 1}\nreturn d, e\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mixed.Diagnostics) != 1 || string(mixed.Diagnostics[0].Category) != "MixedReturn" {
+		t.Fatalf("mixed = %#v, want one MixedReturn", mixed.Diagnostics)
+	}
+	fallOff, err := AnalyzeSource(base + "func Load() (Data, error?) {\nvar d = Data{id: 1}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fallOff.Diagnostics) != 1 || string(fallOff.Diagnostics[0].Category) != "MissingReturn" {
+		t.Fatalf("fallOff = %#v, want one MissingReturn (§6.4.7)", fallOff.Diagnostics)
+	}
+	errorOnlyFallOff, err := AnalyzeSource("func Save() error? {\nvar x = 1\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(errorOnlyFallOff.Diagnostics) != 0 {
+		t.Fatalf("errorOnlyFallOff = %#v, want no diagnostics (implicit return nil)", errorOnlyFallOff.Diagnostics)
 	}
 }
