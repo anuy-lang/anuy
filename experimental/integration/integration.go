@@ -207,6 +207,13 @@ type builder struct {
 	// interface -> target key (`Type` or `*Type`) -> declared. The
 	// foundation of the slice-2 conversion checks.
 	impls map[string]map[string]bool
+
+	// unsafeDepth tracks the lexical unsafe context (story 41, RFC-007
+	// §6.6.1-6.6.2): privileged operations require depth > 0. unsafeFuncs
+	// records `unsafe func` declarations (§6.7.1) whose calls require the
+	// context.
+	unsafeDepth int
+	unsafeFuncs map[string]bool
 }
 
 func newBuilder() *builder {
@@ -236,6 +243,7 @@ func newBuilder() *builder {
 		bindingTypes:   map[semantic.BindingID]string{},
 		interfaces:     map[string]*ifaceInfo{},
 		impls:          map[string]map[string]bool{},
+		unsafeFuncs:    map[string]bool{},
 	}
 }
 
@@ -413,6 +421,16 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 	if len(value.Idents) == 0 && value.Text != "" {
 		return semantic.NullabilityNonNull
 	}
+	if name, ok := assumeNonNullOperand(value); ok {
+		// Story 41 (RFC-007 §6.6.5/§6.6.11): the intrinsic asserts the
+		// operand non-null; the fact attaches to the operand binding in
+		// the unsafe context. Outside the context the statement-level
+		// check reports D-1 - classification stays conservative here.
+		if id := scope.Resolve(name); id != 0 && b.unsafeDepth > 0 {
+			b.assume(id)
+		}
+		return semantic.NullabilityNonNull
+	}
 	if strings.HasSuffix(value.Text, "()") {
 		// A raw call shape (`name()`, `a.b()`): a declared result type
 		// classifies the value (story 08 Q4-A); unresolved and void calls
@@ -420,6 +438,16 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 		return b.classifyCallShape(strings.TrimSuffix(value.Text, "()"))
 	}
 	return semantic.NullabilityUnknown
+}
+
+// assumeNonNullOperand reports the operand identifier of an
+// `assume_non_nil(x)` value shape (story 41): the parser renders the
+// intrinsic call as raw text plus the callee and operand idents.
+func assumeNonNullOperand(value *parser.Value) (string, bool) {
+	if value == nil || len(value.Idents) != 2 || value.Idents[0] != "assume_non_nil" {
+		return "", false
+	}
+	return value.Idents[1], true
 }
 
 // methodKey builds the per-type method-set key (story 39, RFC-004
@@ -1038,6 +1066,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			}
 		}
 		b.readIdents(statement, scope)
+		b.checkUnsafeCallValues(statement.Values, statement.Span)
 		declared := make([]string, 0, len(statement.Names))
 		targets := make([]semantic.BindingID, 0, len(statement.Names))
 		for i, name := range statement.Names {
@@ -1142,6 +1171,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			return
 		}
 		b.readIdents(statement, scope)
+		b.checkUnsafeCallValues(statement.Values, statement.Span)
 		targets := make([]semantic.BindingID, 0, len(statement.Names))
 		for _, name := range statement.Names {
 			if name == "_" {
@@ -1187,6 +1217,13 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		// RFC-003 §25: the block creates a child scope; locals declared
 		// inside do not survive it. Linear flow — no join block required.
 		b.emit(statement.Body, scope.Child())
+	case parser.UnsafeBlock:
+		// Story 41 (RFC-007 §6.6.1-6.6.3): a lexical context only - the
+		// body analyzes with the depth raised, and ordinary checking
+		// (initialization, must-consume, conformance) stays fully on.
+		b.unsafeDepth++
+		b.emit(statement.Body, scope.Child())
+		b.unsafeDepth--
 	}
 }
 
@@ -1677,11 +1714,17 @@ func (b *builder) emitJump(isBreak bool) {
 // invisible here: recorded conformance sources pin them as accepted.
 func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope) {
 	unavailable := map[semantic.BindingID]bool{}
-	for _, value := range statement.Values {
+	for vi, value := range statement.Values {
 		if value.Closure != nil {
 			continue
 		}
-		for _, ident := range value.Idents {
+		// Story 41 (RFC-007 §6.6.13): the intrinsic callee is not a name
+		// read - only the operand ident resolves.
+		_, intrinsic := assumeNonNullOperand(&statement.Values[vi])
+		for j, ident := range value.Idents {
+			if intrinsic && j == 0 {
+				continue
+			}
 			if id := scope.Resolve(ident); id != 0 {
 				// Story 36 (RFC-005 §6.3/§8.1.4, D-4): a still-conditional
 				// success result does not exist until the controlling
@@ -1939,6 +1982,18 @@ func unionBindings(existing, added []semantic.BindingID) []semantic.BindingID {
 // annotated `//anuy:pure` callee applies no mutator set (trusted contract).
 func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 	call := statement.Call
+	if len(call.Segments) == 0 && parser.IntrinsicNames[call.Receiver] {
+		// Story 41 (RFC-007 §6.6.5): the compiler intrinsic is not an
+		// ordinary callee - name resolution never sees it.
+		b.emitAssumeNonNull(statement, scope)
+		return
+	}
+	if len(call.Segments) == 0 && b.unsafeFuncs[call.Receiver] && b.unsafeDepth == 0 {
+		// Story 41 (RFC-007 §8.2.2 D-2): the caller must uphold the
+		// function's safety contract - the call requires the context.
+		// Error-handling rules still apply below (§6.8.4).
+		b.report(semantic.UnsafeCallOutsideContext, statement.Span)
+	}
 	// Story 37 (RFC-005 §6.6.1, D-1): a call statement silently drops its
 	// error result. `discard` is the explicit opt-out (§6.6.2); `try`
 	// propagates instead of ignoring (story 34) - neither reports.
@@ -2045,6 +2100,60 @@ func (b *builder) checkArgumentTypes(statement *parser.Statement, scope *semanti
 	}
 }
 
+// emitAssumeNonNull applies the assume_non_nil intrinsic (story 41,
+// RFC-007 §6.6.5-§6.6.11): outside an unsafe context it is rejected
+// (§8.2.1 D-1); inside, the operand stays an ordinary read and the
+// non-null fact attaches to the operand binding. An already-proven
+// operand warns redundant (§8.2.6 R) - proof beats assertion.
+func (b *builder) emitAssumeNonNull(statement *parser.Statement, scope *semantic.Scope) {
+	if len(statement.Values) != 1 {
+		return
+	}
+	operand := statement.Values[0]
+	if b.unsafeDepth == 0 {
+		if len(operand.Idents) == 1 && operand.Text == operand.Idents[0] {
+			if serr := scope.Read(operand.Idents[0]); serr != nil {
+				b.report(serr.Category, statement.Span)
+			}
+		}
+		b.report(semantic.UnsafeOperationOutside, statement.Span)
+		return
+	}
+	if len(operand.Idents) != 1 || operand.Text != operand.Idents[0] {
+		// Compound operands stay in the tolerance zone (CONTRACTS): the
+		// value shape analysis has no projection for them.
+		return
+	}
+	if serr := scope.Read(operand.Idents[0]); serr != nil {
+		b.report(serr.Category, statement.Span)
+		return
+	}
+	id := scope.Resolve(operand.Idents[0])
+	if id == 0 {
+		return
+	}
+	if b.knownNonNull(id) {
+		b.report(semantic.RedundantUnsafeAssertion, statement.Span)
+		return
+	}
+	b.assume(id)
+}
+
+// checkUnsafeCallValues reports D-2 (RFC-007 §8.2.2) for unsafe-func
+// calls in initializer and assignment positions, which never reach
+// emitCall (story 41). Statement calls are covered there.
+func (b *builder) checkUnsafeCallValues(values []parser.Value, span parser.Span) {
+	if b.unsafeDepth > 0 {
+		return
+	}
+	for i := range values {
+		if prefix := callCalleePrefix(values[i].Text); prefix != "" && b.unsafeFuncs[prefix] {
+			b.report(semantic.UnsafeCallOutsideContext, span)
+			return
+		}
+	}
+}
+
 // emitFunction lowers a story 07 function declaration: the declared name
 // binds a closure value, so the body is analyzed at the creation point like
 // a closure literal - self-recursion resolves through the scope, and the
@@ -2113,6 +2222,12 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 		return
 	}
 	name := statement.Names[0]
+	if statement.UnsafeFunc {
+		// Story 41 (RFC-007 §6.7.1): calls require an unsafe context; the
+		// body is NOT an implicit unsafe block (§6.7.3) - the closure
+		// body below analyzes at depth 0.
+		b.unsafeFuncs[name] = true
+	}
 	var paramClasses []semantic.Nullability
 	for _, p := range statement.Closure.Params {
 		paramClasses = append(paramClasses, nullabilityOfParam(p))
@@ -2160,6 +2275,12 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 // (Q2-A, F-C2).
 func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope) {
 	name := statement.Names[0]
+	if statement.UnsafeFunc {
+		// Story 41 (RFC-007 §6.7.1): calls require an unsafe context; the
+		// body is NOT an implicit unsafe block (§6.7.3) - the closure
+		// body below analyzes at depth 0.
+		b.unsafeFuncs[name] = true
+	}
 	var paramClasses []semantic.Nullability
 	for _, p := range statement.Closure.Params {
 		paramClasses = append(paramClasses, nullabilityOfParam(p))

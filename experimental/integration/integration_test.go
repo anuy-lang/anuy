@@ -2430,3 +2430,107 @@ func TestAnalyzeSourceNullableInterfacePins(t *testing.T) {
 		t.Fatalf("narrowed = %#v, want no diagnostics (§6.4.2 narrowing)", narrowed.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceUnsafeCore(t *testing.T) {
+	// Story 41 (RFC-007 §6.6-6.8): the lexical unsafe context - the
+	// assertion and unsafe-func calls are privileged operations outside
+	// it (§8.2.1 D-1, §8.2.2 D-2), checking stays fully on inside
+	// (§6.6.3), the fact attaches to the operand (§6.6.11), and a
+	// proven operand warns redundant (§8.2.6 R).
+	base := "type User struct {\nid int\n}\nfunc use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\n"
+	outsideAssertion, err := AnalyzeSource(base + "var u = fetch()\nassume_non_nil(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outsideAssertion.Diagnostics) != 1 || string(outsideAssertion.Diagnostics[0].Category) != "UnsafeOperationOutside" {
+		t.Fatalf("outsideAssertion = %#v, want one UnsafeOperationOutside (§8.2.1)", outsideAssertion.Diagnostics)
+	}
+	if outsideAssertion.Diagnostics[0].Code != "ANUY8001" {
+		t.Fatalf("outsideAssertion code = %s, want ANUY8001", outsideAssertion.Diagnostics[0].Code)
+	}
+	insideClean, err := AnalyzeSource(base + "var u = fetch()\nunsafe {\nvar d = assume_non_nil(u)\nuse(d)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(insideClean.Diagnostics) != 0 {
+		t.Fatalf("insideClean = %#v, want no diagnostics (§6.6.5)", insideClean.Diagnostics)
+	}
+	operandFact, err := AnalyzeSource(base + "var u User? = fetch()\nunsafe {\nassume_non_nil(u)\nuse(u)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operandFact.Diagnostics) != 0 {
+		t.Fatalf("operandFact = %#v, want no diagnostics - the fact attaches to the operand (§6.6.11)", operandFact.Diagnostics)
+	}
+	unsafeFuncBase := base + "unsafe func fromRaw(u User) User {\nreturn u\n}\n"
+	rhsCall, err := AnalyzeSource(unsafeFuncBase + "var u = fetch()\nvar b = fromRaw(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rhsCall.Diagnostics) != 1 || string(rhsCall.Diagnostics[0].Category) != "UnsafeCallOutsideContext" {
+		t.Fatalf("rhsCall = %#v, want one UnsafeCallOutsideContext (§8.2.2)", rhsCall.Diagnostics)
+	}
+	if rhsCall.Diagnostics[0].Code != "ANUY8002" {
+		t.Fatalf("rhsCall code = %s, want ANUY8002", rhsCall.Diagnostics[0].Code)
+	}
+	statementCall, err := AnalyzeSource(unsafeFuncBase + "var u = User{id: 1}\nfromRaw(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statementCall.Diagnostics) != 1 || string(statementCall.Diagnostics[0].Category) != "UnsafeCallOutsideContext" {
+		t.Fatalf("statementCall = %#v, want one UnsafeCallOutsideContext", statementCall.Diagnostics)
+	}
+	insideCall, err := AnalyzeSource(unsafeFuncBase + "var u = fetch()\nunsafe {\nvar b = fromRaw(u)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(insideCall.Diagnostics) != 0 {
+		t.Fatalf("insideCall = %#v, want no diagnostics (§6.7.1)", insideCall.Diagnostics)
+	}
+	bodyNotImplicit, err := AnalyzeSource(base + "unsafe func unwrap(v User?) User {\nassume_non_nil(v)\nreturn v\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bodyNotImplicit.Diagnostics) != 1 || string(bodyNotImplicit.Diagnostics[0].Category) != "UnsafeOperationOutside" {
+		t.Fatalf("bodyNotImplicit = %#v, want one UnsafeOperationOutside - the body is not an implicit unsafe block (§6.7.3)", bodyNotImplicit.Diagnostics)
+	}
+	mustConsumeInside, err := AnalyzeSource(base + "func boom() error? {\nreturn nil\n}\nunsafe {\nboom()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mustConsumeInside.Diagnostics) != 1 || string(mustConsumeInside.Diagnostics[0].Category) != "IgnoredError" {
+		t.Fatalf("mustConsumeInside = %#v, want one IgnoredError - unsafe does not disable error handling (§6.8.4)", mustConsumeInside.Diagnostics)
+	}
+	proven, err := AnalyzeSource(base + "var u = User{id: 1}\nunsafe {\nassume_non_nil(u)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proven.Diagnostics) != 1 || string(proven.Diagnostics[0].Category) != "RedundantUnsafeAssertion" {
+		t.Fatalf("proven = %#v, want one RedundantUnsafeAssertion (§8.2.6)", proven.Diagnostics)
+	}
+	if proven.Diagnostics[0].Code != "ANUY5002" || proven.Diagnostics[0].Severity != semantic.SeverityWarning {
+		t.Fatalf("proven = (%s, %s), want (ANUY5002, Warning)", proven.Diagnostics[0].Code, proven.Diagnostics[0].Severity)
+	}
+	ifaceBase := "interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nfunc File.Read() int {\nreturn 1\n}\nvar f = File{id: 1}\n"
+	ifaceInside, err := AnalyzeSource(ifaceBase + "unsafe {\nvar r Reader = f\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ifaceInside.Diagnostics) != 1 || string(ifaceInside.Diagnostics[0].Category) != "MissingExplicitConformance" {
+		t.Fatalf("ifaceInside = %#v, want one MissingExplicitConformance - unsafe does not create conformance (§6.8.3)", ifaceInside.Diagnostics)
+	}
+	uninitInside, err := AnalyzeSource("unsafe {\nvar x int\nx\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uninitInside.Diagnostics) != 1 || string(uninitInside.Diagnostics[0].Category) != "ReadBeforeInitialization" {
+		t.Fatalf("uninitInside = %#v, want one ReadBeforeInitialization - unsafe does not bypass initialization (§6.6.4)", uninitInside.Diagnostics)
+	}
+	escape, err := AnalyzeSource(base + "func requireUser(v User?) User {\nunsafe {\nreturn assume_non_nil(v)\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(escape.Diagnostics) != 0 {
+		t.Fatalf("escape = %#v, want no diagnostics - unsafe values may escape (§6.6.9)", escape.Diagnostics)
+	}
+}

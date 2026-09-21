@@ -200,6 +200,7 @@ const (
 	Try
 	Interface
 	Impl
+	UnsafeBlock
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -320,6 +321,10 @@ type Statement struct {
 	// observable writes.
 	Closure *Closure
 	Pure    bool
+	// UnsafeFunc marks the `unsafe func` declaration form (story 41,
+	// RFC-007 §6.7.1): calling the function requires an unsafe context;
+	// the body is NOT an implicit unsafe block (§6.7.3).
+	UnsafeFunc bool
 	// Method is non-empty for a method declaration (story 08, owner
 	// decision 2026-09-17, task-1-8-1-2): the receiver type name as written
 	// (`User` in `func User.age() int`). The declared name is Names[0];
@@ -555,6 +560,26 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return lp.parseLoop(tokens, line)
 	case tokens[0].kind == tokenIdent && (tokens[0].text == "break" || tokens[0].text == "continue"):
 		return lp.parseJump(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "unsafe" && len(tokens) == 2 && isPunct(tokens[1], "{"):
+		// Story 41 (RFC-007 §6.6.1): the lexical unsafe context block.
+		start := line.offset
+		lp.pos++
+		body, err := lp.parseBlock()
+		if err != nil {
+			return Statement{}, err
+		}
+		return Statement{Kind: UnsafeBlock, Body: body, Span: Span{Start: start, End: line.offset + len(line.text)}}, nil
+	case tokens[0].kind == tokenIdent && tokens[0].text == "unsafe" && len(tokens) >= 3 && tokens[1].kind == tokenIdent && tokens[1].text == "func":
+		// Story 41 (RFC-007 §6.7.1): `unsafe func` - caller-side
+		// preconditions; the declaration itself parses like a function.
+		statement, err := lp.parseFunctionDecl(tokens[1:], line)
+		if err != nil {
+			return Statement{}, err
+		}
+		statement.UnsafeFunc = true
+		return statement, nil
+	case tokens[0].kind == tokenIdent && tokens[0].text == "unsafe":
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "unsafe requires a block or func declaration")
 	case tokens[0].kind == tokenIdent && tokens[0].text == "func" && len(tokens) >= 2 && (tokens[1].kind == tokenIdent || isPunct(tokens[1], "*")):
 		// `func name(params) {` — the story 07 declaration form; `func *`
 		// opens the story 39 pointer-receiver method form. `func (`
@@ -675,7 +700,7 @@ func isCallStatementStart(tokens []token) bool {
 // name binds a closure value; parameters and body reuse the closure grammar.
 func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statement, error) {
 	name := tokens[1]
-	if name.text == "_" || reservedWords[name.text] {
+	if name.text == "_" || isReservedName(name.text) {
 		return Statement{}, newError(UnsupportedSyntax, name.start, "invalid function name")
 	}
 	method := ""
@@ -685,7 +710,7 @@ func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statem
 		// `func T.name(params) …` - the method form; the receiver type stays
 		// raw text (the per-type method set resolves calls, story 39).
 		m := tokens[3]
-		if m.kind != tokenIdent || m.text == "_" || reservedWords[m.text] {
+		if m.kind != tokenIdent || m.text == "_" || isReservedName(m.text) {
 			return Statement{}, newError(UnsupportedSyntax, m.start, "invalid method name")
 		}
 		method, name, params = tokens[1].text, m, 4
@@ -694,7 +719,7 @@ func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statem
 		// pointer-receiver spelling; the receiver kind feeds the method
 		// set (impl for T requires value receivers).
 		m := tokens[4]
-		if m.kind != tokenIdent || m.text == "_" || reservedWords[m.text] {
+		if m.kind != tokenIdent || m.text == "_" || isReservedName(m.text) {
 			return Statement{}, newError(UnsupportedSyntax, m.start, "invalid method name")
 		}
 		methodPointer = true
@@ -1126,6 +1151,11 @@ func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (State
 	if aerr != nil {
 		return Statement{}, aerr
 	}
+	if isPunct(tokens[1], "(") && IntrinsicNames[tokens[0].text] && len(args) != 1 {
+		// Story 41 (RFC-007 §6.6.5): the assertion shape takes exactly
+		// one operand.
+		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, tokens[0].text+" requires exactly one argument")
+	}
 	lp.pos++
 	return Statement{
 		Kind:   Call,
@@ -1490,7 +1520,17 @@ type token struct {
 	start, end int // absolute byte offsets
 }
 
-var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true, "interface": true, "impl": true}
+var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true, "interface": true, "impl": true, "unsafe": true}
+
+// IntrinsicNames reserves the compiler-intrinsic namespace (story 41,
+// RFC-007 §6.6.13): a declaration with one of these names is a parse
+// reject, while call-shaped uses route to the kernel's intrinsic
+// handling instead of ordinary name resolution.
+var IntrinsicNames = map[string]bool{"assume_non_nil": true}
+
+func isReservedName(name string) bool {
+	return reservedWords[name] || IntrinsicNames[name]
+}
 
 // isStatementKeyword reports words rejected in expression and condition
 // positions. `in` is contextual: it is only recognized in a loop header
@@ -1595,6 +1635,11 @@ func parseNameList(tokens []token, start int) ([]string, int, *Error) {
 		}
 		if tokens[i].kind != tokenIdent && tokens[i].kind != tokenBlank {
 			return nil, 0, newError(UnsupportedSyntax, tokens[i].start, "expected identifier")
+		}
+		if IntrinsicNames[tokens[i].text] {
+			// Story 41 (RFC-007 §6.6.13): the intrinsic namespace is
+			// reserved - bindings cannot shadow compiler intrinsics.
+			return nil, 0, newError(UnsupportedSyntax, tokens[i].start, tokens[i].text+" is a reserved intrinsic name")
 		}
 		// GB-3 variant A: `_` is accepted in name lists as a write-only
 		// discard; it stays in the name list for arity but the kernel
@@ -1721,6 +1766,14 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 	names, i, terr := parseNameList(tokens, 1)
 	if terr != nil {
 		return Statement{}, terr
+	}
+	for _, name := range names {
+		if reservedWords[name] || IntrinsicNames[name] {
+			// Story 41: keywords (`unsafe`) and the reserved intrinsic
+			// namespace (§6.6.13) cannot name bindings - the func-decl
+			// precedent.
+			return Statement{}, newError(UnsupportedSyntax, tokens[1].start, name+" is a reserved name")
+		}
 	}
 	statement := Statement{Kind: Var, Names: names, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
 	typeStart := i

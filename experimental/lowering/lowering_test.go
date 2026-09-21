@@ -1130,3 +1130,27 @@ func TestLowerInterfaceDispatchAndNullable(t *testing.T) {
 	}
 	typeCheckGenerated(t, "type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar f = File{id: 1}\nvar d = Data{id: 2}\nvar r Reader = f\nvar out = r.Read(d)\nout\nvar opt Reader? = nil\nopt?.Read(d)\n")
 }
+
+func TestLowerUnsafeCore(t *testing.T) {
+	// Story 41 (RFC-007 §6.6.2, §6.6.6): the unsafe block is a
+	// compile-time permission context and erases entirely;
+	// assume_non_nil is a promise, not a check - value forms pass the
+	// operand through, statement forms erase to an ordinary read; an
+	// `unsafe func` lowers to an ordinary Go function.
+	source := "type User struct {\nid int\n}\nfunc use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\nunsafe func fromRaw(u User) User {\nreturn u\n}\nvar m = fetch()\nvar u = User{id: 1}\nunsafe {\nvar d = assume_non_nil(u)\nuse(d)\nassume_non_nil(u)\nfromRaw(u)\n}\nvar sure = assume_non_nil(m)\nsure\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"d := u", "_ = u", "fromRaw(u)", "sure := m"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+	for _, banned := range []string{"unsafe", "assume_non_nil"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("Lower() = %q, must not contain %q", got, banned)
+		}
+	}
+	typeCheckGenerated(t, source)
+}

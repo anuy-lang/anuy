@@ -54,6 +54,10 @@ var approvedScheme = []struct {
 	// Story 40 (RFC-004 §6.4/§8.1.4-8.1.5): conversions and dispatch.
 	{"UndefinedInterfaceMember", "ANUY7005", SeverityError},
 	{"MissingExplicitConformance", "ANUY7006", SeverityError},
+	// Story 41 (RFC-007 §8.2): unsafe core.
+	{"UnsafeOperationOutside", "ANUY8001", SeverityError},
+	{"UnsafeCallOutsideContext", "ANUY8002", SeverityError},
+	{"RedundantUnsafeAssertion", "ANUY5002", SeverityWarning},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 

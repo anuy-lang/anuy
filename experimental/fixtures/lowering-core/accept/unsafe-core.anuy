@@ -1,0 +1,21 @@
+type User struct {
+id int
+}
+func use(u User) {
+}
+func fetch() User? {
+return nil
+}
+unsafe func fromRaw(u User) User {
+return u
+}
+var m = fetch()
+var u = User{id: 1}
+unsafe {
+var d = assume_non_nil(u)
+use(d)
+assume_non_nil(u)
+fromRaw(u)
+}
+var sure = assume_non_nil(m)
+sure

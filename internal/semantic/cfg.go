@@ -161,6 +161,18 @@ const (
 	// 40, D-4): a concrete value converts to an interface whose impl
 	// record does not cover the value's type.
 	MissingExplicitConformance DiagnosticCategory = "MissingExplicitConformance"
+	// UnsafeOperationOutside is the RFC-007 §8.2.1 category (story 41,
+	// D-1): a privileged operation (assume_non_nil) appears outside an
+	// unsafe context.
+	UnsafeOperationOutside DiagnosticCategory = "UnsafeOperationOutside"
+	// UnsafeCallOutsideContext is the RFC-007 §8.2.2 category (story 41,
+	// D-2): a call to an unsafe function appears outside an unsafe
+	// context - the caller must uphold the function's safety contract.
+	UnsafeCallOutsideContext DiagnosticCategory = "UnsafeCallOutsideContext"
+	// RedundantUnsafeAssertion is the RFC-007 §8.2.6 category (story 41,
+	// R): an assume_non_nil operand is already proven non-null - the
+	// assertion is ergonomic noise over an existing proof.
+	RedundantUnsafeAssertion DiagnosticCategory = "RedundantUnsafeAssertion"
 )
 
 // SourceSpan locates a diagnostic in the source text.

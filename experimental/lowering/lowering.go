@@ -353,6 +353,15 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 				body.WriteString("\t}\n")
 			}
 		case parser.Call:
+			if statement.Call.Receiver == "assume_non_nil" {
+				// Story 41 (RFC-007 §6.6.2/§6.6.6): the intrinsic is not a
+				// callee - it erases to an ordinary read of its operand.
+				if len(statement.Values) == 1 {
+					body.WriteString("\t_ = " + statement.Values[0].Text + "\n")
+				}
+				last = ""
+				continue
+			}
 			// Story 05: the effectful statement form - the call value is
 			// discarded by statement semantics, so no blank discard is
 			// appended and nothing feeds the trailing `_ =` line.
@@ -445,6 +454,12 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 				return "", err
 			}
 			body.WriteString("\t}\n")
+		case parser.UnsafeBlock:
+			// Story 41 (RFC-007 §6.6.2): a compile-time permission
+			// context - no runtime mode, no frame, nothing to emit.
+			if _, err := l.statements(body, statement.Body); err != nil {
+				return "", err
+			}
 		default:
 			return "", fmt.Errorf("experimental lowering: unsupported statement")
 		}
@@ -1024,8 +1039,24 @@ func rangeOperand(value parser.Value) (string, error) {
 // value renders one right-hand side value; closure literals are emitted
 // as Go func literals whose declared parameter types carry their canonical
 // representation.
+// assumeNonNullOperandText strips the assume_non_nil(...) wrapper from a
+// raw value text (story 41): ok=false when the text is not the intrinsic
+// shape.
+func assumeNonNullOperandText(text string) (string, bool) {
+	const prefix = "assume_non_nil("
+	if !strings.HasPrefix(text, prefix) || !strings.HasSuffix(text, ")") {
+		return "", false
+	}
+	return text[len(prefix) : len(text)-1], true
+}
+
 func (l *lowerer) value(value parser.Value) (string, error) {
 	if value.Closure == nil {
+		// Story 41 (RFC-007 §6.6.6): assume_non_nil is a promise, not a
+		// runtime check - the value lowers to its operand unchanged.
+		if operand, ok := assumeNonNullOperandText(value.Text); ok {
+			return operand, nil
+		}
 		return value.Text, nil
 	}
 	cl := value.Closure

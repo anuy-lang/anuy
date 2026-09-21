@@ -1734,3 +1734,38 @@ func TestParsePointerReceiverMethod(t *testing.T) {
 		t.Fatal("value receiver parsed as pointer")
 	}
 }
+
+func TestParseUnsafeConstructs(t *testing.T) {
+	// Story 41 (RFC-007 §6.6.1, §6.7.1, §6.6.13): the unsafe block and
+	// the `unsafe func` declaration form; the intrinsic namespace is
+	// reserved against shadowing.
+	program, err := Parse("unsafe {\nvar x int\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(program.Statements) != 1 || program.Statements[0].Kind != UnsafeBlock {
+		t.Fatalf("program = %#v, want one UnsafeBlock", program.Statements)
+	}
+	if len(program.Statements[0].Body) != 1 {
+		t.Fatalf("unsafe body = %#v, want one statement", program.Statements[0].Body)
+	}
+	unsafeFunc, err := Parse("unsafe func F(u User) User {\nreturn u\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unsafeFunc.Statements) != 1 || unsafeFunc.Statements[0].Kind != Function || !unsafeFunc.Statements[0].UnsafeFunc {
+		t.Fatalf("unsafeFunc = %#v, want a Function with UnsafeFunc", unsafeFunc.Statements)
+	}
+	rejects := []string{
+		"func assume_non_nil(u User) User {\nreturn u\n}\n",
+		"var assume_non_nil = 1\n",
+		"var unsafe = 1\n",
+		"assume_non_nil()\n",
+		"assume_non_nil(a, b)\n",
+	}
+	for _, source := range rejects {
+		if _, err := Parse(source); err == nil {
+			t.Fatalf("Parse(%q) accepted, want reject", source)
+		}
+	}
+}

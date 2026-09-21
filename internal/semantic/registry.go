@@ -87,8 +87,13 @@ var (
 	UndefinedInterfaceMemberDescriptor   = register(UndefinedInterfaceMember, "ANUY7005", SeverityError)   // RFC-004 §8.1.5 (D-5)
 	MissingExplicitConformanceDescriptor = register(MissingExplicitConformance, "ANUY7006", SeverityError) // RFC-004 §8.1.4 (D-4)
 
+	// Unsafe block (8xxx).
+	UnsafeOperationOutsideDescriptor   = register(UnsafeOperationOutside, "ANUY8001", SeverityError)   // RFC-007 §8.2.1 (D-1)
+	UnsafeCallOutsideContextDescriptor = register(UnsafeCallOutsideContext, "ANUY8002", SeverityError) // RFC-007 §8.2.2 (D-2)
+
 	// Lint block (5xxx): advisory analyzers.
-	UncheckedErrorDescriptor = register(UncheckedError, "ANUY5001", SeverityWarning) // R1
+	UncheckedErrorDescriptor           = register(UncheckedError, "ANUY5001", SeverityWarning)           // R1
+	RedundantUnsafeAssertionDescriptor = register(RedundantUnsafeAssertion, "ANUY5002", SeverityWarning) // RFC-007 §8.2.6 (R)
 )
 
 // registry indexes the descriptors by category; the init-time checks keep
@@ -130,6 +135,9 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		ImplUnknownInterfaceDescriptor,
 		UndefinedInterfaceMemberDescriptor,
 		MissingExplicitConformanceDescriptor,
+		UnsafeOperationOutsideDescriptor,
+		UnsafeCallOutsideContextDescriptor,
+		RedundantUnsafeAssertionDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -197,6 +205,9 @@ var catalog = map[Code]string{
 	"ANUY7005": "interface does not declare the called method",
 	"ANUY7006": "value cannot be used as the interface without an explicit impl",
 	"ANUY5001": "error value is not checked",
+	"ANUY8001": "unsafe operation requires an unsafe context",
+	"ANUY8002": "call to an unsafe function requires an unsafe context",
+	"ANUY5002": "assume_non_nil on a value already known to be non-null",
 }
 
 // Message returns the canonical English text for a code (RFC-011 §14: the
