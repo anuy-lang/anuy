@@ -53,6 +53,7 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"error-correlation.anuy", "data, err := LoadData(path)", true},
 		{"error-discard.anuy", "Log(\"done\")", true},
 		{"interface-reader.anuy", "type Reader interface {", true},
+		{"interface-dispatch.anuy", "var r Reader = f", true},
 		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
 		{"native-nil-map.anuy", "var m map[string]User", true},
 		{"native-nil-error.anuy", "var err error", true},

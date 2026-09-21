@@ -1,0 +1,20 @@
+type Data struct {
+id int
+}
+interface Reader {
+Read(d Data) Data
+}
+type File struct {
+id int
+}
+func File.Read(d Data) Data {
+return d
+}
+impl Reader for File
+var f = File{id: 1}
+var d = Data{id: 2}
+var r Reader = f
+var out = r.Read(d)
+out
+var opt Reader? = nil
+opt?.Read(d)

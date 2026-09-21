@@ -80,10 +80,12 @@ var (
 	NilArmOnNonNullEnumDescriptor        = register(NilArmOnNonNullEnum, "ANUY4010", SeverityError)        // RFC-006 §6.5.3
 
 	// Interfaces/impl block (7xxx).
-	InterfaceMethodMissingDescriptor  = register(InterfaceMethodMissing, "ANUY7001", SeverityError)  // RFC-004 §6.1.3
-	InterfaceMethodMismatchDescriptor = register(InterfaceMethodMismatch, "ANUY7002", SeverityError) // RFC-004 §6.1.3
-	DuplicateImplDescriptor           = register(DuplicateImpl, "ANUY7003", SeverityError)           // RFC-004 §6.5.1
-	ImplUnknownInterfaceDescriptor    = register(ImplUnknownInterface, "ANUY7004", SeverityError)    // RFC-004 §6.1.3
+	InterfaceMethodMissingDescriptor     = register(InterfaceMethodMissing, "ANUY7001", SeverityError)     // RFC-004 §6.1.3
+	InterfaceMethodMismatchDescriptor    = register(InterfaceMethodMismatch, "ANUY7002", SeverityError)    // RFC-004 §6.1.3
+	DuplicateImplDescriptor              = register(DuplicateImpl, "ANUY7003", SeverityError)              // RFC-004 §6.5.1
+	ImplUnknownInterfaceDescriptor       = register(ImplUnknownInterface, "ANUY7004", SeverityError)       // RFC-004 §6.1.3
+	UndefinedInterfaceMemberDescriptor   = register(UndefinedInterfaceMember, "ANUY7005", SeverityError)   // RFC-004 §8.1.5 (D-5)
+	MissingExplicitConformanceDescriptor = register(MissingExplicitConformance, "ANUY7006", SeverityError) // RFC-004 §8.1.4 (D-4)
 
 	// Lint block (5xxx): advisory analyzers.
 	UncheckedErrorDescriptor = register(UncheckedError, "ANUY5001", SeverityWarning) // R1
@@ -126,6 +128,8 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		InterfaceMethodMismatchDescriptor,
 		DuplicateImplDescriptor,
 		ImplUnknownInterfaceDescriptor,
+		UndefinedInterfaceMemberDescriptor,
+		MissingExplicitConformanceDescriptor,
 		UncheckedErrorDescriptor,
 	}
 	m := make(map[DiagnosticCategory]Descriptor, len(descriptors))
@@ -190,6 +194,8 @@ var catalog = map[Code]string{
 	"ANUY7002": "interface method signature does not match the target method",
 	"ANUY7003": "duplicate impl for the same interface and target type",
 	"ANUY7004": "impl references an undeclared interface",
+	"ANUY7005": "interface does not declare the called method",
+	"ANUY7006": "value cannot be used as the interface without an explicit impl",
 	"ANUY5001": "error value is not checked",
 }
 

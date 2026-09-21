@@ -153,6 +153,14 @@ const (
 	// ImplUnknownInterface is the RFC-004 §6.1.3 category (story 39):
 	// impl references an undeclared interface.
 	ImplUnknownInterface DiagnosticCategory = "ImplUnknownInterface"
+	// UndefinedInterfaceMember is the RFC-004 §8.1.5 category (story 40,
+	// D-5): a dispatch on an interface-typed receiver calls a method the
+	// interface does not declare - the method set is exact.
+	UndefinedInterfaceMember DiagnosticCategory = "UndefinedInterfaceMember"
+	// MissingExplicitConformance is the RFC-004 §8.1.4 category (story
+	// 40, D-4): a concrete value converts to an interface whose impl
+	// record does not cover the value's type.
+	MissingExplicitConformance DiagnosticCategory = "MissingExplicitConformance"
 )
 
 // SourceSpan locates a diagnostic in the source text.

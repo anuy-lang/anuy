@@ -98,6 +98,10 @@ type ifaceMethod struct {
 	params         []semantic.Nullability
 	hasResult      bool
 	resultNullable bool
+	// resultError marks the `error?` result spelling (story 40): a
+	// dispatch through the interface is fallible by its signature, not
+	// by any concrete impl.
+	resultError bool
 }
 
 // ifaceInfo is a declared interface (story 39): nominal identity plus
@@ -429,9 +433,21 @@ func methodKey(receiver, name string) string {
 // type (story 39): bindingTypes give the `Type.name` key; an unknown
 // receiver falls back to the name-only match when exactly one method
 // carries the name. Ambiguity and absence stay in the tolerance zone.
+// Story 40 (RFC-004 §8.1.5): an interface-typed receiver resolves
+// through the exact interface method set - the signature (result class,
+// fallibility, parameter classes) comes from the interface, and a
+// member outside the set never falls back to the name-only match.
 func (b *builder) resolveMethod(name string, receiver semantic.BindingID) (string, methodInfo, bool) {
 	if receiver != 0 {
 		if typeName := b.bindingTypes[receiver]; typeName != "" {
+			if iface, ok := b.interfaces[typeName]; ok {
+				for _, sig := range iface.methods {
+					if sig.name == name {
+						return "", ifaceMethodInfo(sig), true
+					}
+				}
+				return "", methodInfo{}, false
+			}
 			key := methodKey(typeName, name)
 			if info, ok := b.methods[key]; ok {
 				return key, info, true
@@ -454,6 +470,20 @@ func (b *builder) resolveMethod(name string, receiver semantic.BindingID) (strin
 		return foundKey, found, true
 	}
 	return "", methodInfo{}, false
+}
+
+// ifaceMethodInfo lifts an interface signature into the method table
+// shape (story 40): the result and parameter classes come from the
+// interface declaration, fallibility from the `error?` spelling. Purity
+// stays false - impl-specific behavior is unknown, so dispatch keeps the
+// conservative receiver invalidation.
+func ifaceMethodInfo(sig ifaceMethod) methodInfo {
+	return methodInfo{
+		hasResult:      sig.hasResult,
+		resultNullable: sig.resultNullable,
+		fallible:       sig.hasResult && sig.resultError && sig.resultNullable,
+		params:         sig.params,
+	}
 }
 
 // classifyNavigationValue classifies a selector-chain value: a plain
@@ -584,6 +614,9 @@ func (b *builder) registerInterface(decl *parser.InterfaceDecl) {
 	info := &ifaceInfo{name: decl.Name}
 	for _, method := range decl.Methods {
 		sig := ifaceMethod{name: method.Name, hasResult: method.HasResult, resultNullable: method.ResultNullable}
+		if method.ResultTypeExpr != nil && method.ResultTypeExpr.Kind == parser.NamedType && method.ResultTypeExpr.Name == "error" {
+			sig.resultError = true
+		}
 		for _, p := range method.Params {
 			sig.params = append(sig.params, nullabilityOfParam(p))
 		}
@@ -1057,6 +1090,13 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 					}
 					// Story 22: the named type roots field-path classification.
 					b.bindingTypes[id] = statement.TypeExpr.Name
+				} else if statement.TypeExpr.Kind == parser.PointerType && statement.TypeExpr.Elem != nil && statement.TypeExpr.Elem.Kind == parser.NamedType {
+					// Story 40: the `*T` spelling names the binding's type
+					// for conversion checks and per-type method resolution.
+					// Classes stay untouched (bare `*T` remains nil-tolerant,
+					// RFC-002 §6.2.3) and field paths keep the tolerance -
+					// rootStruct matches the struct table by bare name.
+					b.bindingTypes[id] = "*" + statement.TypeExpr.Elem.Name
 				}
 			} else {
 				b.classes[id] = inferred
@@ -1077,6 +1117,9 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			// non-null value re-establishes after the §25 invalidation of
 			// initialize (§6.3.5).
 			b.establishAssignments(statement, scope)
+		}
+		if statement.TypeExpr != nil {
+			b.checkInterfaceConversions(statement, scope)
 		}
 		b.analyzeClosures(statement, scope, targets)
 	case parser.Assign:
@@ -1145,6 +1188,54 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		// inside do not survive it. Linear flow — no join block required.
 		b.emit(statement.Body, scope.Child())
 	}
+}
+
+// checkInterfaceConversions validates concrete-to-interface conversions
+// at the declaration point (story 40, RFC-004 §6.4.1, §6.4.4, §8.1.4
+// D-4): a non-null RHS whose concrete type is known must carry the impl
+// record (story 39). Identity conversions are free (§6.4.4.1); unknown
+// concrete types (calls, fields - no type names in the tables) and
+// nullable values stay unchecked - boxing of nullable concrete values is
+// delegated to RFC-002 §6.9.17 (OQ-1).
+func (b *builder) checkInterfaceConversions(statement *parser.Statement, scope *semantic.Scope) {
+	ifaceName := statement.TypeExpr.Name
+	if statement.TypeExpr.Kind != parser.NamedType || b.interfaces[ifaceName] == nil {
+		return
+	}
+	for i := range statement.Values {
+		if i >= len(statement.Names) || statement.Names[i] == "_" {
+			continue
+		}
+		rhs := &statement.Values[i]
+		if b.classifyValue(rhs, scope) != semantic.NullabilityNonNull {
+			continue
+		}
+		rhsType := b.concreteValueType(rhs, scope)
+		if rhsType == "" || rhsType == ifaceName {
+			continue
+		}
+		if !b.impls[ifaceName][rhsType] {
+			b.report(semantic.MissingExplicitConformance, statement.Span)
+			return
+		}
+	}
+}
+
+// concreteValueType names the concrete type of a conversion RHS when the
+// layer can prove it: a typed binding (bindingTypes, including the `*T`
+// spelling) or a keyed construction. Everything else - calls, field
+// paths, closures - returns "" and marks the tolerance zone.
+func (b *builder) concreteValueType(value *parser.Value, scope *semantic.Scope) string {
+	if value == nil {
+		return ""
+	}
+	if value.Keyed != nil {
+		return value.Keyed.Name
+	}
+	if len(value.Idents) == 1 && value.Text == value.Idents[0] {
+		return b.bindingTypes[scope.Resolve(value.Idents[0])]
+	}
+	return ""
 }
 
 // analyzeClosures analyzes closure literals of the statement at its creation
@@ -1715,6 +1806,11 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		// Story 22: named parameter types root field-path classification.
 		if p.TypeExpr != nil && p.TypeExpr.Kind == parser.NamedType {
 			b.bindingTypes[id] = p.TypeExpr.Name
+		} else if p.TypeExpr != nil && p.TypeExpr.Kind == parser.PointerType &&
+			p.TypeExpr.Elem != nil && p.TypeExpr.Elem.Kind == parser.NamedType {
+			// Story 40: pointer parameters name their type for conversion
+			// checks and per-type method resolution (classes untouched).
+			b.bindingTypes[id] = "*" + p.TypeExpr.Elem.Name
 		}
 		entry = append(entry, semantic.Declare(id), semantic.Assign(id))
 	}
@@ -1904,6 +2000,12 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 				b.add(semantic.Call(mutators...))
 			}
 			return
+		}
+		// Story 40 (RFC-004 §8.1.5 D-5): an interface-typed receiver has
+		// an exact method set - a member outside it is a definite error,
+		// not tolerance (unknown concrete receivers stay tolerated).
+		if b.interfaces[b.bindingTypes[id]] != nil {
+			b.report(semantic.UndefinedInterfaceMember, call.Segments[len(call.Segments)-1].Span)
 		}
 		// Unresolved member call: the conservative receiver invalidation
 		// stays (story 07, решение 3b - the Rust &mut self analogue).

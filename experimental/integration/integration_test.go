@@ -2278,3 +2278,155 @@ func TestAnalyzeSourceInterfacesImpl(t *testing.T) {
 		t.Fatalf("perTypeDispatch = %#v, want no diagnostics (§6.1.5)", perTypeDispatch.Diagnostics)
 	}
 }
+
+func TestAnalyzeSourceInterfaceConversions(t *testing.T) {
+	// Story 40 (RFC-004 §6.4.1, §6.4.4, §8.1.4 D-4): a concrete-to-
+	// interface conversion is valid only with the explicit impl record
+	// (story 39) behind it; identity conversions are free; unknown
+	// concrete types and nullable values stay in the tolerance zone -
+	// boxing of nullable concrete values is delegated to RFC-002
+	// §6.9.17 (OQ-1).
+	base := "interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nfunc File.Read() int {\nreturn 1\n}\n"
+	noImpl, err := AnalyzeSource(base + "var f = File{id: 1}\nvar r Reader = f\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noImpl.Diagnostics) != 1 || string(noImpl.Diagnostics[0].Category) != "MissingExplicitConformance" {
+		t.Fatalf("noImpl = %#v, want one MissingExplicitConformance (§8.1.4)", noImpl.Diagnostics)
+	}
+	if noImpl.Diagnostics[0].Code != "ANUY7006" {
+		t.Fatalf("noImpl code = %s, want ANUY7006", noImpl.Diagnostics[0].Code)
+	}
+	implClean, err := AnalyzeSource(base + "impl Reader for File\nvar f = File{id: 1}\nvar r Reader = f\nr.Read()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(implClean.Diagnostics) != 0 {
+		t.Fatalf("implClean = %#v, want no diagnostics (§6.4.1)", implClean.Diagnostics)
+	}
+	identity, err := AnalyzeSource(base + "impl Reader for File\nvar f = File{id: 1}\nvar a Reader = f\nvar b Reader = a\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(identity.Diagnostics) != 0 {
+		t.Fatalf("identity = %#v, want no diagnostics (§6.4.4.1)", identity.Diagnostics)
+	}
+	callRHS, err := AnalyzeSource(base + "func get() File {\nreturn File{id: 1}\n}\nvar f = get()\nvar r Reader = f\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(callRHS.Diagnostics) != 0 {
+		t.Fatalf("callRHS = %#v, want no diagnostics - call results carry no type names (F-G3)", callRHS.Diagnostics)
+	}
+	nullableRHS, err := AnalyzeSource("interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nvar p *File? = nil\nvar r Reader = p\nvar rn Reader? = p\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A nullable concrete value cannot reach the non-null interface at
+	// all - the general D-1 rule fires first (RFC-002 §6.1.7); the
+	// nullable-interface conversion stays unchecked (boxing is OQ-1,
+	// RFC-002 §6.9.17).
+	if len(nullableRHS.Diagnostics) != 1 || string(nullableRHS.Diagnostics[0].Category) != "NilToNonNull" {
+		t.Fatalf("nullableRHS = %#v, want one NilToNonNull before any boxing question", nullableRHS.Diagnostics)
+	}
+	narrowedPointer, err := AnalyzeSource(base + "impl Reader for *File\nvar p *File? = nil\nif p != nil {\nvar r Reader = p\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(narrowedPointer.Diagnostics) != 0 {
+		t.Fatalf("narrowedPointer = %#v, want no diagnostics (§6.4.2 narrowing)", narrowedPointer.Diagnostics)
+	}
+	narrowedNoImpl, err := AnalyzeSource(base + "var p *File? = nil\nif p != nil {\nvar r Reader = p\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(narrowedNoImpl.Diagnostics) != 1 || string(narrowedNoImpl.Diagnostics[0].Category) != "MissingExplicitConformance" {
+		t.Fatalf("narrowedNoImpl = %#v, want one MissingExplicitConformance", narrowedNoImpl.Diagnostics)
+	}
+	nilToNonNull, err := AnalyzeSource(base + "var r Reader = nil\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nilToNonNull.Diagnostics) != 1 || string(nilToNonNull.Diagnostics[0].Category) != "NilToNonNull" {
+		t.Fatalf("nilToNonNull = %#v, want one NilToNonNull (RFC-004 §6.4.2)", nilToNonNull.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceInterfaceDispatch(t *testing.T) {
+	// Story 40 (RFC-004 §8.1.5 D-5, §6.8.4): an interface-typed receiver
+	// resolves dispatch through the exact interface method set - the
+	// result class and fallibility come from the interface signature
+	// (must-consume works without seeing the impl), an absent member is
+	// a definite error. Two same-name methods keep the name-only
+	// fallback ambiguous, so every assertion here exercises the
+	// interface path, not the accidental per-type one.
+	base := "interface Loader {\nLoad() error?\n}\ntype Store struct {\nid int\n}\ntype Backup struct {\nid int\n}\nfunc Store.Load() error? {\nreturn nil\n}\nfunc Backup.Load() error? {\nreturn nil\n}\nimpl Loader for Store\n"
+	mustConsume, err := AnalyzeSource(base + "var s = Store{id: 1}\nvar ld Loader = s\nld.Load()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mustConsume.Diagnostics) != 1 || string(mustConsume.Diagnostics[0].Category) != "IgnoredError" {
+		t.Fatalf("mustConsume = %#v, want one IgnoredError from the interface signature (RFC-005 §6.6.1)", mustConsume.Diagnostics)
+	}
+	discard, err := AnalyzeSource(base + "var s = Store{id: 1}\nvar ld Loader = s\ndiscard ld.Load()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discard.Diagnostics) != 0 {
+		t.Fatalf("discard = %#v, want no diagnostics (RFC-005 §6.6.2)", discard.Diagnostics)
+	}
+	undefinedMember, err := AnalyzeSource(base + "var s = Store{id: 1}\nvar ld Loader = s\nld.Reaad()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(undefinedMember.Diagnostics) != 1 || string(undefinedMember.Diagnostics[0].Category) != "UndefinedInterfaceMember" {
+		t.Fatalf("undefinedMember = %#v, want one UndefinedInterfaceMember (§8.1.5)", undefinedMember.Diagnostics)
+	}
+	if undefinedMember.Diagnostics[0].Code != "ANUY7005" {
+		t.Fatalf("undefinedMember code = %s, want ANUY7005", undefinedMember.Diagnostics[0].Code)
+	}
+	saverBase := "interface Saver {\nSave(n int)\n}\ntype Disk struct {\nid int\n}\ntype Tape struct {\nid int\n}\nfunc Disk.Save(n int) {\n}\nfunc Tape.Save(n int) {\n}\nimpl Saver for Disk\n"
+	argumentClass, err := AnalyzeSource(saverBase + "var d = Disk{id: 1}\nvar sv Saver = d\nsv.Save(nil)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(argumentClass.Diagnostics) != 1 || string(argumentClass.Diagnostics[0].Category) != "NullableArgument" {
+		t.Fatalf("argumentClass = %#v, want one NullableArgument from the interface signature (RFC-002 §8.2.3)", argumentClass.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceNullableInterfacePins(t *testing.T) {
+	// Story 40 (RFC-004 §6.4.2, RFC-009 §6.2.7): Reader? rides the
+	// existing nullable machinery - nil assignment is clean, ungated
+	// dispatch is a deref violation, safe navigation lifts, narrowing
+	// restores both dispatch and conversion.
+	base := "interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nfunc File.Read() int {\nreturn 1\n}\nimpl Reader for File\n"
+	nilAssignment, err := AnalyzeSource(base + "var r Reader? = nil\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nilAssignment.Diagnostics) != 0 {
+		t.Fatalf("nilAssignment = %#v, want no diagnostics (§6.4.2)", nilAssignment.Diagnostics)
+	}
+	ungatedDispatch, err := AnalyzeSource(base + "var r Reader? = nil\nr.Read()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ungatedDispatch.Diagnostics) != 1 || string(ungatedDispatch.Diagnostics[0].Category) != "UnsafeMemberAccess" {
+		t.Fatalf("ungatedDispatch = %#v, want one UnsafeMemberAccess (RFC-002)", ungatedDispatch.Diagnostics)
+	}
+	safeNavigation, err := AnalyzeSource(base + "var r Reader? = nil\nr?.Read()\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(safeNavigation.Diagnostics) != 0 {
+		t.Fatalf("safeNavigation = %#v, want no diagnostics (RFC-002 §6.3)", safeNavigation.Diagnostics)
+	}
+	narrowed, err := AnalyzeSource(base + "var r Reader? = nil\nif r != nil {\nr.Read()\nvar rn Reader = r\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(narrowed.Diagnostics) != 0 {
+		t.Fatalf("narrowed = %#v, want no diagnostics (§6.4.2 narrowing)", narrowed.Diagnostics)
+	}
+}

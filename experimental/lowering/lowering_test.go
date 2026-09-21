@@ -1104,3 +1104,29 @@ func TestLowerGeneratedInterfaceTypeChecks(t *testing.T) {
 	// set of File carries Read).
 	typeCheckGenerated(t, "type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar r Reader = File{id: 1}\nvar x = r\n")
 }
+
+func TestLowerInterfaceDispatchAndNullable(t *testing.T) {
+	// Story 40 (RFC-004 §6.4.1, §6.8.4; RFC-009 §6.2.7): the conversion
+	// and dispatch lower to ordinary Go (no vtable, no runtime checks);
+	// `Reader?` keeps the plain Go interface with nil as semantic nil -
+	// no tagged carrier, and the safe dispatch guards with the ordinary
+	// nil comparison.
+	got, err := Lower("type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar f = File{id: 1}\nvar d = Data{id: 2}\nvar r Reader = f\nvar out = r.Read(d)\nout\nvar opt Reader? = nil\nopt?.Read(d)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"var r Reader = f",
+		"out := r.Read(d)",
+		"var opt Reader = nil",
+		"if opt != nil {",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+	if strings.Contains(got, "anuyabi") {
+		t.Fatalf("Lower() = %q, wants no carrier prelude (RFC-009 §6.2.7)", got)
+	}
+	typeCheckGenerated(t, "type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar f = File{id: 1}\nvar d = Data{id: 2}\nvar r Reader = f\nvar out = r.Read(d)\nout\nvar opt Reader? = nil\nopt?.Read(d)\n")
+}

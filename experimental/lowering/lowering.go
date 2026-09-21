@@ -19,7 +19,7 @@ func Lower(source string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}}
+	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}}
 	// Story 16: top-level functions hoist to package-level declarations.
 	// The Run body lowers first, so the tracking maps are populated by the
 	// time the hoisted function bodies are rendered (captures stay
@@ -31,6 +31,12 @@ func Lower(source string) (string, error) {
 			funcs = append(funcs, statement)
 		case parser.TypeDecl, parser.Interface:
 			types = append(types, statement)
+			if statement.Interface != nil {
+				// Story 40 (RFC-009 §6.2.7): interface names pre-register
+				// before any body lowers - the carrier() native-nil check
+				// consults them regardless of the render order.
+				l.interfaces[statement.Interface.Name] = true
+			}
 		case parser.Impl:
 			// Story 39 (RFC-004 §6.8.2): impl is semantic metadata -
 			// after checking it erases from the generated Go.
@@ -77,6 +83,7 @@ func Lower(source string) (string, error) {
 type lowerer struct {
 	carriers   map[string]string
 	nativeNil  map[string]bool
+	interfaces map[string]bool
 	taggedUsed bool
 	// returnCarrierElem is the conversion context of the enclosing
 	// function's declared result (story 16): the carrier element when the
@@ -939,7 +946,10 @@ func (l *lowerer) goType(t *parser.TypeExpr) (string, error) {
 	if !t.Nullable {
 		return text, nil
 	}
-	if (t.Kind == parser.NamedType && t.Name == "error") ||
+	// Native-nil shapes keep the plain Go type with nil as semantic nil
+	// (§6.2.3, §6.2.7): `error`, pointer, map and - since story 40 -
+	// declared interfaces (`Reader?` lowers to `Reader`).
+	if (t.Kind == parser.NamedType && (t.Name == "error" || l.interfaces[t.Name])) ||
 		t.Kind == parser.PointerType || t.Kind == parser.MapType {
 		return text, nil
 	}
@@ -950,13 +960,15 @@ func (l *lowerer) goType(t *parser.TypeExpr) (string, error) {
 // carrier reports the tagged-carrier element type of a declared type: the
 // outermost nullability decides the whole-value representation, so a
 // composite spelling with inner nullables (`[](User?)`) passes values
-// through unchanged. The restricted grammar cannot spell chan, function or
-// interface shapes, and `error` is the one named native-nil type.
+// through unchanged. Native-nil shapes skip the carrier (§6.2.3, §6.2.7):
+// `error`, pointer, map and channel-function shapes the grammar cannot
+// spell, and - since story 40 - declared interfaces whose `I?` lowers to
+// the plain Go interface with nil as semantic nil.
 func (l *lowerer) carrier(t *parser.TypeExpr) (string, bool) {
 	if t == nil || !t.Nullable {
 		return "", false
 	}
-	if (t.Kind == parser.NamedType && t.Name == "error") ||
+	if (t.Kind == parser.NamedType && (t.Name == "error" || l.interfaces[t.Name])) ||
 		t.Kind == parser.PointerType || t.Kind == parser.MapType {
 		return "", false
 	}

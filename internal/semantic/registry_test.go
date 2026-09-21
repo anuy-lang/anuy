@@ -51,6 +51,9 @@ var approvedScheme = []struct {
 	{"InterfaceMethodMismatch", "ANUY7002", SeverityError},
 	{"DuplicateImpl", "ANUY7003", SeverityError},
 	{"ImplUnknownInterface", "ANUY7004", SeverityError},
+	// Story 40 (RFC-004 §6.4/§8.1.4-8.1.5): conversions and dispatch.
+	{"UndefinedInterfaceMember", "ANUY7005", SeverityError},
+	{"MissingExplicitConformance", "ANUY7006", SeverityError},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
 
