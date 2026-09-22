@@ -5,6 +5,11 @@
 // and release form belong to RFC-010.
 package anuyabi
 
+import (
+	"fmt"
+	"reflect"
+)
+
 // Nullable is the canonical tagged nullable of the ABI v1 sketch
 // (RFC-009 §6.1.7): Present == false is semantic nil (§6.1.8) and the
 // zero value represents nil (§6.1.9). With one presence tag plus a value
@@ -33,4 +38,56 @@ func (n Nullable[T]) Get() (T, bool) {
 // IsNil reports semantic nil.
 func (n Nullable[T]) IsNil() bool {
 	return !n.Present
+}
+
+// boundaryPrefix is the stable message prefix of the foreign boundary
+// panic (RFC-009 §6.8.12): the wording is ABI, the carrier type is the
+// recovery handle.
+const boundaryPrefix = "anuy: invalid foreign value: "
+
+// InvalidForeignValue is the canonical fail-stop carrier of a foreign
+// entry violation (RFC-009 §6.8.3, §6.8.12): Param identifies the
+// offending parameter or receiver, Reason the violated invariant. Hosts
+// recover and classify through the type (errors.As), never by matching
+// message text.
+type InvalidForeignValue struct {
+	Param  string
+	Reason string
+}
+
+// Error renders the stable prefix plus the parameter and the invariant.
+func (e *InvalidForeignValue) Error() string {
+	return boundaryPrefix + e.Param + ": " + e.Reason
+}
+
+// Require panics with the canonical carrier - the single fail-stop exit
+// of every boundary check (RFC-009 §6.8.3: panic before entering the
+// native implementation).
+func Require(param, reason string) {
+	panic(&InvalidForeignValue{Param: param, Reason: reason})
+}
+
+// RequireEnum validates a contiguous ABI v1 discriminant (RFC-009
+// §6.8.6): the valid range is 1..variants; zero stays invalid (§6.4.3).
+func RequireEnum(param string, discriminant, variants uint32) {
+	if discriminant == 0 || discriminant > variants {
+		Require(param, fmt.Sprintf("enum discriminant %d outside 1..%d", discriminant, variants))
+	}
+}
+
+// RequireNonNilInterface validates a non-null native interface entering
+// from Go (RFC-009 §6.8.11): both the untyped nil interface and a
+// typed-nil dynamic value (RFC-007 §6.3.7) fail the boundary. Nil-backed
+// slices stay valid present values (RFC-007 §6.3.8) and never fail here.
+func RequireNonNilInterface(param string, value any) {
+	if value == nil {
+		Require(param, "nil interface")
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer:
+		if v.IsNil() {
+			Require(param, "typed-nil "+v.Type().String())
+		}
+	}
 }

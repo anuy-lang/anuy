@@ -2,6 +2,7 @@ package lowering
 
 import (
 	"fmt"
+	"go/token"
 	"strings"
 
 	"github.com/anuy-lang/anuy/experimental/parser"
@@ -19,7 +20,7 @@ func Lower(source string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}}
+	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}}
 	// Story 16: top-level functions hoist to package-level declarations.
 	// The Run body lowers first, so the tracking maps are populated by the
 	// time the hoisted function bodies are rendered (captures stay
@@ -37,11 +38,33 @@ func Lower(source string) (string, error) {
 				// consults them regardless of the render order.
 				l.interfaces[statement.Interface.Name] = true
 			}
+			if statement.Enum != nil {
+				// Story 42 (RFC-009 §6.8.6): the variant count pins the
+				// contiguous discriminant range of the boundary check.
+				l.enums[statement.Enum.Name] = len(statement.Enum.Variants)
+			}
 		case parser.Impl:
 			// Story 39 (RFC-004 §6.8.2): impl is semantic metadata -
 			// after checking it erases from the generated Go.
 		default:
 			bodyStatements = append(bodyStatements, statement)
+		}
+	}
+	// Story 42 (RFC-009 §6.8): plan the boundary wrappers before any body
+	// renders - direct calls retarget to the native entry (§6.8.14)
+	// regardless of declaration order.
+	for i := range funcs {
+		statement := funcs[i]
+		name := statement.Names[0]
+		if !token.IsExported(name) {
+			continue
+		}
+		checks, err := l.boundaryChecks(&statement)
+		if err != nil {
+			return "", err
+		}
+		if len(checks) > 0 {
+			l.wrappedFns[name] = true
 		}
 	}
 	var body strings.Builder
@@ -65,7 +88,7 @@ func Lower(source string) (string, error) {
 	}
 	var out strings.Builder
 	out.WriteString("package fixture\n\n")
-	if l.taggedUsed {
+	if l.taggedUsed || l.boundaryUsed {
 		out.WriteString(anuyabiImport)
 	}
 	out.WriteString(decls.String())
@@ -84,7 +107,20 @@ type lowerer struct {
 	carriers   map[string]string
 	nativeNil  map[string]bool
 	interfaces map[string]bool
-	taggedUsed bool
+	// enums maps a declared enum name to its variant count (story 42,
+	// RFC-009 §6.8.6): the boundary range check pins 1..variants.
+	enums map[string]int
+	// wrappedFns holds the exported top-level functions that receive a
+	// foreign-entry wrapper (story 42, RFC-009 §6.8): direct generated
+	// calls to them retarget to the `__anuy_` native entry (§6.8.14).
+	// Wrapped methods stay out - method calls keep the wrapper in this
+	// slice (identical semantics, §6.8.10 cost).
+	wrappedFns map[string]bool
+	// boundaryUsed records whether any wrapper emitted an anuyabi.Require*
+	// check - the generated file then imports the support package even
+	// without tagged carriers.
+	boundaryUsed bool
+	taggedUsed   bool
 	// returnCarrierElem is the conversion context of the enclosing
 	// function's declared result (story 16): the carrier element when the
 	// result is tagged, empty for native-nil and non-null results (raw
@@ -488,6 +524,11 @@ func (l *lowerer) tryDecl(body *strings.Builder, statement *parser.Statement) er
 	for _, segment := range call.Segments {
 		expr += "." + segment.Name
 	}
+	// Story 42 (RFC-009 §6.8.14): the try call follows the same native
+	// entry retargeting as ordinary call statements.
+	if len(call.Segments) == 0 && l.wrappedFns[call.Receiver] {
+		expr = "__anuy_" + expr
+	}
 	errTmp := fmt.Sprintf("__anuy_err%d", l.temps)
 	l.temps++
 	vtemps := make([]string, 0, len(statement.Names))
@@ -661,6 +702,12 @@ func (l *lowerer) callStatement(body *strings.Builder, call *parser.NavigationEx
 	for _, segment := range call.Segments {
 		expr += "." + segment.Name
 	}
+	// Story 42 (RFC-009 §6.8.14): a direct call to a wrapped function
+	// targets the native entry - the §6.8.5 bypass; the wrapper serves
+	// external Go callers only.
+	if len(call.Segments) == 0 && l.wrappedFns[call.Receiver] {
+		expr = "__anuy_" + expr
+	}
 	fmt.Fprintf(body, "\t%s(%s)\n", expr, joined)
 	return nil
 }
@@ -742,13 +789,10 @@ func (l *lowerer) safeValue(body *strings.Builder, nav *parser.NavigationExpr, r
 // calls (`u.save()`) compile only against a real Go method.
 const methodReceiver = "anuyRecv"
 
-// function lowers one hoisted top-level declaration (story 16, RFC-002
-// §6.4.11-6.4.12, §6.7-6.8): parameters and the declared result render
-// through the representation rules, and the body lowers with the return
-// context set to the result's carrier element (empty for native-nil and
-// non-null results - raw returns). `//anuy:pure` is a kernel contract and
-// a no-op for generated Go.
-func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) error {
+// funcSignature renders the declaration head of one hoisted top-level
+// function or method: `func [recv] name(params) results` (story 16; the
+// story 42 wrapper split reuses it for the public and internal symbols).
+func (l *lowerer) funcSignature(statement *parser.Statement, name string) (string, error) {
 	cl := statement.Closure
 	var b strings.Builder
 	b.WriteString("func ")
@@ -761,7 +805,7 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 		}
 		b.WriteString("(" + methodReceiver + " " + receiverType + ") ")
 	}
-	b.WriteString(statement.Names[0] + "(")
+	b.WriteString(name + "(")
 	for i, p := range cl.Params {
 		if i > 0 {
 			b.WriteString(", ")
@@ -770,7 +814,7 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 		if p.TypeExpr != nil {
 			text, err := l.goType(p.TypeExpr)
 			if err != nil {
-				return err
+				return "", err
 			}
 			typeText = text
 		}
@@ -784,7 +828,7 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 		for _, t := range cl.ResultList {
 			text, err := l.goType(t)
 			if err != nil {
-				return err
+				return "", err
 			}
 			parts = append(parts, text)
 		}
@@ -792,10 +836,121 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 	} else if statement.HasResult && cl.ResultTypeExpr != nil {
 		text, err := l.goType(cl.ResultTypeExpr)
 		if err != nil {
-			return err
+			return "", err
 		}
 		b.WriteString(" " + text)
 	}
+	return b.String(), nil
+}
+
+// boundaryChecks renders the one-level foreign-entry checks of a
+// declaration (story 42, RFC-009 §6.8.2, §6.8.5–6.8.7, §6.8.11–6.8.13):
+// nil comparisons for non-null native-nil shapes, the discriminant range
+// for enums - present tagged payloads included (§6.8.7) - and typed-nil
+// rejection for non-null interfaces. Aggregate recursion and containers
+// are story 43 (§6.8.8–6.8.9); native-nil nullable parameters accept nil
+// as semantic nil (§6.2.2) and primitives carry no invariants. The
+// `unsafe func` form gets no exemption (§6.8.13).
+func (l *lowerer) boundaryChecks(statement *parser.Statement) ([]string, error) {
+	var checks []string
+	if statement.Method != "" && statement.MethodPointer {
+		// §6.8.13: exported method receivers are inside the boundary.
+		checks = append(checks, fmt.Sprintf("\tif %s == nil {\n\t\tanuyabi.Require(%q, %q)\n\t}\n", methodReceiver, methodReceiver, "nil *"+statement.Method))
+	}
+	for _, p := range statement.Closure.Params {
+		t := p.TypeExpr
+		if t == nil {
+			continue
+		}
+		_, isEnum := l.enums[t.Name]
+		switch {
+		case !t.Nullable && (t.Kind == parser.PointerType || t.Kind == parser.MapType):
+			text, err := l.goType(t)
+			if err != nil {
+				return nil, err
+			}
+			checks = append(checks, fmt.Sprintf("\tif %s == nil {\n\t\tanuyabi.Require(%q, %q)\n\t}\n", p.Name, p.Name, "nil "+text))
+		case !t.Nullable && t.Kind == parser.NamedType && (t.Name == "error" || l.interfaces[t.Name]):
+			checks = append(checks, fmt.Sprintf("\tanuyabi.RequireNonNilInterface(%q, %s)\n", p.Name, p.Name))
+		case !t.Nullable && t.Kind == parser.NamedType && isEnum:
+			checks = append(checks, fmt.Sprintf("\tanuyabi.RequireEnum(%q, uint32(%s), %d)\n", p.Name, p.Name, l.enums[t.Name]))
+		case t.Nullable && t.Kind == parser.NamedType && isEnum:
+			checks = append(checks, fmt.Sprintf("\tif %s.Present {\n\t\tanuyabi.RequireEnum(%q, uint32(%s.Value), %d)\n\t}\n", p.Name, p.Name, p.Name, l.enums[t.Name]))
+		}
+	}
+	if len(checks) > 0 {
+		l.boundaryUsed = true
+	}
+	return checks, nil
+}
+
+// boundaryWrapper renders the public Go-facing symbol of a wrapped
+// declaration (story 42, RFC-009 §6.8.5): the checks in parameter order,
+// then the forwarding call to the internal native entry.
+func (l *lowerer) boundaryWrapper(statement *parser.Statement, name string, checks []string) (string, error) {
+	cl := statement.Closure
+	sig, err := l.funcSignature(statement, name)
+	if err != nil {
+		return "", err
+	}
+	call := "__anuy_" + name + "("
+	for i, p := range cl.Params {
+		if i > 0 {
+			call += ", "
+		}
+		call += p.Name
+	}
+	call += ")"
+	if statement.Method != "" {
+		call = methodReceiver + "." + call
+	}
+	if len(cl.ResultList) > 0 || (statement.HasResult && cl.ResultTypeExpr != nil) {
+		call = "return " + call
+	}
+	var b strings.Builder
+	b.WriteString(sig + " {\n")
+	for _, check := range checks {
+		b.WriteString(check)
+	}
+	b.WriteString("\t" + call + "\n}\n\n")
+	return b.String(), nil
+}
+
+// function lowers one hoisted top-level declaration (story 16, RFC-002
+// §6.4.11-6.4.12, §6.7-6.8): parameters and the declared result render
+// through the representation rules, and the body lowers with the return
+// context set to the result's carrier element (empty for native-nil and
+// non-null results - raw returns). `//anuy:pure` is a kernel contract and
+// a no-op for generated Go. Story 42 (RFC-009 §6.8.1/§6.8.5): an exported
+// declaration with one-level invariants lowers to the public validating
+// wrapper plus the `__anuy_` internal native entry (§6.5.9); without
+// boundary work the wrapper merges into the implementation (§6.5.7) and
+// unexported declarations carry no boundary at all (§6.8.13).
+func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) error {
+	name := statement.Names[0]
+	checks, err := l.boundaryChecks(statement)
+	if err != nil {
+		return err
+	}
+	if len(checks) == 0 || !token.IsExported(name) {
+		return l.functionBody(decls, statement, name)
+	}
+	wrapper, err := l.boundaryWrapper(statement, name, checks)
+	if err != nil {
+		return err
+	}
+	decls.WriteString(wrapper)
+	return l.functionBody(decls, statement, "__anuy_"+name)
+}
+
+func (l *lowerer) functionBody(decls *strings.Builder, statement *parser.Statement, name string) error {
+	cl := statement.Closure
+	var b strings.Builder
+	sig, err := l.funcSignature(statement, name)
+	if err != nil {
+		return err
+	}
+	b.WriteString(sig)
 	b.WriteString(" {\n")
 	saved := l.returnCarrierElem
 	savedTypes, savedElems := l.returnTypes, l.returnElems
@@ -1056,6 +1211,12 @@ func (l *lowerer) value(value parser.Value) (string, error) {
 		// runtime check - the value lowers to its operand unchanged.
 		if operand, ok := assumeNonNullOperandText(value.Text); ok {
 			return operand, nil
+		}
+		// Story 42 (RFC-009 §6.8.14): value-position calls of wrapped
+		// functions retarget to the native entry; the bare-callee prefix
+		// guards against navigation text (`a.b(x)` keeps its shape).
+		if len(value.Idents) > 0 && l.wrappedFns[value.Idents[0]] && strings.HasPrefix(value.Text, value.Idents[0]+"(") {
+			return "__anuy_" + value.Text, nil
 		}
 		return value.Text, nil
 	}

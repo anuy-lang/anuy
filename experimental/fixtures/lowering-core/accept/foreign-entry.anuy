@@ -1,0 +1,36 @@
+type User struct {
+id int
+}
+type Color enum {
+red
+green
+blue
+}
+interface Reader {
+read() int
+}
+func UseUser(u *User) {
+u.id = 2
+}
+func UseColor(c Color) {
+}
+func UseColorOpt(c Color?) {
+}
+func UseReader(r Reader) {
+}
+func plain(u *User) {
+u.id = 3
+}
+func Add(a int, b int) int {
+return a
+}
+func First(u *User) int {
+return 1
+}
+func CallBoth(u *User) int {
+plain(u)
+UseUser(u)
+var n = First(u)
+return Add(n, n)
+}
+var u = User{id: 1}

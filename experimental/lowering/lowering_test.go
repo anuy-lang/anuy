@@ -3,6 +3,7 @@ package lowering
 import (
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -428,8 +429,11 @@ func (anuyabiTypes) Import(path string) (*types.Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The support package imports nothing, so no nested importer is needed.
+	// The support package only imports stdlib (fmt, reflect for the
+	// boundary helpers, story 42), so the default toolchain importer
+	// resolves the nested imports; the module path stays handled here.
 	var conf types.Config
+	conf.Importer = importer.Default()
 	return conf.Check(path, fset, []*ast.File{file}, nil)
 }
 
@@ -1151,6 +1155,160 @@ func TestLowerUnsafeCore(t *testing.T) {
 		if strings.Contains(got, banned) {
 			t.Fatalf("Lower() = %q, must not contain %q", got, banned)
 		}
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerForeignEntryPointerWrapperSplits(t *testing.T) {
+	// Story 42 (RFC-009 §6.8.1/§6.8.5): the exported name becomes the
+	// validating wrapper, the body moves to the internal native entry
+	// (§6.5.9) - nil is rejected before native observation, with the
+	// Go type spelled in the reason.
+	source := "type User struct {\nid int\n}\nfunc UseUser(u *User) {\nu.id = 2\n}\nvar u = User{id: 1}\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "func UseUser(u *User) {\n\tif u == nil {\n\t\tanuyabi.Require(\"u\", \"nil *User\")\n\t}\n\t__anuy_UseUser(u)\n}"
+	if !strings.Contains(got, wrapper) {
+		t.Fatalf("Lower() = %q, wants wrapper %q", got, wrapper)
+	}
+	if !strings.Contains(got, "func __anuy_UseUser(u *User) {\n\tu.id = 2\n}") {
+		t.Fatalf("Lower() = %q, wants internal with the body", got)
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerForeignEntryMapWrapperStaysNative(t *testing.T) {
+	// §6.8.2: a non-null map entering from Go is nil-checked; a nullable
+	// map (native-nil class) accepts nil and gets no wrapper - covered by
+	// the elision test below.
+	source := "type User struct {\nid int\n}\nfunc UseUsers(m map[string]User) {\n}\nvar m = map[string]User{}\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "if m == nil {\n\t\tanuyabi.Require(\"m\", \"nil map[string]User\")") {
+		t.Fatalf("Lower() = %q, wants map nil-check", got)
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerForeignEntryEnumRangeCheck(t *testing.T) {
+	// §6.8.6: contiguous ABI v1 - the wrapper pins the variant count of
+	// the declared enum.
+	source := "type Color enum {\nred\ngreen\nblue\n}\nfunc UseColor(c Color) {\n}\nvar x = 1\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "func UseColor(c Color) {\n\tanuyabi.RequireEnum(\"c\", uint32(c), 3)\n\t__anuy_UseColor(c)\n}"
+	if !strings.Contains(got, wrapper) {
+		t.Fatalf("Lower() = %q, wants enum wrapper %q", got, wrapper)
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerForeignEntryTaggedEnumPayload(t *testing.T) {
+	// §6.8.7: a present tagged nullable payload must itself satisfy the
+	// element invariants; the absent state ignores Value.
+	source := "type Color enum {\nred\n}\nfunc UseColorOpt(c Color?) {\n}\nvar x = 1\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "func UseColorOpt(c anuyabi.Nullable[Color]) {\n\tif c.Present {\n\t\tanuyabi.RequireEnum(\"c\", uint32(c.Value), 1)\n\t}\n\t__anuy_UseColorOpt(c)\n}"
+	if !strings.Contains(got, wrapper) {
+		t.Fatalf("Lower() = %q, wants tagged-payload wrapper %q", got, wrapper)
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerForeignEntryInterfaceTypedNil(t *testing.T) {
+	// §6.8.11: non-null native interfaces - declared and the builtin
+	// error - reject typed-nil dynamic values at the boundary.
+	source := "interface Reader {\nread() int\n}\nfunc UseReader(r Reader) {\n}\nfunc Check(e error) {\n}\nvar x = 1\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"func UseReader(r Reader) {\n\tanuyabi.RequireNonNilInterface(\"r\", r)\n\t__anuy_UseReader(r)\n}",
+		"func Check(e error) {\n\tanuyabi.RequireNonNilInterface(\"e\", e)\n\t__anuy_Check(e)\n}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerForeignEntryElidesWithoutInvariants(t *testing.T) {
+	// §6.5.7: the wrapper merges into the implementation when no boundary
+	// work is required - primitives and native-nil nullable params have
+	// no one-level invariants.
+	source := "func Add(a int, b int) int {\nreturn a\n}\nfunc Maybe(p *User?) {\n}\nvar x = 1\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "__anuy_") {
+		t.Fatalf("Lower() = %q, must not split unwrapped declarations", got)
+	}
+	if !strings.Contains(got, "func Add(a int, b int) int {\n\treturn a\n}") {
+		t.Fatalf("Lower() = %q, wants the merged implementation", got)
+	}
+}
+
+func TestLowerForeignEntryUnexportedStaysPlain(t *testing.T) {
+	// §6.8.13: unexported declarations are same-package surface - no
+	// foreign boundary, the name and body stay verbatim.
+	source := "type User struct {\nid int\n}\nfunc use(u *User) {\nu.id = 2\n}\nvar u = User{id: 1}\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "__anuy_use") {
+		t.Fatalf("Lower() = %q, must not wrap unexported declarations", got)
+	}
+	if !strings.Contains(got, "func use(u *User) {\n\tu.id = 2\n}") {
+		t.Fatalf("Lower() = %q, wants the verbatim unexported function", got)
+	}
+}
+
+func TestLowerForeignEntryMethodReceiverNilCheck(t *testing.T) {
+	// §6.8.13: exported method receivers are inside the boundary; the
+	// pointer receiver is nil-checked before the internal method runs.
+	source := "type User struct {\nid int\n}\nfunc *User.Save() {\n}\nvar u = User{id: 1}\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "func (anuyRecv *User) Save() {\n\tif anuyRecv == nil {\n\t\tanuyabi.Require(\"anuyRecv\", \"nil *User\")\n\t}\n\tanuyRecv.__anuy_Save()\n}"
+	if !strings.Contains(got, wrapper) {
+		t.Fatalf("Lower() = %q, wants method wrapper %q", got, wrapper)
+	}
+	if !strings.Contains(got, "func (anuyRecv *User) __anuy_Save() {") {
+		t.Fatalf("Lower() = %q, wants the internal method", got)
+	}
+}
+
+func TestLowerForeignEntryRetargetsDirectCalls(t *testing.T) {
+	// §6.8.14/§6.8.5: generated Anuy-to-Anuy calls target the native
+	// entry - bare call statements and value positions both retarget;
+	// unwrapped callees stay verbatim.
+	source := "type User struct {\nid int\n}\nfunc UseUser(u *User) {\nu.id = 2\n}\nfunc plain(u *User) {\nu.id = 3\n}\nfunc First(u *User) int {\nreturn 1\n}\nfunc Add(a int, b int) int {\nreturn a\n}\nfunc CallBoth(u *User) int {\nplain(u)\nUseUser(u)\nvar n = First(u)\nreturn Add(n, n)\n}\nvar u = User{id: 1}\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"\tplain(u)\n", "\t__anuy_UseUser(u)\n", "__anuy_First(u)", "\treturn Add(n, n)\n"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+	if strings.Contains(got, "__anuy_Add") {
+		t.Fatalf("Lower() = %q, must not retarget unwrapped callees", got)
 	}
 	typeCheckGenerated(t, source)
 }

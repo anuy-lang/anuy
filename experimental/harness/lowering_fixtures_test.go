@@ -49,7 +49,7 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"enum-switch-value.anuy", "text = \"red\"", true},
 		{"enum-switch-nullable.anuy", "case c.IsNil():", false},
 		{"error-try.anuy", "if err := Log(\"done\"); err != nil {", true},
-		{"error-strict-fallible.anuy", "func Load(path string, cause error) (Data, error) {", true},
+		{"error-strict-fallible.anuy", "func Load(path string, cause error) (Data, error) {", false},
 		{"error-correlation.anuy", "data, err := LoadData(path)", true},
 		{"error-discard.anuy", "Log(\"done\")", true},
 		{"interface-reader.anuy", "type Reader interface {", true},
@@ -58,6 +58,11 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
 		{"native-nil-map.anuy", "var m map[string]User", true},
 		{"native-nil-error.anuy", "var err error", true},
+		// Story 42 (RFC-009 §6.8): exported declarations split into the
+		// validating wrapper plus the `__anuy_` native entry; generated
+		// calls inside CallBoth retarget to the native entry while the
+		// unwrapped Add and plain stay verbatim.
+		{"foreign-entry.anuy", "__anuy_UseUser(u)\n\tn := __anuy_First(u)", false},
 	}
 	dir := filepath.Join("..", "fixtures", "lowering-core", "accept")
 	files, err := filepath.Glob(filepath.Join(dir, "*.anuy"))
