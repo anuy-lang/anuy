@@ -1312,3 +1312,129 @@ func TestLowerForeignEntryRetargetsDirectCalls(t *testing.T) {
 	}
 	typeCheckGenerated(t, source)
 }
+
+// Story 43 fixtures: one aggregate closure reused by the analysis and
+// emission tests - Role enum, self-pointing User, acyclic Badge,
+// invariant-free Meta, container Team.
+const aggregateSource = "type Role enum {\nmember\nadmin\n}\n" +
+	"type User struct {\nname string\nrole Role\nfriend *User\n}\n" +
+	"type Badge struct {\nlevel Role\n}\n" +
+	"type Meta struct {\ntag string\n}\n" +
+	"type Team struct {\nlead *User\nmembers []User\nlabels map[string]Role\nmeta Meta\n}\n"
+
+func TestLowerAggregateCycleValidatorWithSeen(t *testing.T) {
+	// Story 43 (RFC-009 §6.8.9, §6.8.17): User can reach a pointer cycle
+	// through friend - the validator takes the pointer and the visited
+	// set, and the wrapper allocates seen once at the boundary.
+	source := aggregateSource + "func UseUser(u *User) {\nu.name = \"ok\"\n}\nvar x = 1\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "func UseUser(u *User) {\n\tif u == nil {\n\t\tanuyabi.Require(\"u\", \"nil *User\")\n\t}\n\tseen := map[any]struct{}{}\n\t__anuy_validateUser(u, seen)\n\t__anuy_UseUser(u)\n}"
+	if !strings.Contains(got, wrapper) {
+		t.Fatalf("Lower() = %q, wants seen wrapper %q", got, wrapper)
+	}
+	validator := "func __anuy_validateUser(v *User, seen map[any]struct{}) {\n\tif v == nil {\n\t\treturn\n\t}\n\tif _, dup := seen[any(v)]; dup {\n\t\treturn\n\t}\n\tseen[any(v)] = struct{}{}\n\tanuyabi.RequireEnum(\"User.role\", uint32(v.role), 2)\n\tif v.friend == nil {\n\t\tanuyabi.Require(\"User.friend\", \"nil *User\")\n\t}\n\t__anuy_validateUser(v.friend, seen)\n}"
+	if !strings.Contains(got, validator) {
+		t.Fatalf("Lower() = %q, wants cycle-safe validator %q", got, validator)
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerInvariantFreeAggregateElided(t *testing.T) {
+	// §6.8.15: Meta carries no invariants - pass-through, no wrapper, no
+	// validator, no anuyabi dependency.
+	source := "type Meta struct {\ntag string\n}\nfunc UseMeta(m Meta) {\n}\nvar x = 1\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "__anuy_") {
+		t.Fatalf("Lower() = %q, must not touch invariant-free aggregates", got)
+	}
+	if strings.Contains(got, "anuyabi") {
+		t.Fatalf("Lower() = %q, must not import the support package", got)
+	}
+}
+
+func TestLowerAcyclicValueValidator(t *testing.T) {
+	// §6.8.17: Badge is invariant-bearing but provably acyclic - a value
+	// validator with no visited set, allocated nothing.
+	source := aggregateSource + "func UseBadge(b Badge) {\n}\nvar x = 1\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := "func __anuy_validateBadge(v Badge) {\n\tanuyabi.RequireEnum(\"Badge.level\", uint32(v.level), 2)\n}"
+	if !strings.Contains(got, validator) {
+		t.Fatalf("Lower() = %q, wants value validator %q", got, validator)
+	}
+	if strings.Contains(got, "map[any]struct{}") {
+		t.Fatalf("Lower() = %q, must not allocate a visited set for an acyclic closure", got)
+	}
+	if !strings.Contains(got, "\t__anuy_validateBadge(b)\n") {
+		t.Fatalf("Lower() = %q, wants the plain validator call", got)
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerContainerValidators(t *testing.T) {
+	// §6.8.8/§6.8.16: Team reaches the User cycle - its validator walks
+	// the pointer field, the slice elements and the map values, all
+	// through the shared visited set; the invariant-free meta field is
+	// skipped entirely.
+	source := aggregateSource + "func UseTeam(t Team) {\n}\nvar x = 1\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"if v.lead == nil {\n\t\tanuyabi.Require(\"Team.lead\", \"nil *User\")\n\t}",
+		"__anuy_validateUser(v.lead, seen)",
+		"for _, __anuy_e",
+		"__anuy_validateUser(&__anuy_e",
+		"anuyabi.RequireEnum(\"Team.labels\", uint32(__anuy_e",
+		"func __anuy_validateUser(v *User, seen map[any]struct{})",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+	if strings.Contains(got, "validateMeta") {
+		t.Fatalf("Lower() = %q, must not emit validators for invariant-free fields", got)
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerTaggedAggregatePayload(t *testing.T) {
+	// §6.8.7/§6.8.16: a present tagged payload validates through the
+	// element validator; the absent state stays unobserved.
+	source := aggregateSource + "func UseBadgeOpt(b Badge?) {\n}\nvar x = 1\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "func UseBadgeOpt(b anuyabi.Nullable[Badge]) {\n\tif b.Present {\n\t\t__anuy_validateBadge(b.Value)\n\t}\n\t__anuy_UseBadgeOpt(b)\n}"
+	if !strings.Contains(got, wrapper) {
+		t.Fatalf("Lower() = %q, wants tagged-payload wrapper %q", got, wrapper)
+	}
+	typeCheckGenerated(t, source)
+}
+
+func TestLowerValidatorEmissionDeterministic(t *testing.T) {
+	// §13 rule 76: ABI-visible generation is deterministic - two runs
+	// over the same source emit byte-identical validators.
+	source := aggregateSource + "func UseTeam(t Team) {\n}\nvar x = 1\n"
+	first, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("Lower() is not deterministic over the validator set")
+	}
+}

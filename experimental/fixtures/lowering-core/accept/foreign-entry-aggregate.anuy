@@ -1,0 +1,33 @@
+type Role enum {
+member
+admin
+}
+type User struct {
+name string
+role Role
+friend *User
+}
+type Badge struct {
+level Role
+}
+type Meta struct {
+tag string
+}
+type Team struct {
+lead *User
+members []User
+labels map[string]Role
+meta Meta
+}
+func UseUser(u *User) {
+u.name = "ok"
+}
+func UseBadge(b Badge) {
+}
+func UseBadgeOpt(b Badge?) {
+}
+func UseMeta(m Meta) {
+}
+func UseTeam(t Team) {
+}
+var x = 1

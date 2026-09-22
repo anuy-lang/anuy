@@ -63,6 +63,10 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		// calls inside CallBoth retarget to the native entry while the
 		// unwrapped Add and plain stay verbatim.
 		{"foreign-entry.anuy", "__anuy_UseUser(u)\n\tn := __anuy_First(u)", false},
+		// Story 43 (RFC-009 §6.8.8–6.8.9): aggregates get per-type
+		// validators; User can reach a pointer cycle, so its validator
+		// carries the visited set while the acyclic Badge one does not.
+		{"foreign-entry-aggregate.anuy", "func __anuy_validateUser(v *User, seen map[any]struct{})", false},
 	}
 	dir := filepath.Join("..", "fixtures", "lowering-core", "accept")
 	files, err := filepath.Glob(filepath.Join(dir, "*.anuy"))

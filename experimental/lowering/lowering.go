@@ -3,6 +3,7 @@ package lowering
 import (
 	"fmt"
 	"go/token"
+	"sort"
 	"strings"
 
 	"github.com/anuy-lang/anuy/experimental/parser"
@@ -20,7 +21,7 @@ func Lower(source string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}}
+	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}, structs: map[string][]parser.StructField{}, hasInvMemo: map[string]bool{}, hasInvWip: map[string]bool{}, seenMemo: map[string]bool{}, seenWip: map[string]bool{}}
 	// Story 16: top-level functions hoist to package-level declarations.
 	// The Run body lowers first, so the tracking maps are populated by the
 	// time the hoisted function bodies are rendered (captures stay
@@ -43,6 +44,11 @@ func Lower(source string) (string, error) {
 				// contiguous discriminant range of the boundary check.
 				l.enums[statement.Enum.Name] = len(statement.Enum.Variants)
 			}
+			if statement.Struct != nil {
+				// Story 43 (RFC-009 §6.8.16): the declared fields are the
+				// type-graph input of the aggregate boundary analysis.
+				l.structs[statement.Struct.Name] = statement.Struct.Fields
+			}
 		case parser.Impl:
 			// Story 39 (RFC-004 §6.8.2): impl is semantic metadata -
 			// after checking it erases from the generated Go.
@@ -59,13 +65,19 @@ func Lower(source string) (string, error) {
 		if !token.IsExported(name) {
 			continue
 		}
-		checks, err := l.boundaryChecks(&statement)
+		checks, _, err := l.boundaryChecks(&statement)
 		if err != nil {
 			return "", err
 		}
 		if len(checks) > 0 {
 			l.wrappedFns[name] = true
 		}
+	}
+	// Story 43 (RFC-009 §6.8.16): plan the per-type validators from the
+	// exported signatures - before any body renders, so wrapper and
+	// validator emission share one settled analysis.
+	if err := l.planValidators(funcs); err != nil {
+		return "", err
 	}
 	var body strings.Builder
 	last, err := l.statements(&body, bodyStatements)
@@ -80,6 +92,9 @@ func Lower(source string) (string, error) {
 		if err := l.typeDecl(&decls, &types[i]); err != nil {
 			return "", err
 		}
+	}
+	for _, src := range l.validators {
+		decls.WriteString(src)
 	}
 	for i := range funcs {
 		if err := l.function(&decls, &funcs[i]); err != nil {
@@ -110,6 +125,22 @@ type lowerer struct {
 	// enums maps a declared enum name to its variant count (story 42,
 	// RFC-009 §6.8.6): the boundary range check pins 1..variants.
 	enums map[string]int
+	// structs maps a declared struct name to its declared fields (story
+	// 43, RFC-009 §6.8.16): the type-graph input of the boundary
+	// analysis - embedded fields keep their derived name and flag.
+	structs map[string][]parser.StructField
+	// hasInvMemo/hasInvWip memoize the transitive invariant predicate
+	// (§6.8.15): in-progress marks the fixpoint cutoff - a type reachable
+	// only through itself contributes nothing.
+	hasInvMemo map[string]bool
+	hasInvWip  map[string]bool
+	// seenMemo/seenWip memoize the seen-map requirement (§6.8.9, §6.8.17):
+	// the type reaches a pointer cycle through its field closure.
+	seenMemo map[string]bool
+	seenWip  map[string]bool
+	// validators holds the emitted per-type validator sources (§6.8.16),
+	// lazily planned and deterministically sorted (§13 rule 76).
+	validators []string
 	// wrappedFns holds the exported top-level functions that receive a
 	// foreign-entry wrapper (story 42, RFC-009 §6.8): direct generated
 	// calls to them retarget to the `__anuy_` native entry (§6.8.14).
@@ -843,51 +874,499 @@ func (l *lowerer) funcSignature(statement *parser.Statement, name string) (strin
 	return b.String(), nil
 }
 
-// boundaryChecks renders the one-level foreign-entry checks of a
-// declaration (story 42, RFC-009 §6.8.2, §6.8.5–6.8.7, §6.8.11–6.8.13):
-// nil comparisons for non-null native-nil shapes, the discriminant range
-// for enums - present tagged payloads included (§6.8.7) - and typed-nil
-// rejection for non-null interfaces. Aggregate recursion and containers
-// are story 43 (§6.8.8–6.8.9); native-nil nullable parameters accept nil
-// as semantic nil (§6.2.2) and primitives carry no invariants. The
+// boundaryChecks renders the foreign-entry checks of a declaration
+// (story 42, RFC-009 §6.8.2, §6.8.5–6.8.7, §6.8.11–6.8.13; story 43 adds
+// aggregates and containers, §6.8.8–6.8.9, §6.8.15–6.8.17): one-level
+// invariants from story 42 plus per-type validator delegation. The
+// second result reports that the wrapper must own a seen map - any
+// parameter shape reaching a cycle-capable aggregate (§6.8.17). The
 // `unsafe func` form gets no exemption (§6.8.13).
-func (l *lowerer) boundaryChecks(statement *parser.Statement) ([]string, error) {
+func (l *lowerer) boundaryChecks(statement *parser.Statement) ([]string, bool, error) {
 	var checks []string
 	if statement.Method != "" && statement.MethodPointer {
 		// §6.8.13: exported method receivers are inside the boundary.
 		checks = append(checks, fmt.Sprintf("\tif %s == nil {\n\t\tanuyabi.Require(%q, %q)\n\t}\n", methodReceiver, methodReceiver, "nil *"+statement.Method))
 	}
+	needsSeen := false
 	for _, p := range statement.Closure.Params {
-		t := p.TypeExpr
-		if t == nil {
-			continue
+		if l.shapeNeedsSeen(p.TypeExpr) {
+			needsSeen = true
+			break
 		}
-		_, isEnum := l.enums[t.Name]
-		switch {
-		case !t.Nullable && (t.Kind == parser.PointerType || t.Kind == parser.MapType):
-			text, err := l.goType(t)
-			if err != nil {
-				return nil, err
-			}
-			checks = append(checks, fmt.Sprintf("\tif %s == nil {\n\t\tanuyabi.Require(%q, %q)\n\t}\n", p.Name, p.Name, "nil "+text))
-		case !t.Nullable && t.Kind == parser.NamedType && (t.Name == "error" || l.interfaces[t.Name]):
-			checks = append(checks, fmt.Sprintf("\tanuyabi.RequireNonNilInterface(%q, %s)\n", p.Name, p.Name))
-		case !t.Nullable && t.Kind == parser.NamedType && isEnum:
-			checks = append(checks, fmt.Sprintf("\tanuyabi.RequireEnum(%q, uint32(%s), %d)\n", p.Name, p.Name, l.enums[t.Name]))
-		case t.Nullable && t.Kind == parser.NamedType && isEnum:
-			checks = append(checks, fmt.Sprintf("\tif %s.Present {\n\t\tanuyabi.RequireEnum(%q, uint32(%s.Value), %d)\n\t}\n", p.Name, p.Name, p.Name, l.enums[t.Name]))
+	}
+	for _, p := range statement.Closure.Params {
+		lines, err := l.shapeChecks(p.Name, p.Name, p.TypeExpr, needsSeen)
+		if err != nil {
+			return nil, false, err
 		}
+		checks = append(checks, lines...)
 	}
 	if len(checks) > 0 {
 		l.boundaryUsed = true
 	}
-	return checks, nil
+	return checks, needsSeen, nil
+}
+
+// typeHasInv reports the transitive invariant predicate of a declared
+// struct (story 43, RFC-009 §6.8.15): true when any field carries a
+// one-level invariant or reaches an invariant-bearing aggregate. The
+// in-progress mark cuts the fixpoint - a type reachable only through
+// itself contributes nothing.
+func (l *lowerer) typeHasInv(name string) bool {
+	if v, ok := l.hasInvMemo[name]; ok {
+		return v
+	}
+	if l.hasInvWip[name] || l.structs[name] == nil {
+		return false
+	}
+	l.hasInvWip[name] = true
+	res := false
+	for _, f := range l.structs[name] {
+		if l.shapeHasInvariant(f.TypeExpr) {
+			res = true
+			break
+		}
+	}
+	delete(l.hasInvWip, name)
+	l.hasInvMemo[name] = res
+	return res
+}
+
+// shapeHasInvariant reports whether one field shape contributes an
+// entry invariant (RFC-009 §6.8.8, §6.8.15).
+func (l *lowerer) shapeHasInvariant(t *parser.TypeExpr) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Kind {
+	case parser.NamedType:
+		if _, enum := l.enums[t.Name]; enum {
+			return true
+		}
+		if t.Name == "error" || l.interfaces[t.Name] {
+			return !t.Nullable
+		}
+		return l.typeHasInv(t.Name)
+	case parser.PointerType:
+		if !t.Nullable {
+			return true // the nil itself is the invariant
+		}
+		return l.refHasInvariant(t.Elem)
+	case parser.MapType:
+		if !t.Nullable {
+			return true
+		}
+		return l.refHasInvariant(t.Key) || l.refHasInvariant(t.Value)
+	case parser.SliceType:
+		return l.refHasInvariant(t.Elem)
+	}
+	return false
+}
+
+// refHasInvariant reports whether a referenced element shape carries
+// invariants: pointer elements nil-check, enum elements range-check,
+// aggregate elements validate.
+func (l *lowerer) refHasInvariant(t *parser.TypeExpr) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Kind {
+	case parser.NamedType:
+		if _, enum := l.enums[t.Name]; enum {
+			return true
+		}
+		if t.Name == "error" || l.interfaces[t.Name] {
+			return false // dynamic values stay outside the slice
+		}
+		return l.typeHasInv(t.Name)
+	case parser.PointerType:
+		return true
+	case parser.SliceType:
+		return l.refHasInvariant(t.Elem)
+	case parser.MapType:
+		return l.refHasInvariant(t.Key) || l.refHasInvariant(t.Value)
+	}
+	return false
+}
+
+// namedTargets collects the declared struct names nested anywhere in the
+// shape - the all-edges graph of aggregate traversal.
+func (l *lowerer) namedTargets(t *parser.TypeExpr, out map[string]bool) {
+	if t == nil {
+		return
+	}
+	switch t.Kind {
+	case parser.NamedType:
+		if l.structs[t.Name] != nil {
+			out[t.Name] = true
+		}
+	case parser.PointerType, parser.SliceType:
+		l.namedTargets(t.Elem, out)
+	case parser.MapType:
+		l.namedTargets(t.Key, out)
+		l.namedTargets(t.Value, out)
+	}
+}
+
+// typeCycleCapable reports whether the struct closure of name can reach
+// itself again. A closed traversal path over value-only edges is
+// unconstructible in Go (the type would not compile), so any legal cycle
+// in the closure surfaces as self-reach over the all-edges graph.
+func (l *lowerer) typeCycleCapable(name string) bool {
+	visited := map[string]bool{}
+	seed := map[string]bool{}
+	for _, f := range l.structs[name] {
+		l.namedTargets(f.TypeExpr, seed)
+	}
+	stack := make([]string, 0, len(seed))
+	for t := range seed {
+		if t == name {
+			return true
+		}
+		stack = append(stack, t)
+	}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if visited[cur] || l.structs[cur] == nil {
+			continue
+		}
+		visited[cur] = true
+		next := map[string]bool{}
+		for _, f := range l.structs[cur] {
+			l.namedTargets(f.TypeExpr, next)
+		}
+		for t := range next {
+			if t == name {
+				return true
+			}
+			if !visited[t] {
+				stack = append(stack, t)
+			}
+		}
+	}
+	return false
+}
+
+// typeSeenNeeded reports whether validating the struct closure of name
+// can traverse a pointer cycle - the validator then carries the visited
+// set (RFC-009 §6.8.9, §6.8.17). The requirement propagates through
+// every edge, value edges included.
+func (l *lowerer) typeSeenNeeded(name string) bool {
+	if v, ok := l.seenMemo[name]; ok {
+		return v
+	}
+	if l.seenWip[name] || l.structs[name] == nil {
+		return false
+	}
+	l.seenWip[name] = true
+	res := l.typeCycleCapable(name)
+	if !res {
+		targets := map[string]bool{}
+		for _, f := range l.structs[name] {
+			l.namedTargets(f.TypeExpr, targets)
+		}
+		for t := range targets {
+			if l.typeSeenNeeded(t) {
+				res = true
+				break
+			}
+		}
+	}
+	delete(l.seenWip, name)
+	l.seenMemo[name] = res
+	return res
+}
+
+// shapeNeedsSeen reports whether validating the shape requires the
+// shared visited set - the wrapper then owns it (story 43, §6.8.17).
+func (l *lowerer) shapeNeedsSeen(t *parser.TypeExpr) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Kind {
+	case parser.NamedType:
+		return l.structs[t.Name] != nil && l.typeHasInv(t.Name) && l.typeSeenNeeded(t.Name)
+	case parser.PointerType:
+		return t.Elem != nil && t.Elem.Kind == parser.NamedType &&
+			l.structs[t.Elem.Name] != nil && l.typeHasInv(t.Elem.Name) && l.typeSeenNeeded(t.Elem.Name)
+	case parser.SliceType:
+		return l.shapeNeedsSeen(t.Elem)
+	case parser.MapType:
+		return l.shapeNeedsSeen(t.Key) || l.shapeNeedsSeen(t.Value)
+	}
+	return false
+}
+
+// aggregateCall renders the validator invocation for an aggregate value:
+// in place through the seen map for cycle-capable closures, by value for
+// provably acyclic ones (§6.8.17).
+func (l *lowerer) aggregateCall(name, expr string, hasSeen bool) (string, error) {
+	if l.typeSeenNeeded(name) {
+		if !hasSeen {
+			return "", fmt.Errorf("experimental lowering: boundary for %s requires a seen map", name)
+		}
+		return fmt.Sprintf("\t__anuy_validate%s(&%s, seen)\n", name, expr), nil
+	}
+	return fmt.Sprintf("\t__anuy_validate%s(%s)\n", name, expr), nil
+}
+
+// shapeChecks renders the boundary checks for one value of type t read
+// through expr, under the diagnostic label label (story 42/43, RFC-009
+// §6.8.5–6.8.9, §6.8.11–6.8.17): parameters, validator fields and
+// container elements share one engine. hasSeen reports that the
+// enclosing scope owns the shared visited set.
+func (l *lowerer) shapeChecks(label, expr string, t *parser.TypeExpr, hasSeen bool) ([]string, error) {
+	if t == nil {
+		return nil, nil
+	}
+	switch t.Kind {
+	case parser.NamedType:
+		if variants, ok := l.enums[t.Name]; ok {
+			if !t.Nullable {
+				return []string{fmt.Sprintf("\tanuyabi.RequireEnum(%q, uint32(%s), %d)\n", label, expr, variants)}, nil
+			}
+			return []string{fmt.Sprintf("\tif %s.Present {\n\t\tanuyabi.RequireEnum(%q, uint32(%s.Value), %d)\n\t}\n", expr, label, expr, variants)}, nil
+		}
+		if t.Name == "error" || l.interfaces[t.Name] {
+			if t.Nullable {
+				return nil, nil // native-nil class: nil is semantic nil (§6.2.7)
+			}
+			return []string{fmt.Sprintf("\tanuyabi.RequireNonNilInterface(%q, %s)\n", label, expr)}, nil
+		}
+		if l.structs[t.Name] == nil || !l.typeHasInv(t.Name) {
+			return nil, nil // primitives and invariant-free aggregates (§6.8.15)
+		}
+		// the tagged payload lives behind the carrier's Value field
+		// (§6.8.7); the absent state ignores it
+		callExpr := expr
+		if t.Nullable {
+			callExpr = expr + ".Value"
+		}
+		call, err := l.aggregateCall(t.Name, callExpr, hasSeen)
+		if err != nil {
+			return nil, err
+		}
+		if !t.Nullable {
+			return []string{call}, nil
+		}
+		return []string{fmt.Sprintf("\tif %s.Present {\n%s\t}\n", expr, indentText(call))}, nil
+	case parser.PointerType:
+		var lines []string
+		if !t.Nullable {
+			text, err := l.goType(t)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, fmt.Sprintf("\tif %s == nil {\n\t\tanuyabi.Require(%q, %q)\n\t}\n", expr, label, "nil "+text))
+		}
+		pointee, err := l.pointeeChecks(label, expr, t, hasSeen)
+		if err != nil {
+			return nil, err
+		}
+		return append(lines, pointee...), nil
+	case parser.MapType:
+		var lines []string
+		if !t.Nullable {
+			text, err := l.goType(t)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, fmt.Sprintf("\tif %s == nil {\n\t\tanuyabi.Require(%q, %q)\n\t}\n", expr, label, "nil "+text))
+		}
+		if !l.refHasInvariant(t.Key) && !l.refHasInvariant(t.Value) {
+			return lines, nil
+		}
+		// ranging over a nil map is zero iterations - the nullable
+		// native-nil class needs no guard (§6.2.4)
+		keyInv := l.refHasInvariant(t.Key)
+		kvar, evar := "_", l.loopVar()
+		if keyInv {
+			kvar = l.loopVar()
+		}
+		keyLines, err := l.shapeChecks(label, kvar, t.Key, hasSeen)
+		if err != nil {
+			return nil, err
+		}
+		valLines, err := l.shapeChecks(label, evar, t.Value, hasSeen)
+		if err != nil {
+			return nil, err
+		}
+		loop := fmt.Sprintf("\tfor %s, %s := range %s {\n", kvar, evar, expr) + indent(append(keyLines, valLines...)) + "\t}\n"
+		return append(lines, loop), nil
+	case parser.SliceType:
+		if !l.refHasInvariant(t.Elem) {
+			return nil, nil
+		}
+		evar := l.loopVar()
+		inner, err := l.shapeChecks(label, evar, t.Elem, hasSeen)
+		if err != nil {
+			return nil, err
+		}
+		loop := fmt.Sprintf("\tfor _, %s := range %s {\n", evar, expr) + indent(inner) + "\t}\n"
+		if t.Nullable {
+			// tagged nullable slice: the absent state ignores the payload
+			return []string{fmt.Sprintf("\tif %s.Present {\n%s\t}\n", expr, indentText(loop))}, nil
+		}
+		return []string{loop}, nil
+	}
+	return nil, nil
+}
+
+// pointeeChecks validates the pointee of a pointer whose nil case is
+// handled: cycle-capable targets validate in place through the seen map,
+// acyclic ones through the value validator on the dereference.
+func (l *lowerer) pointeeChecks(label, expr string, t *parser.TypeExpr, hasSeen bool) ([]string, error) {
+	e := t.Elem
+	if e == nil {
+		return nil, nil
+	}
+	if e.Kind == parser.NamedType && l.structs[e.Name] != nil && l.typeSeenNeeded(e.Name) {
+		if !hasSeen {
+			return nil, fmt.Errorf("experimental lowering: boundary for %s requires a seen map", label)
+		}
+		if t.Nullable {
+			return []string{fmt.Sprintf("\tif %s != nil {\n\t\t__anuy_validate%s(%s, seen)\n\t}\n", expr, e.Name, expr)}, nil
+		}
+		return []string{fmt.Sprintf("\t__anuy_validate%s(%s, seen)\n", e.Name, expr)}, nil
+	}
+	return l.shapeChecks(label, "*"+expr, e, hasSeen)
+}
+
+// loopVar mints a fresh deterministic element variable (§13 rule 76).
+func (l *lowerer) loopVar() string {
+	v := fmt.Sprintf("__anuy_e%d", l.temps)
+	l.temps++
+	return v
+}
+
+func indent(lines []string) string {
+	var b strings.Builder
+	for _, line := range lines {
+		b.WriteString("\t" + line)
+	}
+	return b.String()
+}
+
+// indentText prefixes every non-empty line of an already-rendered block
+// with one tab - the inline wrapper of single-block indentations.
+func indentText(block string) string {
+	lines := strings.Split(block, "\n")
+	for i, line := range lines {
+		if line != "" {
+			lines[i] = "\t" + line
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// planValidators collects the per-type validator set (story 43, RFC-009
+// §6.8.16): the closure of aggregate types reachable from exported
+// signatures through invariant-bearing paths, emitted deterministically
+// (§13 rule 76).
+func (l *lowerer) planValidators(funcs []parser.Statement) error {
+	needed := map[string]bool{}
+	for i := range funcs {
+		statement := funcs[i]
+		if !token.IsExported(statement.Names[0]) {
+			continue
+		}
+		for _, p := range statement.Closure.Params {
+			l.seedShape(p.TypeExpr, needed)
+		}
+	}
+	queue := make([]string, 0, len(needed))
+	for name := range needed {
+		queue = append(queue, name)
+	}
+	for len(queue) > 0 {
+		name := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		for _, f := range l.structs[name] {
+			if !l.shapeHasInvariant(f.TypeExpr) {
+				continue
+			}
+			targets := map[string]bool{}
+			l.namedTargets(f.TypeExpr, targets)
+			for t := range targets {
+				if l.typeHasInv(t) && !needed[t] {
+					needed[t] = true
+					queue = append(queue, t)
+				}
+			}
+		}
+	}
+	names := make([]string, 0, len(needed))
+	for name := range needed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		src, err := l.validatorSource(name)
+		if err != nil {
+			return err
+		}
+		l.validators = append(l.validators, src)
+	}
+	return nil
+}
+
+// seedShape collects the aggregate validators a parameter shape calls
+// directly.
+func (l *lowerer) seedShape(t *parser.TypeExpr, needed map[string]bool) {
+	if t == nil {
+		return
+	}
+	switch t.Kind {
+	case parser.NamedType:
+		if l.structs[t.Name] != nil && l.typeHasInv(t.Name) {
+			needed[t.Name] = true
+		}
+	case parser.PointerType, parser.SliceType:
+		l.seedShape(t.Elem, needed)
+	case parser.MapType:
+		l.seedShape(t.Key, needed)
+		l.seedShape(t.Value, needed)
+	}
+}
+
+// validatorSource renders one per-type validator (story 43, RFC-009
+// §6.8.16): the pointer form with the visited set for cycle-capable
+// closures (§6.8.9/§6.8.17), the value form for provably acyclic ones.
+func (l *lowerer) validatorSource(name string) (string, error) {
+	fields := l.structs[name]
+	if fields == nil {
+		return "", fmt.Errorf("experimental lowering: validator for undeclared struct %s", name)
+	}
+	var b strings.Builder
+	seen := l.typeSeenNeeded(name)
+	if seen {
+		fmt.Fprintf(&b, "func __anuy_validate%s(v *%s, seen map[any]struct{}) {\n\tif v == nil {\n\t\treturn\n\t}\n\tif _, dup := seen[any(v)]; dup {\n\t\treturn\n\t}\n\tseen[any(v)] = struct{}{}\n", name, name)
+	} else {
+		fmt.Fprintf(&b, "func __anuy_validate%s(v %s) {\n", name, name)
+	}
+	for _, f := range fields {
+		if f.TypeExpr == nil {
+			continue
+		}
+		lines, err := l.shapeChecks(name+"."+f.Name, "v."+f.Name, f.TypeExpr, seen)
+		if err != nil {
+			return "", err
+		}
+		for _, line := range lines {
+			b.WriteString(line)
+		}
+	}
+	b.WriteString("}\n\n")
+	return b.String(), nil
 }
 
 // boundaryWrapper renders the public Go-facing symbol of a wrapped
 // declaration (story 42, RFC-009 §6.8.5): the checks in parameter order,
-// then the forwarding call to the internal native entry.
-func (l *lowerer) boundaryWrapper(statement *parser.Statement, name string, checks []string) (string, error) {
+// then the forwarding call to the internal native entry. needsSeen
+// allocates the shared visited set once at the boundary (story 43,
+// §6.8.9/§6.8.17).
+func (l *lowerer) boundaryWrapper(statement *parser.Statement, name string, checks []string, needsSeen bool) (string, error) {
 	cl := statement.Closure
 	sig, err := l.funcSignature(statement, name)
 	if err != nil {
@@ -909,6 +1388,21 @@ func (l *lowerer) boundaryWrapper(statement *parser.Statement, name string, chec
 	}
 	var b strings.Builder
 	b.WriteString(sig + " {\n")
+	if needsSeen {
+		// the visited set is allocated after the rejecting nil checks but
+		// before the first validator call that threads it - an invalid
+		// pointer panics without paying the allocation (§6.8.10)
+		inserted := false
+		ordered := make([]string, 0, len(checks)+1)
+		for _, check := range checks {
+			if !inserted && strings.Contains(check, ", seen)") {
+				ordered = append(ordered, "\tseen := map[any]struct{}{}\n")
+				inserted = true
+			}
+			ordered = append(ordered, check)
+		}
+		checks = ordered
+	}
 	for _, check := range checks {
 		b.WriteString(check)
 	}
@@ -928,14 +1422,14 @@ func (l *lowerer) boundaryWrapper(statement *parser.Statement, name string, chec
 // unexported declarations carry no boundary at all (§6.8.13).
 func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) error {
 	name := statement.Names[0]
-	checks, err := l.boundaryChecks(statement)
+	checks, needsSeen, err := l.boundaryChecks(statement)
 	if err != nil {
 		return err
 	}
 	if len(checks) == 0 || !token.IsExported(name) {
 		return l.functionBody(decls, statement, name)
 	}
-	wrapper, err := l.boundaryWrapper(statement, name, checks)
+	wrapper, err := l.boundaryWrapper(statement, name, checks, needsSeen)
 	if err != nil {
 		return err
 	}
