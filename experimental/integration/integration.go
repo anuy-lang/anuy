@@ -145,8 +145,10 @@ type builder struct {
 	nextBlockID semantic.BlockID
 	loops       []loopContext
 	diagnostics []semantic.Diagnostic
-	// nilable marks bindings declared with a nullable `T?` type - the only
-	// nilability evidence in the type-free experimental layer.
+	// nilable marks bindings declared with a nullable `T?` spelling
+	// (story 05); together with an inferred nullable class (story 08) it
+	// forms the statically-nullable predicate - the shared gate of the
+	// deref requirement and the fact consultation (RFC-002 §6.3.11).
 	nilable map[semantic.BindingID]bool
 	// classes carries the static nullability class per binding (story 08,
 	// G1 decision): declared named types classify by their `?`, untyped
@@ -341,12 +343,19 @@ func (b *builder) assume(id semantic.BindingID) {
 	b.nonNil[b.cur][id] = true
 }
 
-// needsNonNilProof reports whether an ordinary member access on the binding
-// requires the non-nil proof: a declared `T?` (story 05 nilable set) or an
-// inferred-nullable class (story 08 inference, Q2-A). Unknown classes keep
-// the platform semantics - dereference free, nothing established.
-func (b *builder) needsNonNilProof(id semantic.BindingID) bool {
+// staticallyNullable reports whether the binding's static nullability
+// class is nullable: a declared `T?` spelling (story 05 nilable set) or
+// an inferred nullable class (story 08 inference, Q2-A). Unknown classes
+// keep the platform semantics - dereference free, nothing established.
+func (b *builder) staticallyNullable(id semantic.BindingID) bool {
 	return b.nilable[id] || b.classes[id] == semantic.NullabilityNullable
+}
+
+// needsNonNilProof reports whether an ordinary member access on the
+// binding requires the non-nil proof - the deref half of the
+// statically-nullable predicate (§6.3.11).
+func (b *builder) needsNonNilProof(id semantic.BindingID) bool {
+	return b.staticallyNullable(id)
 }
 
 // classifyValue assigns the nullability class of an RHS value per the
@@ -410,8 +419,11 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 		if id == 0 {
 			return semantic.NullabilityUnknown
 		}
-		if b.nilable[id] {
-			if b.nonNil[b.cur][id] {
+		if b.staticallyNullable(id) {
+			// The fact is older than the declared class: a live non-nil
+			// proof refines any statically nullable binding - declared
+			// `T?` or inferred alike (§6.3.11, F-41-1).
+			if b.isNonNil(id) {
 				return semantic.NullabilityNonNull
 			}
 			return semantic.NullabilityNullable
@@ -1435,7 +1447,9 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	var joinPath map[string]bool
 	switch {
 	case thenTerminated && !elseTerminated:
-		joinFacts, joinNN, joinPath = elseFacts, elseNN, elsePath
+		// The surviving side's maps may alias the entry state (the
+		// implicit else) - copy before the join mutates them below.
+		joinFacts, joinNN, joinPath = elseFacts, copyFacts(elseNN), elsePath
 	case elseTerminated && !thenTerminated:
 		joinFacts, joinNN, joinPath = thenFacts, thenNN, thenPath
 	case thenTerminated && elseTerminated:
@@ -1450,6 +1464,13 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	b.facts[b.cur] = joinFacts
 	b.nonNil[b.cur] = joinNN
 	b.pathNN[b.cur] = joinPath
+	// RFC-002 §6.3.2: a terminated `x == nil` branch proves `x != nil` on
+	// the surviving path - the fact attaches at the join, for declared
+	// and inferred spellings alike (§6.3.11, story 44). The Assume op
+	// feeds the kernel deref machine, the map the builder consumers.
+	if thenTerminated && !elseTerminated && !negated && guardID != 0 {
+		b.assume(guardID)
+	}
 	joinID := b.blocks[b.cur].ID
 	b.connect(start, thenID)
 	if !thenTerminated && !joinUnreachable {
