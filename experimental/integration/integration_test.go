@@ -1321,6 +1321,38 @@ func TestAnalyzeSourceUnknownClassStaysUnrefinedAndSilent(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSourceInferredNullableAdvisorySurface(t *testing.T) {
+	// Story 44 (§6.3.11): the advisory surface reads the live fact for an
+	// inferred-nullable binding exactly as for a declared `T?`.
+	base := "func use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\n"
+	// D-4 (§8.2.4): `?.` behind the proof is redundant - a Warning.
+	d4, err := AnalyzeSource(base + "func T.m() {\n}\nvar u = fetch()\nif u != nil {\nu?.m()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, d4, "RedundantSafeNavigation")
+	if d4.Diagnostics[0].Severity != semantic.SeverityWarning {
+		t.Fatalf("d4 severity = %s, want Warning", d4.Diagnostics[0].Severity)
+	}
+	// D-5 (§8.2.5): the repeated check behind the proof is redundant.
+	d5, err := AnalyzeSource(base + "var u = fetch()\nif u != nil {\nif u == nil {\n}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, d5, "RedundantNilCheck")
+	// §6.6.8 (RFC-007): proof beats assertion - after the early exit the
+	// join carries the fact (§6.3.2), so the assertion warns on the
+	// inferred operand too.
+	assertion, err := AnalyzeSource(base + "var u = fetch()\nif u == nil {\nreturn\n}\nunsafe {\nassume_non_nil(u)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, assertion, "RedundantUnsafeAssertion")
+	if assertion.Diagnostics[0].Code != "ANUY5002" {
+		t.Fatalf("assertion code = %s, want ANUY5002", assertion.Diagnostics[0].Code)
+	}
+}
+
 func TestAnalyzeSourceReportsNilLiteralArgument(t *testing.T) {
 	result, err := AnalyzeSource("func save(u User) {\n}\nsave(nil)\n")
 	if err != nil {
