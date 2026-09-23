@@ -327,14 +327,21 @@ type Statement struct {
 	UnsafeFunc bool
 	// Method is non-empty for a method declaration (story 08, owner
 	// decision 2026-09-17, task-1-8-1-2): the receiver type name as written
-	// (`User` in `func User.age() int`). The declared name is Names[0];
-	// methods bind no scope name - resolution goes through the per-type
-	// method sets (story 39).
+	// (`User` in `func (u User) age() int`). The declared name is Names[0];
+	// methods resolve through the per-type method sets (story 39).
 	Method string
-	// MethodPointer records the pointer-receiver spelling `func *T.name`
-	// (story 39, RFC-004 §6.2.1): the receiver kind feeds the method set
+	// MethodPointer records the pointer-receiver spelling `func (u *T) m()`
+	// (RFC-004 §6.2.1): the receiver kind feeds the method set
 	// (impl for T requires value receivers, impl for *T both forms).
 	MethodPointer bool
+	// ReceiverName is the source receiver binding of a method declaration
+	// (story 45, ADR-0011, RFC-004 §6.1.7); empty for the unnamed `(*T)`
+	// and blank `(_ *T)` Go forms - the body gets no binding. Receivers
+	// carry no scope name outside their own body.
+	ReceiverName string
+	// ReceiverType is the parsed receiver type (`T`, `*T`, `T?`, `*T?`);
+	// non-nil for every method declaration.
+	ReceiverType *TypeExpr
 	// HasResult records a declared result type (`func f() User`, RFC-002
 	// §40 spelling): `return expr` is valid only inside such a declaration.
 	HasResult bool

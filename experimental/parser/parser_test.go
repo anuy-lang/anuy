@@ -931,7 +931,9 @@ func TestParseRejectsCallStatementEdges(t *testing.T) {
 }
 
 func TestParseMethodDeclaration(t *testing.T) {
-	program, err := Parse("func User.age() int {\n}\n")
+	// Story 45 (ADR-0011, RFC-004 §6.1.2): the Go receiver form with a
+	// receiver binding.
+	program, err := Parse("func (u User) age() int {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -942,8 +944,14 @@ func TestParseMethodDeclaration(t *testing.T) {
 	if s.Kind != Function || len(s.Names) != 1 || s.Names[0] != "age" {
 		t.Fatalf("statement = %#v, want a Function declaration of age", s)
 	}
-	if s.Method != "User" {
-		t.Fatalf("Method = %q, want %q", s.Method, "User")
+	if s.Method != "User" || s.MethodPointer {
+		t.Fatalf("Method/MethodPointer = %q/%v, want User/false", s.Method, s.MethodPointer)
+	}
+	if s.ReceiverName != "u" {
+		t.Fatalf("ReceiverName = %q, want %q", s.ReceiverName, "u")
+	}
+	if s.ReceiverType == nil || s.ReceiverType.Kind != NamedType || s.ReceiverType.Name != "User" {
+		t.Fatalf("ReceiverType = %#v, want the named type User", s.ReceiverType)
 	}
 	if !s.HasResult || s.ResultNullable {
 		t.Fatalf("HasResult/ResultNullable = %v/%v, want true/false", s.HasResult, s.ResultNullable)
@@ -951,7 +959,7 @@ func TestParseMethodDeclaration(t *testing.T) {
 }
 
 func TestParseMethodDeclarationNullableResult(t *testing.T) {
-	program, err := Parse("func User.manager() User? {\n}\n")
+	program, err := Parse("func (u User) manager() User? {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -962,7 +970,7 @@ func TestParseMethodDeclarationNullableResult(t *testing.T) {
 }
 
 func TestParseMethodWithArguments(t *testing.T) {
-	program, err := Parse("func User.deposit(x int) {\n}\n")
+	program, err := Parse("func (u User) deposit(x int) {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -972,6 +980,76 @@ func TestParseMethodWithArguments(t *testing.T) {
 	}
 	if s.Closure == nil || len(s.Closure.Params) != 1 || s.Closure.Params[0].Name != "x" {
 		t.Fatalf("params = %#v, want one parameter x", s.Closure)
+	}
+}
+
+func TestParsePointerReceiverMethod(t *testing.T) {
+	// Story 45 (RFC-004 §6.1.2/§6.2.1): `func (f *File) m()` - the
+	// pointer-receiver spelling feeds the method set; the `?` suffix
+	// carries the nullable pointer.
+	program, err := Parse("func (f *File) Read(d Data) Data {\nreturn d\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := program.Statements[0]
+	if statement.Method != "File" || !statement.MethodPointer || statement.Names[0] != "Read" {
+		t.Fatalf("method = %+v, want pointer receiver File.Read", statement)
+	}
+	if statement.ReceiverName != "f" {
+		t.Fatalf("ReceiverName = %q, want %q", statement.ReceiverName, "f")
+	}
+	if statement.ReceiverType == nil || statement.ReceiverType.Kind != PointerType {
+		t.Fatalf("ReceiverType = %#v, want the pointer type", statement.ReceiverType)
+	}
+	value, err := Parse("func (f File) Read(d Data) Data {\nreturn d\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Statements[0].MethodPointer {
+		t.Fatal("value receiver parsed as pointer")
+	}
+	nullable, err := Parse("func (f *File?) Touch() {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := nullable.Statements[0].ReceiverType
+	if rt == nil || rt.Kind != PointerType || !rt.Nullable {
+		t.Fatalf("ReceiverType = %#v, want the nullable pointer", rt)
+	}
+}
+
+func TestParseUnnamedAndBlankReceiver(t *testing.T) {
+	// Story 45 (RFC-004 §6.1.7): unnamed and blank receivers are valid Go
+	// forms - they create no binding in the body scope.
+	for _, source := range []string{
+		"func (*File) M() {\n}\n",
+		"func (_ *File) M() {\n}\n",
+		"func (File) M() {\n}\n",
+	} {
+		program, err := Parse(source)
+		if err != nil {
+			t.Fatalf("%q: %v", source, err)
+		}
+		if program.Statements[0].ReceiverName != "" {
+			t.Fatalf("%q: ReceiverName = %q, want empty", source, program.Statements[0].ReceiverName)
+		}
+		if program.Statements[0].Method != "File" {
+			t.Fatalf("%q: Method = %q, want File", source, program.Statements[0].Method)
+		}
+	}
+}
+
+func TestParseDottedMethodFormRejected(t *testing.T) {
+	// Story 45 (ADR-0011): the transitional `func [*]T.m` form is gone -
+	// the rejection names the receiver form.
+	for _, source := range []string{"func File.Read() {\n}\n", "func *File.Read() {\n}\n"} {
+		_, err := Parse(source)
+		if err == nil {
+			t.Fatalf("%q accepted, want a rejection", source)
+		}
+		if !strings.Contains(err.Error(), "receiver") {
+			t.Fatalf("%q: error = %v, want a receiver-form hint", source, err)
+		}
 	}
 }
 
@@ -1712,26 +1790,6 @@ func TestParseImplStatement(t *testing.T) {
 	}
 	if _, err := Parse("impl Reader File\n"); err == nil {
 		t.Fatal("impl without for accepted")
-	}
-}
-
-func TestParsePointerReceiverMethod(t *testing.T) {
-	// Story 39 (RFC-004 §6.2.1): `func *T.name` - the pointer-receiver
-	// spelling feeds the method set (§6.2.1).
-	program, err := Parse("func *File.Read(d Data) Data {\nreturn d\n}\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	statement := program.Statements[0]
-	if statement.Method != "File" || !statement.MethodPointer || statement.Names[0] != "Read" {
-		t.Fatalf("method = %+v, want pointer receiver File.Read", statement)
-	}
-	value, err := Parse("func File.Read(d Data) Data {\nreturn d\n}\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value.Statements[0].MethodPointer {
-		t.Fatal("value receiver parsed as pointer")
 	}
 }
 
