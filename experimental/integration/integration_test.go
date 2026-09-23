@@ -1240,6 +1240,54 @@ func TestAnalyzeSourceReportsNullableArgument(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSourceAcceptsInferredNullableEarlyExit(t *testing.T) {
+	// Story 44 (RFC-002 §6.3.11, F-41-1): the early-exit proof refines an
+	// inferred-nullable binding exactly like a declared `T?` - the
+	// canonical RFC-007 §6.3.3 validation form runs without unsafe.
+	result, err := AnalyzeSource("func use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\nvar u = fetch()\nif u == nil {\nreturn\n}\nuse(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics (§6.3.11 refinement)", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceAcceptsInferredNullableNilCheckBranch(t *testing.T) {
+	// The `!= nil` branch form refines the inferred-nullable binding too.
+	result, err := AnalyzeSource("func use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\nvar u = fetch()\nif u != nil {\nuse(u)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics (§6.3.11 refinement)", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceAcceptsInferredNullableEstablishment(t *testing.T) {
+	// §6.3.5: a fact-carrying binding is an establishing RHS - no D-1 on
+	// the non-null target.
+	result, err := AnalyzeSource("func use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\nvar u = fetch()\nif u != nil {\nvar v User = u\nuse(v)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics (establishment via fact)", result.Diagnostics)
+	}
+}
+
+func TestAnalyzeSourceAcceptsInferredNullableAssertionFact(t *testing.T) {
+	// RFC-007 §6.6.11: the statement-form assertion attaches the fact to
+	// the operand; a later read consults it regardless of the spelling.
+	result, err := AnalyzeSource("func use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\nvar u = fetch()\nunsafe {\nassume_non_nil(u)\nuse(u)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("result = %#v, want no diagnostics (§6.6.11 fact on inferred operand)", result.Diagnostics)
+	}
+}
+
 func TestAnalyzeSourceReportsNilLiteralArgument(t *testing.T) {
 	result, err := AnalyzeSource("func save(u User) {\n}\nsave(nil)\n")
 	if err != nil {
