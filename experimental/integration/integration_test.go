@@ -1288,6 +1288,39 @@ func TestAnalyzeSourceAcceptsInferredNullableAssertionFact(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSourceInferredNullableAssignmentKillsFact(t *testing.T) {
+	// §6.3.4: the reassignment invalidates the proof - ANUY4003 returns
+	// even though the branch proved the binding earlier.
+	result, err := AnalyzeSource("func use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\nvar u = fetch()\nif u != nil {\nu = fetch()\nuse(u)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NullableArgument")
+}
+
+func TestAnalyzeSourceInferredNullableFactDoesNotSurviveJoin(t *testing.T) {
+	// §6.3.4/§6.3.5: the join lowers facts to the intersection - the
+	// branch-local proof does not leak past the merge.
+	result, err := AnalyzeSource("func use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\nvar u = fetch()\nif u != nil {\nuse(u)\n}\nuse(u)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, result, "NullableArgument")
+}
+
+func TestAnalyzeSourceUnknownClassStaysUnrefinedAndSilent(t *testing.T) {
+	// §6.3.11: unknown classes keep the platform semantics - no D-3, no
+	// D-4 on the unproven value, and the fact refines nothing about the
+	// classification.
+	result, err := AnalyzeSource("func T.m() {\n}\nfunc use(u User) {\n}\nvar x = mystery()\nx?.m()\nif x != nil {\nx?.m()\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 1 || string(result.Diagnostics[0].Category) != "RedundantSafeNavigation" {
+		t.Fatalf("result = %#v, want exactly one D-4 inside the proven branch, silence outside", result.Diagnostics)
+	}
+}
+
 func TestAnalyzeSourceReportsNilLiteralArgument(t *testing.T) {
 	result, err := AnalyzeSource("func save(u User) {\n}\nsave(nil)\n")
 	if err != nil {
