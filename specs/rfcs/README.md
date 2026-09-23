@@ -63,3 +63,6 @@ experimental narrow slice; no RFC is fully implemented yet.
 | 001 | Values, Initialization and Trust       | Accepted | 4       | 2026-09-19 |
 | 002 | Nullability and Nil Safety             | Accepted | 4       | 2026-09-19 |
 | 003 | Variables, Assignment and Scope        | Accepted | 4       | 2026-09-19 |
+| 004 | Interfaces and Explicit `impl`         | Accepted | 5       | 2026-09-24 |
+| 006 | Enums and Exhaustive Matching          | Accepted | 6       | 2026-09-24 |
+| 007 | Unsafe and Foreign Contracts           | Accepted | 4       | 2026-09-24 |
