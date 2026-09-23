@@ -1,0 +1,13 @@
+type User struct {
+id int
+}
+func Use(u *User) {
+}
+func Lookup() *User? {
+return nil
+}
+var user = Lookup()
+if user == nil {
+return
+}
+Use(user)

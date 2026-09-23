@@ -1159,6 +1159,25 @@ func TestLowerUnsafeCore(t *testing.T) {
 	typeCheckGenerated(t, source)
 }
 
+func TestLowerInferredNullableCanonicalValidationForm(t *testing.T) {
+	// Story 44 (RFC-002 §6.3.11, RFC-007 §6.3.3): the canonical
+	// pointer-validation form is the compilable end-to-end pin - the
+	// nullable class arrives by inference (`var user = Lookup()`, no `T?`
+	// spelling), the early-exit nil check proves the binding, and the
+	// post-proof call passes the value to the validating boundary entry.
+	source := "type User struct {\nid int\n}\nfunc Use(u *User) {\n}\nfunc Lookup() *User? {\nreturn nil\n}\nvar user = Lookup()\nif user == nil {\nreturn\n}\nUse(user)\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"user := Lookup()", "if user == nil {", "__anuy_Use(user)"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Lower() = %q, wants %q", got, want)
+		}
+	}
+	typeCheckGenerated(t, source)
+}
+
 func TestLowerForeignEntryPointerWrapperSplits(t *testing.T) {
 	// Story 42 (RFC-009 §6.8.1/§6.8.5): the exported name becomes the
 	// validating wrapper, the body moves to the internal native entry

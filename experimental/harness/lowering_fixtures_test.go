@@ -67,6 +67,11 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		// validators; User can reach a pointer cycle, so its validator
 		// carries the visited set while the acyclic Badge one does not.
 		{"foreign-entry-aggregate.anuy", "func __anuy_validateUser(v *User, seen map[any]struct{})", false},
+		// Story 44 (RFC-002 §6.3.11, RFC-007 §6.3.3): the canonical
+		// pointer-validation form - the nullable class arrives by
+		// inference, the early-exit proof needs no spelling, and the
+		// post-proof call retargets to the validating boundary entry.
+		{"inferred-nullable-narrowing.anuy", "__anuy_Use(user)", false},
 	}
 	dir := filepath.Join("..", "fixtures", "lowering-core", "accept")
 	files, err := filepath.Glob(filepath.Join(dir, "*.anuy"))
