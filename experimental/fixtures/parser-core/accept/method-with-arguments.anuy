@@ -1,2 +1,2 @@
-func User.deposit(x int) {
+func (u User) deposit(x int) {
 }

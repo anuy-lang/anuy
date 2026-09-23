@@ -701,10 +701,6 @@ func isCallStatementStart(tokens []token) bool {
 }
 
 // parseFunctionDecl parses the story 07 declaration form `func name(params)
-// { body }` and the story 08 extensions (owner decision 2026-09-17,
-// task-1-8-1-2): the method form `func T.name(params) [ret] { body }`
-// (RFC-002 §40) and the result type after the parameter list. The declared
-// parseFunctionDecl parses the story 07 declaration form `func name(params)
 // [result] {` or the Go receiver method form `func (r [*]T) name(params)
 // [result] {` (story 45, ADR-0011, RFC-004 §6.1.2). The receiver group
 // reuses the parameter type grammar; unnamed `(*T)` and blank `(_ *T)`
@@ -787,6 +783,12 @@ func (lp *lineParser) parseReceiverMethod(tokens []token, line sourceLine) (Stat
 	receiverType, terr := parseType(typeTokens)
 	if terr != nil {
 		return Statement{}, terr
+	}
+	if receiverType.Kind == NamedType && receiverType.Nullable {
+		// RFC-004 §6.1.7: the generated Go cannot define methods on the
+		// carrier type (RFC-009 §6.7) - a nullable receiver uses the
+		// pointer spelling `*T?`.
+		return Statement{}, newError(UnsupportedSyntax, receiverType.Span.Start, "nullable value receiver is not a receiver form; use *T?")
 	}
 	base := receiverType
 	if base.Kind == PointerType {

@@ -823,18 +823,30 @@ const methodReceiver = "anuyRecv"
 // funcSignature renders the declaration head of one hoisted top-level
 // function or method: `func [recv] name(params) results` (story 16; the
 // story 42 wrapper split reuses it for the public and internal symbols).
-func (l *lowerer) funcSignature(statement *parser.Statement, name string) (string, error) {
+// forceReceiverName names an unnamed receiver - the wrapper body must
+// reference its receiver, while the native entry keeps the source
+// spelling (story 45).
+func (l *lowerer) funcSignature(statement *parser.Statement, name string, forceReceiverName bool) (string, error) {
 	cl := statement.Closure
 	var b strings.Builder
 	b.WriteString("func ")
 	if statement.Method != "" {
-		// Story 39 (RFC-004 §6.2.1): the pointer-receiver spelling lowers
-		// to the Go pointer receiver.
-		receiverType := statement.Method
-		if statement.MethodPointer {
-			receiverType = "*" + receiverType
+		// Story 45 (ADR-0011, RFC-004 §6.1.2): the source receiver lowers
+		// verbatim - name when bound, the full type spelling through the
+		// representation contract (`*T` stays native, `T?` is the carrier).
+		receiverType, err := l.goType(statement.ReceiverType)
+		if err != nil {
+			return "", err
 		}
-		b.WriteString("(" + methodReceiver + " " + receiverType + ") ")
+		recvName := statement.ReceiverName
+		if recvName == "" && forceReceiverName {
+			recvName = methodReceiver
+		}
+		if recvName != "" {
+			b.WriteString("(" + recvName + " " + receiverType + ") ")
+		} else {
+			b.WriteString("(" + receiverType + ") ")
+		}
 	}
 	b.WriteString(name + "(")
 	for i, p := range cl.Params {
@@ -885,7 +897,14 @@ func (l *lowerer) boundaryChecks(statement *parser.Statement) ([]string, bool, e
 	var checks []string
 	if statement.Method != "" && statement.MethodPointer {
 		// §6.8.13: exported method receivers are inside the boundary.
-		checks = append(checks, fmt.Sprintf("\tif %s == nil {\n\t\tanuyabi.Require(%q, %q)\n\t}\n", methodReceiver, methodReceiver, "nil *"+statement.Method))
+		// The source receiver name carries into the wrapper; the
+		// synthetic name only labels the wrapper's own parameter when
+		// the source receiver is unnamed/blank (story 45).
+		recv := statement.ReceiverName
+		if recv == "" {
+			recv = methodReceiver
+		}
+		checks = append(checks, fmt.Sprintf("\tif %s == nil {\n\t\tanuyabi.Require(%q, %q)\n\t}\n", recv, recv, "nil *"+statement.Method))
 	}
 	needsSeen := false
 	for _, p := range statement.Closure.Params {
@@ -901,9 +920,9 @@ func (l *lowerer) boundaryChecks(statement *parser.Statement) ([]string, bool, e
 		}
 		checks = append(checks, lines...)
 	}
-	if len(checks) > 0 {
-		l.boundaryUsed = true
-	}
+	// The boundaryUsed flag moves to the wrapper-emission site (story 45):
+	// discarded checks of non-exported declarations must not force the
+	// import.
 	return checks, needsSeen, nil
 }
 
@@ -1368,7 +1387,7 @@ func (l *lowerer) validatorSource(name string) (string, error) {
 // §6.8.9/§6.8.17).
 func (l *lowerer) boundaryWrapper(statement *parser.Statement, name string, checks []string, needsSeen bool) (string, error) {
 	cl := statement.Closure
-	sig, err := l.funcSignature(statement, name)
+	sig, err := l.funcSignature(statement, name, true)
 	if err != nil {
 		return "", err
 	}
@@ -1381,7 +1400,11 @@ func (l *lowerer) boundaryWrapper(statement *parser.Statement, name string, chec
 	}
 	call += ")"
 	if statement.Method != "" {
-		call = methodReceiver + "." + call
+		recv := statement.ReceiverName
+		if recv == "" {
+			recv = methodReceiver
+		}
+		call = recv + "." + call
 	}
 	if len(cl.ResultList) > 0 || (statement.HasResult && cl.ResultTypeExpr != nil) {
 		call = "return " + call
@@ -1429,6 +1452,9 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 	if len(checks) == 0 || !token.IsExported(name) {
 		return l.functionBody(decls, statement, name)
 	}
+	// The wrapper is emitted: its anuyabi.Require checks own the import
+	// (story 45 - the flag moved here from boundaryChecks).
+	l.boundaryUsed = true
 	wrapper, err := l.boundaryWrapper(statement, name, checks, needsSeen)
 	if err != nil {
 		return err
@@ -1440,7 +1466,7 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 func (l *lowerer) functionBody(decls *strings.Builder, statement *parser.Statement, name string) error {
 	cl := statement.Closure
 	var b strings.Builder
-	sig, err := l.funcSignature(statement, name)
+	sig, err := l.funcSignature(statement, name, false)
 	if err != nil {
 		return err
 	}

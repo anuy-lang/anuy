@@ -1,2 +1,2 @@
-func User.age() int {
+func (u User) age() int {
 }

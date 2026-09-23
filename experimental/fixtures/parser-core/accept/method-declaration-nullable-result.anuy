@@ -1,2 +1,2 @@
-func User.manager() User? {
+func (u User) manager() User? {
 }

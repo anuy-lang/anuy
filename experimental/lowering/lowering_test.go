@@ -809,23 +809,43 @@ func TestLowerFuncDeclCarrierParam(t *testing.T) {
 func TestLowerMethodDeclToGo(t *testing.T) {
 	// A method emits as a Go method with the synthetic receiver (the
 	// grammar has no receiver binding - the body never reads it).
-	got, err := Lower("func User.save() {\n}\n")
+	got, err := Lower("func (u User) save() {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "func (anuyRecv User) save() {\n}") {
+	if !strings.Contains(got, "func (u User) save() {\n}") {
 		t.Fatalf("Lower() = %q, wants the synthetic receiver method", got)
 	}
 }
 
 func TestLowerMethodDeclCarrierResult(t *testing.T) {
-	got, err := Lower("func User.find() User? {\nreturn nil\n}\n")
+	got, err := Lower("func (u User) find() User? {\nreturn nil\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "func (anuyRecv User) find() anuyabi.Nullable[User] {\n\treturn anuyabi.None[User]()\n}") {
+	if !strings.Contains(got, "func (u User) find() anuyabi.Nullable[User] {\n\treturn anuyabi.None[User]()\n}") {
 		t.Fatalf("Lower() = %q, wants the method with carrier result", got)
 	}
+	typeCheckGenerated(t, "type User struct {\nid int\n}\nfunc (u *User?) touch() {\n}\n")
+}
+
+func TestLowerUnnamedReceiverWrapper(t *testing.T) {
+	// Story 45 (RFC-004 §6.1.7): the unnamed receiver keeps the Go
+	// spelling in the native entry; the exported wrapper names its own
+	// parameter for the §6.8.13 nil check - the synthetic name is a
+	// wrapper detail, not a language form.
+	source := "type User struct {\nid int\n}\nfunc (*User) Touch() {\n}\n"
+	got, err := Lower(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "func (anuyRecv *User) Touch() {\n\tif anuyRecv == nil {\n\t\tanuyabi.Require(\"anuyRecv\", \"nil *User\")\n\t}\n\tanuyRecv.__anuy_Touch()\n}") {
+		t.Fatalf("Lower() = %q, wants the named wrapper over the unnamed receiver", got)
+	}
+	if !strings.Contains(got, "func (*User) __anuy_Touch() {\n}") {
+		t.Fatalf("Lower() = %q, wants the unnamed native entry", got)
+	}
+	typeCheckGenerated(t, source)
 }
 
 func TestLowerNestedFuncDeclRejected(t *testing.T) {
@@ -1085,13 +1105,13 @@ func TestLowerInterfaceDeclAndImpl(t *testing.T) {
 	// Story 39 (RFC-004 §6.8.1–6.8.3, RFC-009 §6.5.1–6.5.4): the
 	// interface lowers to an ordinary Go interface; impl erases; the
 	// pointer receiver lowers to the Go pointer form.
-	got, err := Lower("type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc *File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for *File\n")
+	got, err := Lower("type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc (f *File) Read(d Data) Data {\nreturn d\n}\nimpl Reader for *File\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
 		"type Reader interface {\n\tRead(d Data) Data\n}\n",
-		"func (anuyRecv *File) Read(d Data) Data {",
+		"func (f *File) Read(d Data) Data {",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Lower() = %q, wants %q", got, want)
@@ -1106,7 +1126,7 @@ func TestLowerGeneratedInterfaceTypeChecks(t *testing.T) {
 	// Story 39: the interface, its Go method set and the conformance
 	// conversion type-check end-to-end (value receiver - the Go method
 	// set of File carries Read).
-	typeCheckGenerated(t, "type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar r Reader = File{id: 1}\nvar x = r\n")
+	typeCheckGenerated(t, "type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc (f File) Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar r Reader = File{id: 1}\nvar x = r\n")
 }
 
 func TestLowerInterfaceDispatchAndNullable(t *testing.T) {
@@ -1115,7 +1135,7 @@ func TestLowerInterfaceDispatchAndNullable(t *testing.T) {
 	// `Reader?` keeps the plain Go interface with nil as semantic nil -
 	// no tagged carrier, and the safe dispatch guards with the ordinary
 	// nil comparison.
-	got, err := Lower("type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar f = File{id: 1}\nvar d = Data{id: 2}\nvar r Reader = f\nvar out = r.Read(d)\nout\nvar opt Reader? = nil\nopt?.Read(d)\n")
+	got, err := Lower("type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc (f File) Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar f = File{id: 1}\nvar d = Data{id: 2}\nvar r Reader = f\nvar out = r.Read(d)\nout\nvar opt Reader? = nil\nopt?.Read(d)\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1132,7 +1152,7 @@ func TestLowerInterfaceDispatchAndNullable(t *testing.T) {
 	if strings.Contains(got, "anuyabi") {
 		t.Fatalf("Lower() = %q, wants no carrier prelude (RFC-009 §6.2.7)", got)
 	}
-	typeCheckGenerated(t, "type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar f = File{id: 1}\nvar d = Data{id: 2}\nvar r Reader = f\nvar out = r.Read(d)\nout\nvar opt Reader? = nil\nopt?.Read(d)\n")
+	typeCheckGenerated(t, "type Data struct {\nid int\n}\ninterface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc (f File) Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nvar f = File{id: 1}\nvar d = Data{id: 2}\nvar r Reader = f\nvar out = r.Read(d)\nout\nvar opt Reader? = nil\nopt?.Read(d)\n")
 }
 
 func TestLowerUnsafeCore(t *testing.T) {
@@ -1298,16 +1318,16 @@ func TestLowerForeignEntryUnexportedStaysPlain(t *testing.T) {
 func TestLowerForeignEntryMethodReceiverNilCheck(t *testing.T) {
 	// §6.8.13: exported method receivers are inside the boundary; the
 	// pointer receiver is nil-checked before the internal method runs.
-	source := "type User struct {\nid int\n}\nfunc *User.Save() {\n}\nvar u = User{id: 1}\n"
+	source := "type User struct {\nid int\n}\nfunc (u *User) Save() {\n}\nvar u = User{id: 1}\n"
 	got, err := Lower(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapper := "func (anuyRecv *User) Save() {\n\tif anuyRecv == nil {\n\t\tanuyabi.Require(\"anuyRecv\", \"nil *User\")\n\t}\n\tanuyRecv.__anuy_Save()\n}"
+	wrapper := "func (u *User) Save() {\n\tif u == nil {\n\t\tanuyabi.Require(\"u\", \"nil *User\")\n\t}\n\tu.__anuy_Save()\n}"
 	if !strings.Contains(got, wrapper) {
 		t.Fatalf("Lower() = %q, wants method wrapper %q", got, wrapper)
 	}
-	if !strings.Contains(got, "func (anuyRecv *User) __anuy_Save() {") {
+	if !strings.Contains(got, "func (u *User) __anuy_Save() {") {
 		t.Fatalf("Lower() = %q, wants the internal method", got)
 	}
 }

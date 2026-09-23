@@ -37,7 +37,7 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"call-arguments.anuy", "u.m(a, b)", true},
 		{"safe-call-arguments.anuy", "u.Value.send(payload())", false},
 		{"func-decl-carrier.anuy", "func find() anuyabi.Nullable[User]", false},
-		{"func-method.anuy", "func (anuyRecv User) find() anuyabi.Nullable[User]", false},
+		{"func-method.anuy", "func (u User) find() anuyabi.Nullable[User]", false},
 		{"struct-decl.anuy", "type User struct {", true},
 		{"struct-construction.anuy", "u := User{id: 1}", true},
 		{"struct-construction-multiline.anuy", "u := User{\nid: 1,\nname: \"Ann\",\n}", true},

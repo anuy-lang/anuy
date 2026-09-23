@@ -1053,6 +1053,18 @@ func TestParseDottedMethodFormRejected(t *testing.T) {
 	}
 }
 
+func TestParseNullableValueReceiverRejected(t *testing.T) {
+	// Story 45 (RFC-004 §6.1.7): the generated Go cannot define methods
+	// on the carrier type - a nullable receiver uses the pointer spelling.
+	_, err := Parse("func (u User?) M() {\n}\n")
+	if err == nil {
+		t.Fatal("nullable value receiver accepted")
+	}
+	if !strings.Contains(err.Error(), "*T?") {
+		t.Fatalf("err = %v, want a pointer-receiver hint", err)
+	}
+}
+
 func TestParseFunctionDeclarationResultType(t *testing.T) {
 	program, err := Parse("func find() User? {\n}\n")
 	if err != nil {

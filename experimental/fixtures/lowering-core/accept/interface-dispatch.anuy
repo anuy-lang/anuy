@@ -7,7 +7,7 @@ Read(d Data) Data
 type File struct {
 id int
 }
-func File.Read(d Data) Data {
+func (f File) Read(d Data) Data {
 return d
 }
 impl Reader for File
