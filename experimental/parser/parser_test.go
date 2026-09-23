@@ -1153,7 +1153,7 @@ func TestParseFunctionDeclRetainsResultTypeExpr(t *testing.T) {
 	}{
 		{"func find() User? {\n}\n", "User?"},
 		{"func f() int {\n}\n", "int"},
-		{"func User.find() int {\n}\n", "int"},
+		{"func (u User) find() int {\n}\n", "int"},
 	} {
 		program, err := Parse(tc.source)
 		if err != nil {

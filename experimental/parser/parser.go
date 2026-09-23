@@ -587,11 +587,11 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 		return statement, nil
 	case tokens[0].kind == tokenIdent && tokens[0].text == "unsafe":
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "unsafe requires a block or func declaration")
-	case tokens[0].kind == tokenIdent && tokens[0].text == "func" && len(tokens) >= 2 && (tokens[1].kind == tokenIdent || isPunct(tokens[1], "*")):
-		// `func name(params) {` — the story 07 declaration form; `func *`
-		// opens the story 39 pointer-receiver method form. `func (`
-		// without a name stays a closure literal and is rejected below by
-		// the call-statement path.
+	case tokens[0].kind == tokenIdent && tokens[0].text == "func" && len(tokens) >= 2 && (tokens[1].kind == tokenIdent || isPunct(tokens[1], "*") || isPunct(tokens[1], "(")):
+		// `func name(params) {` — the story 07 declaration form — and the
+		// Go receiver method form `func (r [*]T) name(...)` (story 45,
+		// RFC-004 §6.1.2); the dotted transitional form is rejected inside
+		// with a receiver-form hint.
 		return lp.parseFunctionDecl(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "switch":
 		// Story 31 (RFC-006 §6.3): the exhaustive enum switch.
@@ -704,34 +704,27 @@ func isCallStatementStart(tokens []token) bool {
 // { body }` and the story 08 extensions (owner decision 2026-09-17,
 // task-1-8-1-2): the method form `func T.name(params) [ret] { body }`
 // (RFC-002 §40) and the result type after the parameter list. The declared
-// name binds a closure value; parameters and body reuse the closure grammar.
+// parseFunctionDecl parses the story 07 declaration form `func name(params)
+// [result] {` or the Go receiver method form `func (r [*]T) name(params)
+// [result] {` (story 45, ADR-0011, RFC-004 §6.1.2). The receiver group
+// reuses the parameter type grammar; unnamed `(*T)` and blank `(_ *T)`
+// receivers bind nothing (RFC-004 §6.1.7). The transitional dotted
+// `func [*]T.m` form is rejected with a receiver-form hint.
 func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statement, error) {
+	if len(tokens) >= 3 && isPunct(tokens[1], "(") {
+		return lp.parseReceiverMethod(tokens, line)
+	}
+	if len(tokens) >= 4 && isPunct(tokens[2], ".") {
+		return Statement{}, newError(UnsupportedSyntax, tokens[2].start, "method declaration uses the Go receiver form: func (s T) m()")
+	}
+	if len(tokens) >= 5 && isPunct(tokens[1], "*") && isPunct(tokens[3], ".") {
+		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "method declaration uses the Go receiver form: func (s *T) m()")
+	}
 	name := tokens[1]
 	if name.text == "_" || isReservedName(name.text) {
 		return Statement{}, newError(UnsupportedSyntax, name.start, "invalid function name")
 	}
-	method := ""
-	methodPointer := false
 	params := 2
-	if len(tokens) >= 4 && isPunct(tokens[2], ".") {
-		// `func T.name(params) …` - the method form; the receiver type stays
-		// raw text (the per-type method set resolves calls, story 39).
-		m := tokens[3]
-		if m.kind != tokenIdent || m.text == "_" || isReservedName(m.text) {
-			return Statement{}, newError(UnsupportedSyntax, m.start, "invalid method name")
-		}
-		method, name, params = tokens[1].text, m, 4
-	} else if len(tokens) >= 5 && isPunct(tokens[1], "*") && isPunct(tokens[3], ".") {
-		// Story 39 (RFC-004 §6.2.1): `func *T.name(params) …` - the
-		// pointer-receiver spelling; the receiver kind feeds the method
-		// set (impl for T requires value receivers).
-		m := tokens[4]
-		if m.kind != tokenIdent || m.text == "_" || isReservedName(m.text) {
-			return Statement{}, newError(UnsupportedSyntax, m.start, "invalid method name")
-		}
-		methodPointer = true
-		method, name, params = tokens[2].text, m, 5
-	}
 	if params >= len(tokens) || !isPunct(tokens[params], "(") {
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "function declaration requires a parameter list")
 	}
@@ -748,8 +741,82 @@ func (lp *lineParser) parseFunctionDecl(tokens []token, line sourceLine) (Statem
 	return Statement{
 		Kind:           Function,
 		Names:          []string{name.text},
-		Method:         method,
-		MethodPointer:  methodPointer,
+		HasResult:      cl.HasResult,
+		ResultNullable: cl.ResultNullable,
+		Closure:        &cl,
+		Pure:           pure,
+		Span:           Span{Start: line.offset, End: line.offset + len(line.text)},
+	}, nil
+}
+
+// parseReceiverMethod parses the receiver group `(r [*]T [?])` of a method
+// declaration (story 45, RFC-004 §6.1.2/§6.1.7): the leading identifier is
+// the binding name, a reserved word or `_` marks the unnamed/blank forms,
+// and the rest is the receiver type. The base of the receiver type names
+// the per-type method set (§6.2.1).
+func (lp *lineParser) parseReceiverMethod(tokens []token, line sourceLine) (Statement, error) {
+	close := -1
+	for i := 2; i < len(tokens); i++ {
+		if isPunct(tokens[i], ")") {
+			close = i
+			break
+		}
+	}
+	if close < 0 {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "unterminated receiver list")
+	}
+	group := tokens[2:close]
+	if len(group) == 0 {
+		// `func() { }` - an anonymous closure is not a declaration (the
+		// pre-story-45 rejection stands).
+		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "receiver requires a type")
+	}
+	name := ""
+	typeTokens := group
+	switch {
+	case group[0].kind == tokenBlank:
+		// the blank receiver binds nothing
+		typeTokens = group[1:]
+	case len(group) >= 2 && group[0].kind == tokenIdent && !reservedWords[group[0].text]:
+		name = group[0].text
+		typeTokens = group[1:]
+	}
+	if len(typeTokens) == 0 {
+		return Statement{}, newError(UnsupportedSyntax, group[0].start, "receiver requires a type")
+	}
+	receiverType, terr := parseType(typeTokens)
+	if terr != nil {
+		return Statement{}, terr
+	}
+	base := receiverType
+	if base.Kind == PointerType {
+		base = base.Elem
+	}
+	if base == nil || base.Kind != NamedType || base.Name == "" {
+		return Statement{}, newError(UnsupportedSyntax, receiverType.Span.Start, "receiver must be a named type or a pointer to one")
+	}
+	if close+1 >= len(tokens) || tokens[close+1].kind != tokenIdent || tokens[close+1].text == "_" || isReservedName(tokens[close+1].text) {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "invalid method name")
+	}
+	m := tokens[close+1]
+	pure := lp.pos > 0 && lp.lines[lp.pos-1].text == "//anuy:pure"
+	// Reuse the closure parser from the parameter list, dropping the
+	// receiver group and the method name: token offsets are absolute, so
+	// parameter types keep their source spelling.
+	shifted := make([]token, 0, len(tokens)-close-1)
+	shifted = append(shifted, tokens[0])
+	shifted = append(shifted, tokens[close+2:]...)
+	cl, cerr := lp.parseClosure(shifted, 0, line, true)
+	if cerr != nil {
+		return Statement{}, cerr
+	}
+	return Statement{
+		Kind:           Function,
+		Names:          []string{m.text},
+		Method:         base.Name,
+		MethodPointer:  receiverType.Kind == PointerType,
+		ReceiverName:   name,
+		ReceiverType:   receiverType,
 		HasResult:      cl.HasResult,
 		ResultNullable: cl.ResultNullable,
 		Closure:        &cl,

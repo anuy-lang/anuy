@@ -1297,7 +1297,7 @@ func (b *builder) analyzeClosures(statement *parser.Statement, scope *semantic.S
 		if value.Closure == nil {
 			continue
 		}
-		mutators, _ := b.analyzeClosure(value.Closure, scope, false)
+		mutators, _ := b.analyzeClosure(value.Closure, scope, false, nil)
 		if index < len(targets) {
 			// Решение 1 (2026-09-16): union across all assignments of the
 			// binding — a later closure must not erase an earlier mutator.
@@ -1853,10 +1853,23 @@ func (b *builder) readIdent(name string, scope *semantic.Scope, span parser.Span
 // captures, for §85 call invalidation - and whether the body can fall off
 // its end without a value-return (the D-6 measurement input, RFC-001
 // §13.18; meaningful only for declared non-null results).
-func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fallible bool) ([]semantic.BindingID, bool) {
+func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fallible bool, receiver *parser.Param) ([]semantic.BindingID, bool) {
 	bodyScope := scope.Child()
 	var entry []semantic.Operation
 	paramIDs := map[semantic.BindingID]bool{}
+	// Story 45 (RFC-004 §6.1.7): the receiver is an ordinary parameter of
+	// the method body - declared first, one scope with the parameters, so
+	// a parameter named like the receiver rejects (§6.1.6 shadowing).
+	if receiver != nil {
+		if serr := bodyScope.Declare(receiver.Name); serr != nil {
+			b.report(serr.Category, cl.Span)
+		} else {
+			id := bodyScope.Resolve(receiver.Name)
+			paramIDs[id] = true
+			b.bindParamType(id, receiver)
+			entry = append(entry, semantic.Declare(id), semantic.Assign(id))
+		}
+	}
 	for _, p := range cl.Params {
 		if serr := bodyScope.Declare(p.Name); serr != nil {
 			b.report(serr.Category, cl.Span)
@@ -1864,18 +1877,7 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		}
 		id := bodyScope.Resolve(p.Name)
 		paramIDs[id] = true
-		// §27 stable bindings: parameter types carry the declared class
-		// (story 08) - a `T?` parameter gates ordinary member access.
-		b.classes[id] = nullabilityOfParam(p)
-		// Story 22: named parameter types root field-path classification.
-		if p.TypeExpr != nil && p.TypeExpr.Kind == parser.NamedType {
-			b.bindingTypes[id] = p.TypeExpr.Name
-		} else if p.TypeExpr != nil && p.TypeExpr.Kind == parser.PointerType &&
-			p.TypeExpr.Elem != nil && p.TypeExpr.Elem.Kind == parser.NamedType {
-			// Story 40: pointer parameters name their type for conversion
-			// checks and per-type method resolution (classes untouched).
-			b.bindingTypes[id] = "*" + p.TypeExpr.Elem.Name
-		}
+		b.bindParamType(id, &p)
 		entry = append(entry, semantic.Declare(id), semantic.Assign(id))
 	}
 	seen := map[semantic.BindingID]bool{}
@@ -2266,7 +2268,7 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	b.initialize(id)
 	fallible, successClasses := strictResults(statement)
 	b.funcResults[name] = declResult{hasResult: statement.HasResult, resultNullable: statement.ResultNullable, fallible: fallible, successClasses: successClasses}
-	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, fallible)
+	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, fallible, nil)
 	b.closureMutates[id] = unionBindings(b.closureMutates[id], mutators)
 	if statement.Pure {
 		b.pure[id] = true
@@ -2286,12 +2288,13 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	}
 }
 
-// emitMethod lowers a story 08 method declaration (RFC-002 §40 form):
-// methods bind no scope name - the per-type method set resolves calls
-// (story 39, RFC-004 §6.1.5); a duplicate within one type rejects
-// (§6.1.6 - the pointer spelling does not create a second namespace).
-// The body analyzes through the closure path (receiver access is not
-// modeled in v1); its mutated captures register as the method's 3a
+// emitMethod lowers a method declaration (story 45, ADR-0011, RFC-004
+// §6.1.2): methods resolve through the per-type method sets (story 39,
+// RFC-004 §6.1.5); a duplicate within one type rejects (§6.1.6 - the
+// pointer spelling does not create a second namespace, the receiver name
+// is irrelevant). The body analyzes through the closure path with the
+// receiver as an ordinary parameter (§6.1.7); its mutated captures
+// register as the method's 3a
 // mutator set. `//anuy:pure` opts the method out of both call effects
 // (Q2-A, F-C2).
 func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope) {
@@ -2325,7 +2328,11 @@ func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope)
 	// Registered before the body: a self-recursive call resolves like a
 	// function's self-recursion (story 07 precedent; the mutator set the
 	// self-call sees stays the one known at that point).
-	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, fallible)
+	var recv *parser.Param
+	if statement.ReceiverName != "" {
+		recv = &parser.Param{Name: statement.ReceiverName, Type: statement.Method, TypeExpr: statement.ReceiverType}
+	}
+	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, fallible, recv)
 	b.methodMutates[key] = unionBindings(nil, mutators)
 	// D-6 (RFC-001 §13.18, ADR-0004): methods enforce missing-return like
 	// functions; story 35 adds the §6.4.7 strict fallible fall-off.
@@ -2790,15 +2797,39 @@ func (b *builder) report(category semantic.DiagnosticCategory, span parser.Span)
 // unknown - their nullability binding is outside the slice.
 func nullabilityOfParam(p parser.Param) semantic.Nullability {
 	if p.TypeExpr != nil {
-		if p.TypeExpr.Kind == parser.NamedType {
+		switch p.TypeExpr.Kind {
+		case parser.NamedType:
 			if p.TypeExpr.Nullable {
 				return semantic.NullabilityNullable
 			}
 			return semantic.NullabilityNonNull
+		case parser.PointerType:
+			// Story 45: the `?` suffix makes even a pointer spelling
+			// nullable (RFC-002 §6.1.3/§6.8.4); the bare `*T` keeps the
+			// nil-tolerant platform semantics (§6.2.3, story 40).
+			if p.TypeExpr.Nullable {
+				return semantic.NullabilityNullable
+			}
+			return semantic.NullabilityUnknown
 		}
 		return semantic.NullabilityUnknown
 	}
 	return nullabilityOfTypeName(p.Type)
+}
+
+// bindParamType carries the parameter binding machinery shared by
+// parameters and the receiver (story 45, RFC-004 §6.1.7): the declared
+// class (§27 stable bindings, story 08 - a `T?` parameter gates ordinary
+// member access) and the field-path root (story 22; the pointer spelling
+// since story 40).
+func (b *builder) bindParamType(id semantic.BindingID, p *parser.Param) {
+	b.classes[id] = nullabilityOfParam(*p)
+	if p.TypeExpr != nil && p.TypeExpr.Kind == parser.NamedType {
+		b.bindingTypes[id] = p.TypeExpr.Name
+	} else if p.TypeExpr != nil && p.TypeExpr.Kind == parser.PointerType &&
+		p.TypeExpr.Elem != nil && p.TypeExpr.Elem.Kind == parser.NamedType {
+		b.bindingTypes[id] = "*" + p.TypeExpr.Elem.Name
+	}
 }
 
 // nullabilityOfTypeName classifies a raw type-name spelling: a simple name

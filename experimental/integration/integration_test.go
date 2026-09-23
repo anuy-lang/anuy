@@ -943,7 +943,7 @@ func TestAssignNullRecordsFlowNullableFact(t *testing.T) {
 func TestAnalyzeSourcePureMethodKeepsReceiverNarrowing(t *testing.T) {
 	// F-C2 / Q2-A: a `//anuy:pure` method opts out of the receiver
 	// invalidation (3b) - the proof survives the call.
-	result, err := AnalyzeSource("//anuy:pure\nfunc T.m() {\n}\nvar u User? = find()\nif u != nil {\nu.m()\nu.save()\n}\n")
+	result, err := AnalyzeSource("//anuy:pure\nfunc (t T) m() {\n}\nvar u User? = find()\nif u != nil {\nu.m()\nu.save()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -955,7 +955,7 @@ func TestAnalyzeSourcePureMethodKeepsReceiverNarrowing(t *testing.T) {
 func TestAnalyzeSourceMethodMutatorsInvalidateCaptures(t *testing.T) {
 	// 3a for methods (Q1-A composition): the call invalidates the narrowing
 	// of the bindings the method body assigns.
-	result, err := AnalyzeSource("var u User? = find()\nvar c User? = find()\nfunc T.m() {\nc = nil\n}\nif u != nil {\nif c != nil {\nu.m()\nc.save()\n}\n}\n")
+	result, err := AnalyzeSource("var u User? = find()\nvar c User? = find()\nfunc (t T) m() {\nc = nil\n}\nif u != nil {\nif c != nil {\nu.m()\nc.save()\n}\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -967,14 +967,14 @@ func TestAnalyzeSourceDuplicateMethodReports(t *testing.T) {
 	// sets - the same name on different types is legal (two types may
 	// implement one interface); a duplicate within one type, including
 	// the pointer spelling, still rejects.
-	sameName, err := AnalyzeSource("func T.m() {\n}\nfunc U.m() {\n}\n")
+	sameName, err := AnalyzeSource("func (t T) m() {\n}\nfunc (v U) m() {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(sameName.Diagnostics) != 0 {
 		t.Fatalf("sameName = %#v, want no diagnostics", sameName.Diagnostics)
 	}
-	duplicate, err := AnalyzeSource("func T.m() {\n}\nfunc *T.m() {\n}\n")
+	duplicate, err := AnalyzeSource("func (t T) m() {\n}\nfunc (t *T) m() {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,14 +985,14 @@ func TestAnalyzeSourceMethodNameCollisionWithFunctionReports(t *testing.T) {
 	// Story 39 flip (RFC-004 §6.1.5/§6.1.6): functions and per-type
 	// methods are separate namespaces - a bare call resolves the
 	// function, a receiver call the method set; both orders stay clean.
-	result, err := AnalyzeSource("func f() {\n}\nfunc T.f() {\n}\n")
+	result, err := AnalyzeSource("func f() {\n}\nfunc (t T) f() {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Diagnostics) != 0 {
 		t.Fatalf("result = %#v, want no diagnostics", result.Diagnostics)
 	}
-	result, err = AnalyzeSource("func T.g() {\n}\nfunc g() {\n}\n")
+	result, err = AnalyzeSource("func (t T) g() {\n}\nfunc g() {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1004,7 +1004,7 @@ func TestAnalyzeSourceMethodNameCollisionWithFunctionReports(t *testing.T) {
 func TestAnalyzeSourceBareMethodNameIsUnknownRead(t *testing.T) {
 	// Q1-A: methods bind no scope name - the bare call stays an unresolved
 	// callee (D-01), not a function call.
-	result, err := AnalyzeSource("func T.m() {\n}\nm()\n")
+	result, err := AnalyzeSource("func (t T) m() {\n}\nm()\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1014,7 +1014,7 @@ func TestAnalyzeSourceBareMethodNameIsUnknownRead(t *testing.T) {
 func TestAnalyzeSourceSafeCallNeedsNoProof(t *testing.T) {
 	// §33: the safe call requires no receiver proof; the call itself still
 	// invalidates the narrowing (the method may write).
-	result, err := AnalyzeSource("var u User? = find()\nfunc T.m() {\n}\nu?.m()\n")
+	result, err := AnalyzeSource("var u User? = find()\nfunc (t T) m() {\n}\nu?.m()\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1029,7 +1029,7 @@ func TestAnalyzeSourceSafeCallInvalidatesReceiverNarrowing(t *testing.T) {
 	// inside the proven branch the safe form is also redundant - D-4
 	// (Warning) fires before the invalidation, and `u.save()` still
 	// requires its proof afterwards.
-	result, err := AnalyzeSource("var u User? = find()\nfunc T.m() {\n}\nif u != nil {\nu?.m()\nu.save()\n}\n")
+	result, err := AnalyzeSource("var u User? = find()\nfunc (t T) m() {\n}\nif u != nil {\nu?.m()\nu.save()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1076,8 +1076,8 @@ func TestAnalyzeSourceVoidCallResultDoesNotEstablish(t *testing.T) {
 
 func TestAnalyzeSourceMethodResultClassifiesRHS(t *testing.T) {
 	// A declared method's result type feeds the call-shape classification:
-	// `c = c.clone()` with `func T.clone() User` re-establishes.
-	result, err := AnalyzeSource("var c User? = find()\nfunc T.clone() User {\nreturn make()\n}\nif c != nil {\nc = c.clone()\nc.save()\n}\n")
+	// `c = c.clone()` with `func (t T) clone() User` re-establishes.
+	result, err := AnalyzeSource("var c User? = find()\nfunc (t T) clone() User {\nreturn make()\n}\nif c != nil {\nc = c.clone()\nc.save()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1185,7 +1185,7 @@ func TestAnalyzeSourceIfWithoutElseFallsOff(t *testing.T) {
 
 func TestAnalyzeSourceMethodMissingReturnReported(t *testing.T) {
 	// Methods (story 08) enforce D-6 like functions.
-	result, err := AnalyzeSource("func User.age() int {\n}\n")
+	result, err := AnalyzeSource("func (u User) age() int {\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1195,7 +1195,7 @@ func TestAnalyzeSourceMethodMissingReturnReported(t *testing.T) {
 func TestAnalyzeSourceReportsRedundantSafeCallOnNarrowedReceiver(t *testing.T) {
 	// D-4 (RFC-002 8.2.4, ADR-0005): inside the proven-non-null branch the
 	// safe call is redundant - a Warning, not an error.
-	result, err := AnalyzeSource("var u User? = find()\nfunc T.m() {\n}\nif u != nil {\nu?.m()\n}\n")
+	result, err := AnalyzeSource("var u User? = find()\nfunc (t T) m() {\n}\nif u != nil {\nu?.m()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1312,7 +1312,7 @@ func TestAnalyzeSourceUnknownClassStaysUnrefinedAndSilent(t *testing.T) {
 	// §6.3.11: unknown classes keep the platform semantics - no D-3, no
 	// D-4 on the unproven value, and the fact refines nothing about the
 	// classification.
-	result, err := AnalyzeSource("func T.m() {\n}\nfunc use(u User) {\n}\nvar x = mystery()\nx?.m()\nif x != nil {\nx?.m()\n}\n")
+	result, err := AnalyzeSource("func (t T) m() {\n}\nfunc use(u User) {\n}\nvar x = mystery()\nx?.m()\nif x != nil {\nx?.m()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1326,7 +1326,7 @@ func TestAnalyzeSourceInferredNullableAdvisorySurface(t *testing.T) {
 	// inferred-nullable binding exactly as for a declared `T?`.
 	base := "func use(u User) {\n}\nfunc fetch() User? {\nreturn nil\n}\n"
 	// D-4 (§8.2.4): `?.` behind the proof is redundant - a Warning.
-	d4, err := AnalyzeSource(base + "func T.m() {\n}\nvar u = fetch()\nif u != nil {\nu?.m()\n}\n")
+	d4, err := AnalyzeSource(base + "func (t T) m() {\n}\nvar u = fetch()\nif u != nil {\nu?.m()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1362,7 +1362,7 @@ func TestAnalyzeSourceReportsNilLiteralArgument(t *testing.T) {
 }
 
 func TestAnalyzeSourceReportsNullableMethodArgument(t *testing.T) {
-	result, err := AnalyzeSource("func T.move(d User) {\n}\nfunc find() User? {\nreturn make()\n}\nvar t T = makeT()\nvar u User? = find()\nt.move(u)\n")
+	result, err := AnalyzeSource("func (t T) move(d User) {\n}\nfunc find() User? {\nreturn make()\n}\nvar t T = makeT()\nvar u User? = find()\nt.move(u)\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1804,7 +1804,7 @@ func TestAnalyzeSourcePureCallPreservesNarrowing(t *testing.T) {
 	// Story 28 (ADR-0008 follow-up): a resolved `//anuy:pure` callee
 	// cannot invalidate the receiver - the narrowing facts survive the
 	// call.
-	source := "type Profile struct {\nbadge string\n}\ntype User struct {\nlink Profile?\n}\n//anuy:pure\nfunc User.report() {\n}\nvar u = User{link: nil}\nif u.link != nil {\nu.report()\nvar x = u.link.badge\n}\n"
+	source := "type Profile struct {\nbadge string\n}\ntype User struct {\nlink Profile?\n}\n//anuy:pure\nfunc (u User) report() {\n}\nvar u = User{link: nil}\nif u.link != nil {\nu.report()\nvar x = u.link.badge\n}\n"
 	result, err := AnalyzeSource(source)
 	if err != nil {
 		t.Fatal(err)
@@ -1820,7 +1820,7 @@ func TestAnalyzeSourceNonPureCallsKillNarrowing(t *testing.T) {
 	// additionally carries its own UnknownRead (D-01) - pre-existing.
 	base := "type Profile struct {\nbadge string\n}\ntype User struct {\nlink Profile?\n}\n"
 	cases := []struct{ name, source string }{
-		{"unannotated method", base + "func User.report() {\n}\nvar u = User{link: nil}\nif u.link != nil {\nu.report()\nvar x = u.link.badge\n}\n"},
+		{"unannotated method", base + "func (u User) report() {\n}\nvar u = User{link: nil}\nif u.link != nil {\nu.report()\nvar x = u.link.badge\n}\n"},
 		{"unannotated function", base + "func touch() {\n}\nvar u = User{link: nil}\nif u.link != nil {\ntouch()\nvar x = u.link.badge\n}\n"},
 	}
 	for _, testCase := range cases {
@@ -1919,7 +1919,7 @@ func TestAnalyzeSourcePromotedAmbiguousAndPointerStayClean(t *testing.T) {
 
 func TestAnalyzeSourcePromotedMethodCall(t *testing.T) {
 	// §6.10 method promotion is free through the flat method table.
-	source := "type Logger struct {\nlines int\n}\nfunc Logger.log() {\n}\ntype Server struct {\nembed Logger\nport string\n}\nvar s = Server{Logger: Logger{lines: 1}, port: \"80\"}\ns.log()\n"
+	source := "type Logger struct {\nlines int\n}\nfunc (lg Logger) log() {\n}\ntype Server struct {\nembed Logger\nport string\n}\nvar s = Server{Logger: Logger{lines: 1}, port: \"80\"}\ns.log()\n"
 	result, err := AnalyzeSource(source)
 	if err != nil {
 		t.Fatal(err)
@@ -2313,7 +2313,7 @@ func TestAnalyzeSourceMustConsumeDiscard(t *testing.T) {
 	if len(blankSuccess.Diagnostics) != 0 {
 		t.Fatalf("blankSuccess = %#v, want no diagnostics", blankSuccess.Diagnostics)
 	}
-	methodIgnored, err := AnalyzeSource(base + "type Server struct {\n}\nfunc Server.Stop() error? {\nreturn nil\n}\nfunc F() {\nvar s = Server{}\ns.Stop()\n}\n")
+	methodIgnored, err := AnalyzeSource(base + "type Server struct {\n}\nfunc (sv Server) Stop() error? {\nreturn nil\n}\nfunc F() {\nvar s = Server{}\ns.Stop()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2327,7 +2327,7 @@ func TestAnalyzeSourceInterfacesImpl(t *testing.T) {
 	// per-type method sets and explicit impl with completeness and
 	// signature validation at the declaration point.
 	base := "type Data struct {\nid int\n}\n"
-	valid, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\n")
+	valid, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc (f File) Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2341,14 +2341,14 @@ func TestAnalyzeSourceInterfacesImpl(t *testing.T) {
 	if len(missing.Diagnostics) != 1 || string(missing.Diagnostics[0].Category) != "InterfaceMethodMissing" {
 		t.Fatalf("missing = %#v, want one InterfaceMethodMissing (§6.1.3)", missing.Diagnostics)
 	}
-	mismatch, err := AnalyzeSource(base + "interface Reader {\nRead(a Data, b Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\n")
+	mismatch, err := AnalyzeSource(base + "interface Reader {\nRead(a Data, b Data) Data\n}\ntype File struct {\nid int\n}\nfunc (f File) Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(mismatch.Diagnostics) != 1 || string(mismatch.Diagnostics[0].Category) != "InterfaceMethodMismatch" {
 		t.Fatalf("mismatch = %#v, want one InterfaceMethodMismatch (§6.1.3)", mismatch.Diagnostics)
 	}
-	duplicate, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nimpl Reader for File\n")
+	duplicate, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc (f File) Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\nimpl Reader for File\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2362,28 +2362,28 @@ func TestAnalyzeSourceInterfacesImpl(t *testing.T) {
 	if len(unknown.Diagnostics) != 1 || string(unknown.Diagnostics[0].Category) != "ImplUnknownInterface" {
 		t.Fatalf("unknown = %#v, want one ImplUnknownInterface", unknown.Diagnostics)
 	}
-	pointerOnlyValueTarget, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc *File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\n")
+	pointerOnlyValueTarget, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc (f *File) Read(d Data) Data {\nreturn d\n}\nimpl Reader for File\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pointerOnlyValueTarget.Diagnostics) != 1 || string(pointerOnlyValueTarget.Diagnostics[0].Category) != "InterfaceMethodMissing" {
 		t.Fatalf("pointerOnlyValueTarget = %#v, want one InterfaceMethodMissing (§6.2.1)", pointerOnlyValueTarget.Diagnostics)
 	}
-	pointerTarget, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc *File.Read(d Data) Data {\nreturn d\n}\nimpl Reader for *File\n")
+	pointerTarget, err := AnalyzeSource(base + "interface Reader {\nRead(d Data) Data\n}\ntype File struct {\nid int\n}\nfunc (f *File) Read(d Data) Data {\nreturn d\n}\nimpl Reader for *File\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pointerTarget.Diagnostics) != 0 {
 		t.Fatalf("pointerTarget = %#v, want no diagnostics (§6.2.1)", pointerTarget.Diagnostics)
 	}
-	twoInterfaces, err := AnalyzeSource(base + "interface A {\nSay()\n}\ninterface B {\nSay()\n}\ntype MyType struct {\nid int\n}\nfunc MyType.Say() {\n}\nimpl A for MyType\nimpl B for MyType\n")
+	twoInterfaces, err := AnalyzeSource(base + "interface A {\nSay()\n}\ninterface B {\nSay()\n}\ntype MyType struct {\nid int\n}\nfunc (m MyType) Say() {\n}\nimpl A for MyType\nimpl B for MyType\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(twoInterfaces.Diagnostics) != 0 {
 		t.Fatalf("twoInterfaces = %#v, want no diagnostics (§6.1.4)", twoInterfaces.Diagnostics)
 	}
-	perTypeDispatch, err := AnalyzeSource("type Log struct {\n}\ntype Other struct {\n}\nfunc Log.write() {\n}\nfunc Other.write() {\n}\nfunc F() {\nvar l = Log{}\nl.write()\nvar o = Other{}\no.write()\n}\n")
+	perTypeDispatch, err := AnalyzeSource("type Log struct {\n}\ntype Other struct {\n}\nfunc (l Log) write() {\n}\nfunc (o Other) write() {\n}\nfunc F() {\nvar l = Log{}\nl.write()\nvar o = Other{}\no.write()\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2399,7 +2399,7 @@ func TestAnalyzeSourceInterfaceConversions(t *testing.T) {
 	// concrete types and nullable values stay in the tolerance zone -
 	// boxing of nullable concrete values is delegated to RFC-002
 	// §6.9.17 (OQ-1).
-	base := "interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nfunc File.Read() int {\nreturn 1\n}\n"
+	base := "interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nfunc (f File) Read() int {\nreturn 1\n}\n"
 	noImpl, err := AnalyzeSource(base + "var f = File{id: 1}\nvar r Reader = f\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2465,6 +2465,54 @@ func TestAnalyzeSourceInterfaceConversions(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSourceReceiverBinding(t *testing.T) {
+	// Story 45 (RFC-004 §6.1.7): the receiver is an ordinary parameter of
+	// the method body - RFC-002 flow rules apply verbatim.
+	base := "type User struct {\nid int\n}\n"
+	// A nullable pointer receiver gates ordinary member access (§6.2.3 is
+	// only for the bare `*T` spelling).
+	gated, err := AnalyzeSource(base + "func (s *User?) Touch() {\n_ = s.id\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, gated, "UnsafeMemberAccess")
+	// The early-exit proof narrows the receiver like any binding (§6.3.2,
+	// the story-44 join machine).
+	narrowed, err := AnalyzeSource(base + "func (s *User?) Touch() {\nif s == nil {\nreturn\n}\n_ = s.id\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(narrowed.Diagnostics) != 0 {
+		t.Fatalf("narrowed = %#v, want no diagnostics (§6.3.2 on the receiver)", narrowed.Diagnostics)
+	}
+	// A value receiver classifies non-null - `?.` on it is redundant (D-4).
+	d4, err := AnalyzeSource(base + "func (s User) Name() int {\nreturn s?.id\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, d4, "RedundantSafeNavigation")
+	// The receiver lives in the body scope: a local of the same name
+	// rejects (RFC-003, one scope with the parameters).
+	shadow, err := AnalyzeSource(base + "func (s User) M() {\nvar s int\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, shadow, "SameScopeRedeclaration")
+	paramClash, err := AnalyzeSource(base + "func (s User) M(s int) {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDiagnostic(t, paramClash, "SameScopeRedeclaration")
+	// Unnamed and blank receivers bind nothing - the body has no `s`.
+	unnamed, err := AnalyzeSource(base + "func (*User) M() {\n}\nfunc (_ *User) N() {\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unnamed.Diagnostics) != 0 {
+		t.Fatalf("unnamed = %#v, want no diagnostics (no binding)", unnamed.Diagnostics)
+	}
+}
+
 func TestAnalyzeSourceInterfaceDispatch(t *testing.T) {
 	// Story 40 (RFC-004 §8.1.5 D-5, §6.8.4): an interface-typed receiver
 	// resolves dispatch through the exact interface method set - the
@@ -2473,7 +2521,7 @@ func TestAnalyzeSourceInterfaceDispatch(t *testing.T) {
 	// a definite error. Two same-name methods keep the name-only
 	// fallback ambiguous, so every assertion here exercises the
 	// interface path, not the accidental per-type one.
-	base := "interface Loader {\nLoad() error?\n}\ntype Store struct {\nid int\n}\ntype Backup struct {\nid int\n}\nfunc Store.Load() error? {\nreturn nil\n}\nfunc Backup.Load() error? {\nreturn nil\n}\nimpl Loader for Store\n"
+	base := "interface Loader {\nLoad() error?\n}\ntype Store struct {\nid int\n}\ntype Backup struct {\nid int\n}\nfunc (st Store) Load() error? {\nreturn nil\n}\nfunc (b Backup) Load() error? {\nreturn nil\n}\nimpl Loader for Store\n"
 	mustConsume, err := AnalyzeSource(base + "var s = Store{id: 1}\nvar ld Loader = s\nld.Load()\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2498,7 +2546,7 @@ func TestAnalyzeSourceInterfaceDispatch(t *testing.T) {
 	if undefinedMember.Diagnostics[0].Code != "ANUY7005" {
 		t.Fatalf("undefinedMember code = %s, want ANUY7005", undefinedMember.Diagnostics[0].Code)
 	}
-	saverBase := "interface Saver {\nSave(n int)\n}\ntype Disk struct {\nid int\n}\ntype Tape struct {\nid int\n}\nfunc Disk.Save(n int) {\n}\nfunc Tape.Save(n int) {\n}\nimpl Saver for Disk\n"
+	saverBase := "interface Saver {\nSave(n int)\n}\ntype Disk struct {\nid int\n}\ntype Tape struct {\nid int\n}\nfunc (d Disk) Save(n int) {\n}\nfunc (tp Tape) Save(n int) {\n}\nimpl Saver for Disk\n"
 	argumentClass, err := AnalyzeSource(saverBase + "var d = Disk{id: 1}\nvar sv Saver = d\nsv.Save(nil)\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2513,7 +2561,7 @@ func TestAnalyzeSourceNullableInterfacePins(t *testing.T) {
 	// existing nullable machinery - nil assignment is clean, ungated
 	// dispatch is a deref violation, safe navigation lifts, narrowing
 	// restores both dispatch and conversion.
-	base := "interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nfunc File.Read() int {\nreturn 1\n}\nimpl Reader for File\n"
+	base := "interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nfunc (f File) Read() int {\nreturn 1\n}\nimpl Reader for File\n"
 	nilAssignment, err := AnalyzeSource(base + "var r Reader? = nil\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2624,7 +2672,7 @@ func TestAnalyzeSourceUnsafeCore(t *testing.T) {
 	if proven.Diagnostics[0].Code != "ANUY5002" || proven.Diagnostics[0].Severity != semantic.SeverityWarning {
 		t.Fatalf("proven = (%s, %s), want (ANUY5002, Warning)", proven.Diagnostics[0].Code, proven.Diagnostics[0].Severity)
 	}
-	ifaceBase := "interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nfunc File.Read() int {\nreturn 1\n}\nvar f = File{id: 1}\n"
+	ifaceBase := "interface Reader {\nRead() int\n}\ntype File struct {\nid int\n}\nfunc (f File) Read() int {\nreturn 1\n}\nvar f = File{id: 1}\n"
 	ifaceInside, err := AnalyzeSource(ifaceBase + "unsafe {\nvar r Reader = f\n}\n")
 	if err != nil {
 		t.Fatal(err)
