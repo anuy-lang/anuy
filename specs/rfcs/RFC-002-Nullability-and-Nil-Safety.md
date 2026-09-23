@@ -5,8 +5,8 @@
 **Title:** Nullability and Nil Safety
 **Language:** Anuy
 **Area:** Nullability / Nil Safety / Safe Navigation / Representation / Go Interoperability
-**Version:** 4
-**Date:** 2026-09-19
+**Version:** 5
+**Date:** 2026-09-23
 **Requires:** RFC-000, RFC-001, RFC-003, RFC-004, RFC-005, RFC-007, RFC-008, RFC-009, RFC-011
 **Supersedes:** —
 **Canonical:** English (public repository)
@@ -24,6 +24,8 @@ The project owner approved RFC-002 as Proposed.
 2026-09-18: the semantic core was validated by an implementation; RHS classification and establishment on initializer (§6.3.5), composite caveat (§6.1.3), strict safe-tail chains (§6.5.4), D-4 severity (§8.2.4) recorded; the owner approved the Accepted status.
 
 2026-09-19: published as the canonical English text in the public repository (owner decision); section numbering and normative content unchanged; Version 3 → 4.
+
+2026-09-23: flow refinement clarified to be a property of the flow, not of the spelling: a live non-nil fact refines any binding whose static nullability class is nullable — declared `T?` or inferred nullable alike (§6.3.11, new subsection appended); Version 4 → 5.
 
 ---
 
@@ -665,6 +667,20 @@ continuing state:
 Initialized
 NonNil
 ```
+
+#### 6.3.11 Refinement Is Independent of Spelling
+
+A live non-nil fact refines any binding whose static nullability class is nullable, regardless of how that class entered the binding:
+
+- declared spelling `T?` (§6.1.4);
+- inferred from the initializer or assignment RHS (RFC-003): `var u = fetch()` with `fetch` declared to return `User?` classifies `u` nullable — no `T?` spelling is required;
+- any other rule that assigns the nullable class to a binding (for example, fallible success results, RFC-005).
+
+For all of them the narrowing forms behave identically (§6.3.1, §6.3.2), and the kill rules are the same (§6.3.4). Consumers that consult the refinement state (argument checks §8.2.3, establishment §6.3.5, redundant-check advisories §8.2.4–8.2.5) MUST read the flow fact for inferred-nullable bindings exactly as for declared `T?`.
+
+Bindings of unknown static class receive no non-null classification from a fact: §6.3.1 presupposes a statically nullable subject, and unknown classes keep the platform semantics — no proof is required of them (§6.2.3) and no argument or establishment check arises (§8.2.3, §6.3.5). Redundancy advisories (§8.2.4–8.2.5, §6.6.8) MAY read the proven fact whatever the class: a proven value needs neither `?.` nor a repeated check.
+
+Rationale: the refinement state is older than the declared class — it is a property of the flow, not of the surface syntax that made the binding nullable. Gating fact consultation on a declared `T?` spelling would make narrowing depend on syntax rather than semantics and would break the canonical safe validation form of RFC-007 §6.3.3, where the nullable class arrives by inference from the initializer.
 
 ### 6.4 Safe Navigation Semantics
 
