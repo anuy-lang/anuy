@@ -76,7 +76,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anuy-lang/anuy/experimental/anuyabi"
+	"github.com/anuy-lang/anuy/anuyabi"
 )
 
 type strReader struct{}
@@ -198,7 +198,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/anuy-lang/anuy/experimental/anuyabi"
+	"github.com/anuy-lang/anuy/anuyabi"
 )
 
 func TestAggregateBoundary(t *testing.T) {

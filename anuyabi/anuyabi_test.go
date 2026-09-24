@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anuy-lang/anuy/experimental/anuyabi"
+	"github.com/anuy-lang/anuy/anuyabi"
 )
 
 func TestNullableZeroValueIsNil(t *testing.T) {

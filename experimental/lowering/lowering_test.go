@@ -52,7 +52,7 @@ func TestLowerNullableVarDeclToGo(t *testing.T) {
 func TestLowerGeneratedAnuyabiImportText(t *testing.T) {
 	// Pin of the emitted import line: generated Go depends on the support
 	// package instead of inlining a carrier declaration.
-	const want = "import \"github.com/anuy-lang/anuy/experimental/anuyabi\"\n\n"
+	const want = "import \"github.com/anuy-lang/anuy/anuyabi\"\n\n"
 	if anuyabiImport != want {
 		t.Fatalf("anuyabi import line drifted:\n%s", anuyabiImport)
 	}
@@ -417,10 +417,10 @@ func TestLowerSafeCallIntermediateSafeSegmentRejected(t *testing.T) {
 type anuyabiTypes struct{}
 
 func (anuyabiTypes) Import(path string) (*types.Package, error) {
-	if path != "github.com/anuy-lang/anuy/experimental/anuyabi" {
+	if path != "github.com/anuy-lang/anuy/anuyabi" {
 		return nil, fmt.Errorf("unexpected import %q", path)
 	}
-	src, err := os.ReadFile(filepath.Join("..", "anuyabi", "anuyabi.go"))
+	src, err := os.ReadFile(filepath.Join("..", "..", "anuyabi", "anuyabi.go"))
 	if err != nil {
 		return nil, err
 	}

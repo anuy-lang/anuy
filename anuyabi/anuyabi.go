@@ -1,8 +1,8 @@
-// Package anuyabi is the experimental ABI support package (RFC-009
-// §6.1.5–6.1.9 sketch): stable representation helpers for generated Go -
-// no runtime, no scheduler, no hidden state. This validation copy lives
-// in experimental/ until RFC-009 is accepted; the physical import path
-// and release form belong to RFC-010.
+// Package anuyabi is the ABI support package (RFC-009 §6.1.5–6.1.9):
+// stable representation helpers for generated Go — no runtime, no
+// scheduler, no hidden state. L2 graduation (ADR-0007, story 03-04):
+// the contract is the Accepted RFC-009; the physical import path and
+// release form are fixed by RFC-010 §6.7.6 (ADR-0014).
 package anuyabi
 
 import (

@@ -13,7 +13,7 @@ import (
 // tagged carrier (RFC-009 §6.1.5 two-contracts sketch): generated Go
 // depends on the ABI support package instead of inlining it. Programs
 // without tagged representations emit no dependency at all.
-const anuyabiImport = "import \"github.com/anuy-lang/anuy/experimental/anuyabi\"\n\n"
+const anuyabiImport = "import \"github.com/anuy-lang/anuy/anuyabi\"\n\n"
 
 // Lower emits deliberately minimal experimental Go for accepted narrow syntax.
 func Lower(source string) (string, error) {
