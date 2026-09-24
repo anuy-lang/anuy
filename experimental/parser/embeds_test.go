@@ -35,9 +35,10 @@ func TestDuplicateEmbedRejects(t *testing.T) {
 }
 
 // Story 53 (§6.3.2): an embedded name colliding with a direct method
-// name is a parse error — the semantic conflict check covers signatures.
+// name is a parse error — same-name different-signature conflicts across
+// embedded interfaces are the semantic check (ANUY7007).
 func TestEmbedCollidingWithMethodNameRejects(t *testing.T) {
-	if _, err := Parse("interface Reader {\nRead() int\n}\ninterface RW {\nReader\nRead() string\n}\n"); err == nil {
-		t.Fatal("embed colliding with a direct method name must be rejected")
+	if _, err := Parse("interface Read {\nRead() int\n}\ninterface RW {\nRead\nRead() string\n}\n"); err == nil {
+		t.Fatal("an embed colliding with a direct method name must be rejected")
 	}
 }

@@ -137,7 +137,11 @@ type InterfaceMethod struct {
 type InterfaceDecl struct {
 	Name    string
 	Methods []InterfaceMethod
-	Span    Span
+	// Embeds lists the embedded interfaces (story 53, RFC-004 §6.3.2):
+	// identifier-only members whose effective method sets join this
+	// interface's.
+	Embeds []string
+	Span   Span
 }
 
 // ImplDecl is the conformance statement `impl Iface for [*]Type` (story
@@ -2208,6 +2212,7 @@ func (lp *lineParser) parseInterfaceDecl(tokens []token, line sourceLine) (State
 	}
 	decl := &InterfaceDecl{Name: tokens[1].text, Span: Span{Start: tokens[0].start}}
 	seen := map[string]bool{}
+	embedded := map[string]bool{}
 	lp.pos++
 	for {
 		if lp.pos >= len(lp.lines) {
@@ -2227,12 +2232,24 @@ func (lp *lineParser) parseInterfaceDecl(tokens []token, line sourceLine) (State
 		if terr != nil {
 			return Statement{}, terr
 		}
+		if len(sigTokens) == 1 && sigTokens[0].kind == tokenIdent && sigTokens[0].text != "_" && !reservedWords[sigTokens[0].text] {
+			// Story 53 (RFC-004 §6.3.2): an identifier-only line embeds
+			// another interface into the effective method set.
+			name := sigTokens[0].text
+			if seen[name] || embedded[name] {
+				return Statement{}, newError(UnsupportedSyntax, sigTokens[0].start, "duplicate interface member "+name)
+			}
+			embedded[name] = true
+			decl.Embeds = append(decl.Embeds, name)
+			lp.pos++
+			continue
+		}
 		method, merr := parseInterfaceMethod(sigTokens, sigLine)
 		if merr != nil {
 			return Statement{}, merr
 		}
-		if seen[method.Name] {
-			return Statement{}, newError(UnsupportedSyntax, method.Span.Start, "duplicate interface method "+method.Name)
+		if seen[method.Name] || embedded[method.Name] {
+			return Statement{}, newError(UnsupportedSyntax, method.Span.Start, "duplicate interface member "+method.Name)
 		}
 		seen[method.Name] = true
 		decl.Methods = append(decl.Methods, method)
