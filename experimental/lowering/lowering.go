@@ -21,7 +21,7 @@ func Lower(source string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}, structs: map[string][]parser.StructField{}, hasInvMemo: map[string]bool{}, hasInvWip: map[string]bool{}, seenMemo: map[string]bool{}, seenWip: map[string]bool{}}
+	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}, funcResults: map[string]*parser.TypeExpr{}, structs: map[string][]parser.StructField{}, hasInvMemo: map[string]bool{}, hasInvWip: map[string]bool{}, seenMemo: map[string]bool{}, seenWip: map[string]bool{}}
 	// Story 16: top-level functions hoist to package-level declarations.
 	// The Run body lowers first, so the tracking maps are populated by the
 	// time the hoisted function bodies are rendered (captures stay
@@ -72,6 +72,23 @@ func Lower(source string) (string, error) {
 		if len(checks) > 0 {
 			l.wrappedFns[name] = true
 		}
+	}
+	// Story 49 (RFC-009 §6.7.13): collect the declared first results of
+	// the hoisted top-level functions - the inference table of the
+	// inferred `var x = f()` dispatch registration - before any body
+	// renders, so declaration order is not observable.
+	for i := range funcs {
+		statement := funcs[i]
+		if statement.Closure == nil {
+			continue
+		}
+		var result *parser.TypeExpr
+		if len(statement.Closure.ResultList) > 0 {
+			result = statement.Closure.ResultList[0]
+		} else if statement.HasResult {
+			result = statement.Closure.ResultTypeExpr
+		}
+		l.funcResults[statement.Names[0]] = result
 	}
 	// Story 43 (RFC-009 §6.8.16): plan the per-type validators from the
 	// exported signatures - before any body renders, so wrapper and
@@ -147,6 +164,11 @@ type lowerer struct {
 	// Wrapped methods stay out - method calls keep the wrapper in this
 	// slice (identical semantics, §6.8.10 cost).
 	wrappedFns map[string]bool
+	// funcResults holds the declared first result of each hoisted
+	// top-level function (story 49, RFC-009 §6.7.13): the inference
+	// table of the inferred `var x = f()` dispatch registration - built
+	// before any body renders, so declaration order is not observable.
+	funcResults map[string]*parser.TypeExpr
 	// boundaryUsed records whether any wrapper emitted an anuyabi.Require*
 	// check - the generated file then imports the support package even
 	// without tagged carriers.
@@ -209,6 +231,23 @@ func (l *lowerer) statements(body *strings.Builder, statements []parser.Statemen
 					for _, name := range statement.Names {
 						if name != "_" {
 							l.nativeNil[name] = true
+						}
+					}
+				}
+			}
+			// Story 49 (RFC-009 §6.7.13): an inferred declaration takes its
+			// dispatch representation from the initializer's declared first
+			// result - a single bare call to a known top-level function.
+			// Unknown callees stay untracked: the plain comparison stands
+			// where Go semantics do (§6.2.2), and guard-demanding forms keep
+			// rejecting (§6.7.5).
+			if typeText == "" && len(statement.Values) == 1 && len(statement.Names) == 1 && statement.Names[0] != "_" {
+				if callee, ok := plainCallCallee(statement.Values[0]); ok {
+					if result := l.funcResults[callee]; result != nil && result.Nullable {
+						if elem, ok := l.carrier(result); ok {
+							l.carriers[statement.Names[0]] = elem
+						} else {
+							l.nativeNil[statement.Names[0]] = true
 						}
 					}
 				}
@@ -678,6 +717,24 @@ func nilCompareOperand(cond, op string) (string, bool) {
 	}
 	name := strings.TrimSpace(parts[0])
 	if name == "" || strings.ContainsAny(name, " \t.()[]?*") {
+		return "", false
+	}
+	return name, true
+}
+
+// plainCallCallee reports the callee of a value that is exactly a bare
+// call `name(...)` - the same shape the §6.8.14 native-entry retarget
+// matches. Selector chains, closures, keyed literals and value switches
+// report no.
+func plainCallCallee(value parser.Value) (string, bool) {
+	if value.Navigation != nil || value.Switch != nil || value.Keyed != nil || value.Closure != nil {
+		return "", false
+	}
+	if len(value.Idents) != 1 {
+		return "", false
+	}
+	name := value.Idents[0]
+	if !strings.HasPrefix(value.Text, name+"(") {
 		return "", false
 	}
 	return name, true
