@@ -1508,3 +1508,43 @@ func TestLoweredUnknownCalleeStaysConservative(t *testing.T) {
 		t.Fatalf("unknown callee must not register dispatch:\n%s", source)
 	}
 }
+
+// Story 54 (RFC-007 §6.9.7–6.9.8): a callback with invariant-bearing
+// params must not lower verbatim — the foreign caller could feed
+// unvalidated values into the safe body. The validating-wrapper slice
+// does not exist yet, so the form rejects loudly.
+func TestLoweredInheritedCallbackParamRejects(t *testing.T) {
+	_, err := Lower("type Color enum {\nRed\n}\nfunc run() {\ngoRegister(func(c Color) {\nuse(c)\n})\n}\n")
+	if err == nil {
+		t.Fatal("enum-param callback must be rejected")
+	}
+}
+
+// Story 54: plain-typed callbacks have nothing to validate — they keep
+// the verbatim form.
+func TestLoweredPlainCallbackKeepsVerbatim(t *testing.T) {
+	out, err := Lower("func run() {\ngoCall(func(s string) {\nuse(s)\n})\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "func(s string)") {
+		t.Fatalf("plain callback must lower verbatim:\n%s", out)
+	}
+}
+
+// Story 54: a closure bound to a variable is not a boundary crossing —
+// only call arguments reject.
+func TestLoweredClosureInitUntouched(t *testing.T) {
+	if _, err := Lower("type Color enum {\nRed\n}\nfunc run() {\nvar cb = func(c Color) {\nuse(c)\n}\ncb(Color.Red)\n}\n"); err != nil {
+		t.Fatalf("closure initializer must not be rejected: %v", err)
+	}
+}
+
+// Story 54: pointer params stay outside the v1 reject scope (native-nil
+// is semantic nil); the pointee-invariant question is a documented
+// boundary.
+func TestLoweredPointerCallbackParamNotRejected(t *testing.T) {
+	if _, err := Lower("type Color enum {\nRed\n}\nfunc run() {\ngoCall(func(c *Color) {\nuse(c)\n})\n}\n"); err != nil {
+		t.Fatalf("pointer-param callback must not be rejected in v1: %v", err)
+	}
+}
