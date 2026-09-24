@@ -740,6 +740,41 @@ func plainCallCallee(value parser.Value) (string, bool) {
 	return name, true
 }
 
+// closureHasInvariantParams reports whether any closure parameter
+// carries an invariant-bearing type — an enum discriminant or an
+// invariant struct, directly or through one nullable layer (story 54,
+// RFC-007 §6.9.7).
+func (l *lowerer) closureHasInvariantParams(cl *parser.Closure) bool {
+	for _, p := range cl.Params {
+		if l.paramTypeInvariant(p.TypeExpr) {
+			return true
+		}
+	}
+	return false
+}
+
+// paramTypeInvariant walks one type spelling: a nullable wrapper keeps
+// the element's invariants (the tagged carrier carries the discriminant);
+// pointer forms stay outside the v1 scope — native nil is semantic nil,
+// and the pointee-invariant question is a documented boundary.
+func (l *lowerer) paramTypeInvariant(t *parser.TypeExpr) bool {
+	if t == nil {
+		return false
+	}
+	if t.Nullable {
+		return l.paramTypeInvariant(t.Elem)
+	}
+	if t.Kind == parser.NamedType {
+		if _, enum := l.enums[t.Name]; enum {
+			return true
+		}
+		if l.structs[t.Name] != nil && l.typeHasInv(t.Name) {
+			return true
+		}
+	}
+	return false
+}
+
 // callStatement lowers the call statement (story 05). Arguments emit
 // through the value renderer (story 15: raw text and func literals;
 // they were dropped entirely before). A safe-tail argument rejects -
@@ -761,6 +796,14 @@ func (l *lowerer) callStatement(body *strings.Builder, call *parser.NavigationEx
 	for _, value := range values {
 		if hasSafeTailValue(value) {
 			return fmt.Errorf("experimental lowering: safe-tail call argument is not supported")
+		}
+		if value.Closure != nil && l.closureHasInvariantParams(value.Closure) {
+			// Story 54 (RFC-007 §6.9.7–6.9.8): a callback crossing to Go
+			// is a foreign entry - its invariant-bearing parameters must
+			// be validated by a wrapper, and the wrapper slice does not
+			// exist yet. Verbatim lowering would let the foreign caller
+			// feed unvalidated values into the safe body.
+			return fmt.Errorf("experimental lowering: callback parameter carries an invariant and requires a validating wrapper")
 		}
 		text, err := l.value(value)
 		if err != nil {
