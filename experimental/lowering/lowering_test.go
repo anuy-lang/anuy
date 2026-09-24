@@ -1509,14 +1509,29 @@ func TestLoweredUnknownCalleeStaysConservative(t *testing.T) {
 	}
 }
 
-// Story 54 (RFC-007 §6.9.7–6.9.8): a callback with invariant-bearing
-// params must not lower verbatim — the foreign caller could feed
-// unvalidated values into the safe body. The validating-wrapper slice
-// does not exist yet, so the form rejects loudly.
-func TestLoweredInheritedCallbackParamRejects(t *testing.T) {
-	_, err := Lower("type Color enum {\nRed\n}\nfunc run() {\ngoRegister(func(c Color) {\nuse(c)\n})\n}\n")
+// Story 55 (RFC-008 §6.9.10): a callback with invariant-bearing params
+// lowers to a validating wrapper literal at the argument position — the
+// §6.8 checks run before the body, and the wrapper delegates to it
+// (story 54 reject flipped into the §6.9.7 wrapper).
+func TestLoweredInheritedCallbackWrapsValidation(t *testing.T) {
+	out, err := Lower("type Color enum {\nRed\n}\nfunc run() {\ngoRegister(func(c Color) {\nuse(c)\n})\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "anuyabi.RequireEnum(") {
+		t.Fatalf("generated wrapper misses the boundary check:\n%s", out)
+	}
+	if !strings.Contains(out, "return func(c Color)") {
+		t.Fatalf("wrapper misses the delegation to the callback body:\n%s", out)
+	}
+}
+
+// Story 55: a callback parameter that needs the seen-map (pointer
+// cycle) stays rejected — the seen-map wrapper is a separate slice.
+func TestLoweredNeedsSeenCallbackRejects(t *testing.T) {
+	_, err := Lower("type User struct {\nid int\nlink *User\n}\nfunc run() {\ngoCall(func(u User) {\nuse(u)\n})\n}\n")
 	if err == nil {
-		t.Fatal("enum-param callback must be rejected")
+		t.Fatal("seen-map callback param must stay rejected")
 	}
 }
 
