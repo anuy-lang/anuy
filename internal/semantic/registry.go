@@ -1,13 +1,13 @@
 package semantic
 
 // Code is the stable machine-readable diagnostic identifier, ANUY + four
-// digits (RFC-011 §15). The block scheme and the concrete numbers are
+// digits (RFC-011 §6.2.15). The block scheme and the concrete numbers are
 // frozen by the story06 code-scheme proposal (owner decision 2026-09-16):
 // codes are never renumbered or reused, and category renames do not
 // change them.
 type Code string
 
-// Severity is the RFC-011 §16 diagnostic severity. The experimental layer
+// Severity is the RFC-011 §6.2.16 diagnostic severity. The experimental layer
 // uses Error for language validity and Warning for advisory lints;
 // Information and Hint stay reserved for future owner decisions.
 type Severity string
@@ -210,7 +210,7 @@ var catalog = map[Code]string{
 	"ANUY5002": "assume_non_nil on a value already known to be non-null",
 }
 
-// Message returns the canonical English text for a code (RFC-011 §14: the
+// Message returns the canonical English text for a code (RFC-011 §6.2.17: the
 // message is presentation; tests and evidence cite codes, not texts).
 func Message(code Code) (string, bool) {
 	text, ok := catalog[code]

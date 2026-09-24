@@ -190,7 +190,7 @@ type Diagnostic struct {
 	Binding  BindingID
 	Span     SourceSpan
 	// Related carries co-firing diagnostics suppressed as a cascade
-	// (CONTRACTS §2, decision 4; RFC-011 §14 RelatedInformation).
+	// (CONTRACTS §2, decision 4; RFC-011 §6.2.2 RelatedInformation).
 	Related []Diagnostic
 }
 
