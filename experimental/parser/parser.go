@@ -80,7 +80,10 @@ type NavigationSegment struct {
 // parser slice.
 type NavigationExpr struct {
 	Receiver string
-	Segments []NavigationSegment
+	// ReceiverSpan covers the receiver identifier only (story 50,
+	// RFC-011 §6.2.18 precision ladder): the read-blame target.
+	ReceiverSpan Span
+	Segments     []NavigationSegment
 }
 
 // StructField is one direct field of a struct declaration (RFC-014 §6.2):
@@ -263,6 +266,10 @@ type Value struct {
 	Switch *SwitchDecl
 	// Closure is non-nil for closure literals.
 	Closure *Closure
+	// Span covers the whole value construct (story 50, RFC-011 §6.2.18
+	// precision ladder): read diagnostics blame the exact expression,
+	// not the enclosing statement line.
+	Span Span
 }
 
 // Closure is a `func(Params) { Body }` literal.
@@ -1235,7 +1242,7 @@ func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (State
 	lp.pos++
 	return Statement{
 		Kind:   Call,
-		Call:   &NavigationExpr{Receiver: tokens[0].text, Segments: segments},
+		Call:   &NavigationExpr{Receiver: tokens[0].text, ReceiverSpan: Span{Start: tokens[0].start, End: tokens[0].end}, Segments: segments},
 		Values: args,
 		Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
 	}, nil
@@ -1394,7 +1401,7 @@ func (lp *lineParser) parseMultilineCallArguments(tokens []token, callOpen int, 
 	}
 	return Statement{
 		Kind:   Call,
-		Call:   &NavigationExpr{Receiver: tokens[0].text, Segments: segments},
+		Call:   &NavigationExpr{Receiver: tokens[0].text, ReceiverSpan: Span{Start: tokens[0].start, End: tokens[0].end}, Segments: segments},
 		Values: args,
 		Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
 	}, nil
@@ -2040,8 +2047,9 @@ func (lp *lineParser) parseFieldAssignment(tokens []token, line sourceLine) (Sta
 	return Statement{
 		Kind: Assign,
 		Target: &NavigationExpr{
-			Receiver: tokens[0].text,
-			Segments: segments,
+			Receiver:     tokens[0].text,
+			ReceiverSpan: Span{Start: tokens[0].start, End: tokens[0].end},
+			Segments:     segments,
 		},
 		Values: values,
 		Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
@@ -2410,10 +2418,10 @@ func navigationMetadata(tokens []token) (*NavigationExpr, []string, bool, *Error
 			if len(inner) != 1 || inner[0].kind != tokenIdent || reservedWords[inner[0].text] {
 				return nil, nil, false, nil
 			}
-			innerNavigation = &NavigationExpr{Receiver: inner[0].text}
+			innerNavigation = &NavigationExpr{Receiver: inner[0].text, ReceiverSpan: Span{Start: inner[0].start, End: inner[0].end}}
 			innerIdents = []string{inner[0].text}
 		}
-		return navigationSuffix(tokens, next, innerNavigation.Receiver, innerNavigation.Segments, innerIdents)
+		return navigationSuffix(tokens, next, innerNavigation.Receiver, innerNavigation.ReceiverSpan, innerNavigation.Segments, innerIdents)
 	}
 	if tokens[0].kind != tokenIdent || reservedWords[tokens[0].text] {
 		return nil, nil, false, nil
@@ -2432,10 +2440,10 @@ func navigationMetadata(tokens []token) (*NavigationExpr, []string, bool, *Error
 		idents = append(idents, argIdents...)
 		pos = next
 	}
-	return navigationSuffix(tokens, pos, tokens[0].text, nil, idents)
+	return navigationSuffix(tokens, pos, tokens[0].text, Span{Start: tokens[0].start, End: tokens[0].end}, nil, idents)
 }
 
-func navigationSuffix(tokens []token, pos int, receiver string, initial []NavigationSegment, idents []string) (*NavigationExpr, []string, bool, *Error) {
+func navigationSuffix(tokens []token, pos int, receiver string, receiverSpan Span, initial []NavigationSegment, idents []string) (*NavigationExpr, []string, bool, *Error) {
 	segments := append([]NavigationSegment(nil), initial...)
 	safeTail := false
 	for _, segment := range segments {
@@ -2491,7 +2499,7 @@ func navigationSuffix(tokens []token, pos int, receiver string, initial []Naviga
 	if len(segments) == 0 {
 		return nil, nil, false, nil
 	}
-	return &NavigationExpr{Receiver: receiver, Segments: segments}, idents, true, nil
+	return &NavigationExpr{Receiver: receiver, ReceiverSpan: receiverSpan, Segments: segments}, idents, true, nil
 }
 
 func validateNavigationTokens(tokens []token) *Error {
@@ -2685,6 +2693,7 @@ func valueGroup(tokens []token, lo, hi int, line sourceLine) (Value, *Error) {
 		return Value{
 			Text:   line.raw[tokens[lo].start-line.offset : tokens[hi-1].end-line.offset],
 			Idents: idents,
+			Span:   Span{Start: tokens[lo].start, End: tokens[hi-1].end},
 			Keyed: &KeyedLiteral{
 				Name:   keyed,
 				Fields: keys,
@@ -2710,6 +2719,7 @@ func valueGroup(tokens []token, lo, hi int, line sourceLine) (Value, *Error) {
 		Text:       line.raw[tokens[lo].start-line.offset : tokens[hi-1].end-line.offset],
 		Idents:     idents,
 		Navigation: navigation,
+		Span:       Span{Start: tokens[lo].start, End: tokens[hi-1].end},
 	}, nil
 }
 
