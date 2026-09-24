@@ -115,3 +115,34 @@ func TestDiagnosticsCarryRegistryCodeAndSeverity(t *testing.T) {
 		t.Fatalf("package diagnostic = (%s, %s), want (ANUY3002, Error)", pkg.Code, pkg.Severity)
 	}
 }
+
+// RFC-011 §6.2.16 (v3): severity follows the diagnostic class, not the
+// block — the block is the area. Advisory codes outside the lint block
+// 5xxx must be recorded in advisoryExceptions (and in §6.2.16); block
+// 9xxx stays reserved for backend/tooling-consistency diagnostics
+// (story-47: task 3).
+var advisoryExceptions = map[Code]string{
+	"ANUY4002": "RedundantSafeNavigation", // D-4, ADR-0005
+}
+
+func TestRegistrySeverityFollowsCodeBlock(t *testing.T) {
+	for category, desc := range registry {
+		block := desc.Code()[len("ANUY")] - '0'
+		if block == 0 || block == 9 {
+			t.Fatalf("%s uses reserved block %c (RFC-011 §6.2.15)", category, desc.Code()[len("ANUY")])
+		}
+		switch desc.Severity() {
+		case SeverityWarning:
+			if block == 5 {
+				continue // advisory block defaults to Warning
+			}
+			if owner, ok := advisoryExceptions[desc.Code()]; !ok || owner != string(category) {
+				t.Fatalf("%s (%s) = Warning outside advisory block 5xxx; record the advisory in RFC-011 §6.2.16 and advisoryExceptions", category, desc.Code())
+			}
+		default:
+			if block == 5 {
+				t.Fatalf("%s (%s) = %s in advisory block 5xxx", category, desc.Code(), desc.Severity())
+			}
+		}
+	}
+}
