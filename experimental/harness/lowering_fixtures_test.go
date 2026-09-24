@@ -72,6 +72,11 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		// inference, the early-exit proof needs no spelling, and the
 		// post-proof call retargets to the validating boundary entry.
 		{"inferred-nullable-narrowing.anuy", "__anuy_Use(user)", false},
+		// Story 49 (RFC-009 §6.7.12–6.7.13): the inferred binding takes
+		// its carrier representation from the initializer's declared
+		// result - the `== nil` condition dispatches through the carrier
+		// predicate instead of the non-compiling struct comparison.
+		{"inferred-carrier-dispatch.anuy", "if u.IsNil() {", false},
 	}
 	dir := filepath.Join("..", "fixtures", "lowering-core", "accept")
 	files, err := filepath.Glob(filepath.Join(dir, "*.anuy"))

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -292,5 +293,42 @@ func TestLoweredAggregateBoundaryRuns(t *testing.T) {
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("aggregate boundary test failed: %v\n%s", err, out)
+	}
+}
+
+// Story 49 (RFC-009 §6.7.12–6.7.13): an inferred binding whose single
+// call initializer has a declared carrier result dispatches `== nil`
+// through the carrier predicate - the verbatim struct-to-nil comparison
+// does not compile in Go.
+func TestLoweredInferredCarrierDispatchCompiles(t *testing.T) {
+	source, err := Lower(string(mustRead(t, filepath.Join("..", "fixtures", "lowering-core", "accept", "inferred-carrier-dispatch.anuy"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(source, "if u.IsNil() {") {
+		t.Fatalf("generated Go misses the carrier dispatch:\n%s", source)
+	}
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	gomod := "module fixture\n\ngo 1.24\n\nrequire github.com/anuy-lang/anuy v0.0.0\n\nreplace github.com/anuy-lang/anuy => " + root + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fixture.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "mod", "tidy")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy failed: %v\n%s", err, out)
+	}
+	cmd = exec.Command("go", "test", ".")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("inferred carrier dispatch test failed: %v\n%s", err, out)
 	}
 }

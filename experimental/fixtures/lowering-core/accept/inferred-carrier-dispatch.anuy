@@ -1,0 +1,13 @@
+type User struct {
+id int
+}
+
+func fetch() User? {
+return nil
+}
+
+var u = fetch()
+if u == nil {
+u
+}
+u

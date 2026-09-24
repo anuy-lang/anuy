@@ -1477,3 +1477,34 @@ func TestLowerValidatorEmissionDeterministic(t *testing.T) {
 		t.Fatal("Lower() is not deterministic over the validator set")
 	}
 }
+
+// Story 49 (RFC-009 §6.7.13): native-nil results infer the native-nil
+// dispatch class - the plain comparison stands (semantic nil) and no
+// carrier prelude appears.
+func TestLoweredInferredNativeNilKeepsPlainComparison(t *testing.T) {
+	source, err := Lower("func find() error? {\nreturn nil\n}\n\nvar e = find()\nif e == nil {\ne\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(source, "if e == nil {") {
+		t.Fatalf("generated Go misses the plain comparison:\n%s", source)
+	}
+	if strings.Contains(source, "anuyabi") {
+		t.Fatalf("native-nil inference must not pull the carrier prelude:\n%s", source)
+	}
+}
+
+// Story 49 (RFC-009 §6.7.13): unknown callees stay conservative - no
+// dispatch registration, the condition keeps the source text.
+func TestLoweredUnknownCalleeStaysConservative(t *testing.T) {
+	source, err := Lower("var v = mystery()\nif v == nil {\nv\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(source, "if v == nil {") {
+		t.Fatalf("generated Go must keep the verbatim condition:\n%s", source)
+	}
+	if strings.Contains(source, ".IsNil()") {
+		t.Fatalf("unknown callee must not register dispatch:\n%s", source)
+	}
+}
