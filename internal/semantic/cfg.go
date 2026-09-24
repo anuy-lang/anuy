@@ -46,6 +46,11 @@ const (
 type Operation struct {
 	Kind    OperationKind
 	Binding BindingID
+	// Span is the source span of the construct that emitted the
+	// operation (RFC-011 §6.2.18): a diagnostic fired at the operation
+	// blames it. The zero span means the emitter had no construct - a
+	// published diagnostic must never carry one.
+	Span SourceSpan
 	// Mutates lists the bindings whose non-nil narrowing the call
 	// invalidates; used only by CallOperation.
 	Mutates []BindingID
@@ -207,11 +212,11 @@ func NewDiagnostic(desc Descriptor, binding BindingID, span SourceSpan) Diagnost
 	}
 }
 
-func ValidatePackageBinding(hasInitializer bool) *Diagnostic {
+func ValidatePackageBinding(hasInitializer bool, span SourceSpan) *Diagnostic {
 	if hasInitializer {
 		return nil
 	}
-	d := NewDiagnostic(PackageInitializerRequiredDescriptor, 0, SourceSpan{})
+	d := NewDiagnostic(PackageInitializerRequiredDescriptor, 0, span)
 	return &d
 }
 
@@ -354,7 +359,7 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 							reported[id] = make(map[BindingID]bool)
 						}
 						if !reported[id][op.Binding] {
-							result.Diagnostics = append(result.Diagnostics, NewDiagnostic(ReadBeforeInitializationDescriptor, op.Binding, SourceSpan{}))
+							result.Diagnostics = append(result.Diagnostics, NewDiagnostic(ReadBeforeInitializationDescriptor, op.Binding, op.Span))
 							reported[id][op.Binding] = true
 							if rbInitAt[id] == nil {
 								rbInitAt[id] = make(map[BindingID]int)
@@ -378,7 +383,7 @@ func (Analyzer) Analyze(cfg *CFG) AnalysisResult {
 							reportedUnsafe[id] = make(map[BindingID]bool)
 						}
 						if !reportedUnsafe[id][op.Binding] {
-							uma := NewDiagnostic(UnsafeMemberAccessDescriptor, op.Binding, SourceSpan{})
+							uma := NewDiagnostic(UnsafeMemberAccessDescriptor, op.Binding, op.Span)
 							reportedUnsafe[id][op.Binding] = true
 							if primary, coFired := rbInitAt[id][op.Binding]; coFired {
 								// The read already fired in this block: the

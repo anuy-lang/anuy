@@ -110,7 +110,7 @@ func TestDiagnosticsCarryRegistryCodeAndSeverity(t *testing.T) {
 	if got.Code != "ANUY2001" || got.Severity != SeverityError {
 		t.Fatalf("diagnostic = (%s, %s), want (ANUY2001, Error)", got.Code, got.Severity)
 	}
-	pkg := ValidatePackageBinding(false)
+	pkg := ValidatePackageBinding(false, SourceSpan{})
 	if pkg.Code != "ANUY3002" || pkg.Severity != SeverityError {
 		t.Fatalf("package diagnostic = (%s, %s), want (ANUY3002, Error)", pkg.Code, pkg.Severity)
 	}
