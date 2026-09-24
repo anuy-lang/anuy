@@ -64,5 +64,7 @@ experimental narrow slice; no RFC is fully implemented yet.
 | 002 | Nullability and Nil Safety             | Accepted | 4       | 2026-09-19 |
 | 003 | Variables, Assignment and Scope        | Accepted | 4       | 2026-09-19 |
 | 004 | Interfaces and Explicit `impl`         | Accepted | 5       | 2026-09-24 |
+| 005 | Error Handling and Propagation         | Accepted | 8       | 2026-09-25 |
 | 006 | Enums and Exhaustive Matching          | Accepted | 6       | 2026-09-24 |
 | 007 | Unsafe and Foreign Contracts           | Accepted | 4       | 2026-09-24 |
+| 009 | Lowering and Generated Go Contract     | Accepted | 6       | 2026-09-25 |
