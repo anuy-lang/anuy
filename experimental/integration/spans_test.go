@@ -1,6 +1,10 @@
 package integration
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/anuy-lang/anuy/internal/semantic"
+)
 
 // RFC-011 §6.2.18: published diagnostics blame the source construct that
 // triggered them. Kernel-emitted diagnostics carry the span of their
@@ -29,8 +33,10 @@ func TestKernelDiagnosticsCarrySourceSpans(t *testing.T) {
 		t.Fatalf("diagnostics = %#v, want one ReadBeforeInitialization primary", result.Diagnostics)
 	}
 	primary := result.Diagnostics[0]
-	if primary.Span.Start < 32 || primary.Span.End > 43 || primary.Span.Start == 0 {
-		t.Fatalf("primary span = %d..%d, want inside 32..43", primary.Span.Start, primary.Span.End)
+	// Story 50 (precision ladder): the receiver read blames the exact
+	// identifier `user` (32..36), not the enclosing statement (32..43).
+	if primary.Span != (semantic.SourceSpan{Start: 32, End: 36}) {
+		t.Fatalf("primary span = %d..%d, want the receiver identifier 32..36", primary.Span.Start, primary.Span.End)
 	}
 	if len(primary.Related) != 1 {
 		t.Fatalf("related = %#v, want one", primary.Related)
