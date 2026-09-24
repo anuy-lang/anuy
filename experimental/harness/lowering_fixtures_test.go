@@ -82,6 +82,11 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		// enum dispatch; the init join is kernel dataflow (no lowering
 		// surface).
 		{"match-init.anuy", "case ColorRed:", true},
+		// Story 52 (RFC-006 §6.2.9–6.2.10): methods on enums lower
+		// through the ordinary receiver rules - the pointer receiver
+		// gets the validating boundary wrapper (§6.8), the value
+		// receiver and the interface dispatch stay plain.
+		{"enum-interface.anuy", "func (c *Color) Bump() {", false},
 	}
 	dir := filepath.Join("..", "fixtures", "lowering-core", "accept")
 	files, err := filepath.Glob(filepath.Join(dir, "*.anuy"))

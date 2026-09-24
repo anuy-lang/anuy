@@ -1921,8 +1921,14 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		// operands and D-3 argument checks inside a function body resolve
 		// the functions declared before the enclosing one; nested
 		// declarations do not exist (the parser rejects them).
-		structs:      b.structs,
-		enums:        b.enums,
+		structs: b.structs,
+		enums:   b.enums,
+		// Story 52 (RFC-006 §6.2.10, RFC-004 §6.4.x): the interface and
+		// impl registration tables are shared read-only — "RFC-004
+		// applies without special exceptions" inside function bodies
+		// too; without them the ANUY7006 check went silent in bodies.
+		interfaces:   b.interfaces,
+		impls:        b.impls,
 		bindingTypes: map[semantic.BindingID]string{},
 		funcParams:   b.funcParams,
 		funcResults:  b.funcResults,

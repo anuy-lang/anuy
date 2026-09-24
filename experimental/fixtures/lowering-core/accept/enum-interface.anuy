@@ -1,0 +1,21 @@
+type Color enum {
+Red
+Green
+}
+func (c Color) String() string {
+return "red"
+}
+func (c *Color) Bump() {
+}
+interface Stringer {
+String() string
+}
+impl Stringer for Color
+func use(s Stringer) {
+s.String()
+}
+func run() {
+var c Color = Color.Red
+use(c)
+c.Bump()
+}
