@@ -32,8 +32,9 @@ type jsonDocument struct {
 
 // The cascade reproducer (CONTRACTS §2, decision 4) serializes as one
 // primary with its suppressed deref nested as related, each carrying its
-// own registry code. The zero offsets pin today's contract: kernel-emitted
-// diagnostics carry SourceSpan{} until span plumbing lands (F-47-2).
+// own registry code. Spans are resolved (RFC-011 §6.2.18): the primary
+// blames the statement `user.save()` (32..43), the related deref blames
+// the `.save` access (36..41, segment spans include the dot).
 const cascadeGolden = `{
   "version": 1,
   "diagnostics": [
@@ -44,16 +45,16 @@ const cascadeGolden = `{
       "message": "read before initialization",
       "span": {
         "file": "",
-        "start": 0,
-        "end": 0
+        "start": 32,
+        "end": 43
       },
       "related": [
         {
           "code": "ANUY4001",
           "span": {
             "file": "",
-            "start": 0,
-            "end": 0
+            "start": 36,
+            "end": 41
           }
         }
       ]

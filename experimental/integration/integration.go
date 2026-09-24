@@ -259,7 +259,8 @@ func (b *builder) appendBlock() {
 	b.cur = len(b.blocks) - 1
 }
 
-func (b *builder) add(op semantic.Operation) {
+func (b *builder) add(op semantic.Operation, span parser.Span) {
+	op.Span = semantic.SourceSpan{Start: span.Start, End: span.End}
 	switch op.Kind {
 	case semantic.ReadOperation, semantic.DerefOperation:
 		// Both operations read the binding's value: any of them lifts the
@@ -269,15 +270,15 @@ func (b *builder) add(op semantic.Operation) {
 	b.blocks[b.cur].Operations = append(b.blocks[b.cur].Operations, op)
 }
 
-func (b *builder) declare(id semantic.BindingID) {
-	b.add(semantic.Declare(id))
+func (b *builder) declare(id semantic.BindingID, span parser.Span) {
+	b.add(semantic.Declare(id), span)
 	b.facts[b.cur][id] = false
 	b.nonNil[b.cur][id] = false
 	b.declared[id] = true
 }
 
-func (b *builder) initialize(id semantic.BindingID) {
-	b.add(semantic.Assign(id))
+func (b *builder) initialize(id semantic.BindingID, span parser.Span) {
+	b.add(semantic.Assign(id), span)
 	b.facts[b.cur][id] = true
 	// RFC-002 §25: assignment invalidates narrowing. Re-establishment (§26)
 	// is the caller's move - the assignment path classifies the RHS and
@@ -338,8 +339,8 @@ func (b *builder) condNilComparison(statement *parser.Statement, scope *semantic
 
 // assume establishes the non-nil narrowing fact for the lowering of a
 // proven `x != nil` predicate (RFC-002 §22).
-func (b *builder) assume(id semantic.BindingID) {
-	b.add(semantic.Assume(id))
+func (b *builder) assume(id semantic.BindingID, span parser.Span) {
+	b.add(semantic.Assume(id), span)
 	b.nonNil[b.cur][id] = true
 }
 
@@ -439,7 +440,10 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 		// the unsafe context. Outside the context the statement-level
 		// check reports D-1 - classification stays conservative here.
 		if id := scope.Resolve(name); id != 0 && b.unsafeDepth > 0 {
-			b.assume(id)
+			// No statement span reaches the classifier; the Assume op never
+			// publishes a diagnostic (kernel emits at Read/Deref only), so a
+			// zero span is contract-safe (RFC-011 §6.2.18).
+			b.assume(id, parser.Span{})
 		}
 		return semantic.NullabilityNonNull
 	}
@@ -587,7 +591,7 @@ func classifyDeclResult(hasResult, resultNullable bool) semantic.Nullability {
 func (b *builder) establish(id semantic.BindingID, value *parser.Value, scope *semantic.Scope, span parser.Span) {
 	switch b.classifyValue(value, scope) {
 	case semantic.NullabilityNonNull:
-		b.assume(id)
+		b.assume(id, span)
 	case semantic.NullabilityNullable:
 		b.flowNullable[id] = true
 		if b.classes[id] == semantic.NullabilityNonNull {
@@ -1109,7 +1113,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			declared = append(declared, name)
 			id := scope.Resolve(name)
 			targets = append(targets, id)
-			b.declare(id)
+			b.declare(id, statement.Span)
 			if enumName != "" {
 				b.bindingTypes[id] = enumName
 			}
@@ -1151,7 +1155,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		}
 		if statement.Values != nil {
 			for _, name := range declared {
-				b.initialize(scope.Resolve(name))
+				b.initialize(scope.Resolve(name), statement.Span)
 			}
 			// ADR-0001 (RFC-003 §13.8: first initialization uses ordinary
 			// `=`): the initializer classifies like an assignment RHS, so a
@@ -1196,7 +1200,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 				continue
 			}
 			targets = append(targets, scope.Resolve(name))
-			b.initialize(scope.Resolve(name))
+			b.initialize(scope.Resolve(name), statement.Span)
 		}
 		b.establishAssignments(statement, scope)
 		b.analyzeClosures(statement, scope, targets)
@@ -1389,7 +1393,7 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	b.nonNil[b.cur] = copyFacts(beforeNN)
 	b.pathNN[b.cur] = copyPathFacts(beforePath)
 	if narrowID := b.condNarrowTarget(statement, scope); narrowID != 0 {
-		b.assume(narrowID)
+		b.assume(narrowID, statement.Span)
 	}
 	if p := b.condNarrowPath(statement, scope); p != "" {
 		// Story 27 (ADR-0008): `u.link != nil` narrows the path in the
@@ -1469,7 +1473,7 @@ func (b *builder) emitIf(statement *parser.Statement, scope *semantic.Scope) {
 	// and inferred spellings alike (§6.3.11, story 44). The Assume op
 	// feeds the kernel deref machine, the map the builder consumers.
 	if thenTerminated && !elseTerminated && !negated && guardID != 0 {
-		b.assume(guardID)
+		b.assume(guardID, statement.Span)
 	}
 	joinID := b.blocks[b.cur].ID
 	b.connect(start, thenID)
@@ -1497,7 +1501,7 @@ func (b *builder) emitSwitch(statement *parser.Statement, scope *semantic.Scope)
 	sw := statement.Switch
 	id, variants, knownEnum := b.switchEnum(sw.Scrutinee, scope)
 	if id != 0 {
-		b.add(semantic.Read(id))
+		b.add(semantic.Read(id), statement.Span)
 	}
 	// Story 33 (RFC-006 §6.5.2): for a nullable enum the exhaustive set
 	// is {nil} ∪ variants; a nil arm on a non-null enum is unreachable
@@ -1522,7 +1526,7 @@ func (b *builder) emitSwitch(statement *parser.Statement, scope *semantic.Scope)
 		if knownEnum && nullable && !arm.NilArm && id != 0 {
 			// Story 33 (RFC-006 §6.5.4): a variant arm proves the
 			// scrutinee non-nil - ordinary control-flow facts (§6.5.4).
-			b.assume(id)
+			b.assume(id, statement.Span)
 		}
 		b.emit(arm.Body, scope.Child())
 		armExits = append(armExits, b.blocks[b.cur].ID)
@@ -1630,7 +1634,7 @@ func (b *builder) emitLoop(statement *parser.Statement, scope *semantic.Scope) {
 		// model yet, so an unresolved collection stays invisible here.
 		for _, ident := range statement.Values[0].Idents {
 			if id := scope.Resolve(ident); id != 0 {
-				b.add(semantic.Read(id))
+				b.add(semantic.Read(id), statement.Span)
 			}
 		}
 	}
@@ -1658,7 +1662,7 @@ func (b *builder) emitLoop(statement *parser.Statement, scope *semantic.Scope) {
 	// A bare `x != nil` loop condition re-establishes the narrowing for the
 	// body on every iteration; the exit path stays unproven.
 	if narrowID := b.condNarrowTarget(statement, scope); narrowID != 0 {
-		b.assume(narrowID)
+		b.assume(narrowID, statement.Span)
 	}
 	bodyScope := scope.Child()
 	if len(statement.Names) > 0 {
@@ -1671,8 +1675,8 @@ func (b *builder) emitLoop(statement *parser.Statement, scope *semantic.Scope) {
 			b.report(serr.Category, statement.Span)
 		} else {
 			id := bodyScope.Resolve(statement.Names[0])
-			b.declare(id)
-			b.initialize(id)
+			b.declare(id, statement.Span)
+			b.initialize(id, statement.Span)
 		}
 	}
 	b.loops = append(b.loops, loopContext{header: headerID, exit: exitID, exitFacts: exitFacts, exitNN: exitNN})
@@ -1755,7 +1759,7 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 					unavailable[id] = true
 					b.report(semantic.UnavailableSuccessResult, statement.Span)
 				}
-				b.add(semantic.Read(id))
+				b.add(semantic.Read(id), statement.Span)
 			}
 		}
 		// Story 22: keyed constructions check their completeness against
@@ -1775,7 +1779,7 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 						b.report(semantic.RedundantSafeNavigation, value.Navigation.Segments[0].Span)
 					}
 				} else if !b.gatePathDerefs(id, value.Navigation) && b.needsNonNilProof(id) {
-					b.add(semantic.Deref(id))
+					b.add(semantic.Deref(id), value.Navigation.Segments[0].Span)
 				}
 				// Story 22/25: a safe segment behind an ordinary field path is
 				// redundant when the prefix path is known non-null by declared
@@ -1808,7 +1812,7 @@ func (b *builder) readConditionIdents(statement *parser.Statement, scope *semant
 	for _, ident := range statement.CondIdents {
 		if statement.Cond != ident {
 			if id := scope.Resolve(ident); id != 0 {
-				b.add(semantic.Read(id))
+				b.add(semantic.Read(id), statement.Span)
 			}
 			continue
 		}
@@ -1832,7 +1836,7 @@ func (b *builder) readIdent(name string, scope *semantic.Scope, span parser.Span
 		}
 		return
 	}
-	b.add(semantic.Read(scope.Resolve(name)))
+	b.add(semantic.Read(scope.Resolve(name)), span)
 }
 
 // analyzeClosure models a closure body as its own CFG whose entry facts are
@@ -2049,7 +2053,7 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 		}
 		return
 	}
-	b.add(semantic.Read(id))
+	b.add(semantic.Read(id), statement.Span)
 	if len(call.Segments) > 0 {
 		if call.Segments[0].Safe {
 			// D-4 (RFC-002 §8.2.4, ADR-0005): a safe call on a receiver
@@ -2058,7 +2062,7 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 				b.report(semantic.RedundantSafeNavigation, call.Segments[0].Span)
 			}
 		} else if b.needsNonNilProof(id) {
-			b.add(semantic.Deref(id))
+			b.add(semantic.Deref(id), call.Segments[0].Span)
 		}
 		// Story 22/25: a safe segment behind an ordinary field path is
 		// redundant when the prefix path is known non-null by declared
@@ -2075,7 +2079,7 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 		if key, info, ok := b.resolveMethod(call.Segments[len(call.Segments)-1].Name, id); ok {
 			if !info.pure {
 				mutators := append([]semantic.BindingID{id}, b.methodMutates[key]...)
-				b.add(semantic.Call(mutators...))
+				b.add(semantic.Call(mutators...), statement.Span)
 			}
 			return
 		}
@@ -2087,11 +2091,11 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 		}
 		// Unresolved member call: the conservative receiver invalidation
 		// stays (story 07, решение 3b - the Rust &mut self analogue).
-		b.add(semantic.Call(id))
+		b.add(semantic.Call(id), statement.Span)
 		return
 	}
 	if mutators := b.closureMutates[id]; len(mutators) > 0 && !b.pure[id] {
-		b.add(semantic.Call(mutators...))
+		b.add(semantic.Call(mutators...), statement.Span)
 	}
 }
 
@@ -2159,7 +2163,7 @@ func (b *builder) emitAssumeNonNull(statement *parser.Statement, scope *semantic
 		b.report(semantic.RedundantUnsafeAssertion, statement.Span)
 		return
 	}
-	b.assume(id)
+	b.assume(id, statement.Span)
 }
 
 // checkUnsafeCallValues reports D-2 (RFC-007 §8.2.2) for unsafe-func
@@ -2264,8 +2268,8 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 		return
 	}
 	id := scope.Resolve(name)
-	b.declare(id)
-	b.initialize(id)
+	b.declare(id, statement.Span)
+	b.initialize(id, statement.Span)
 	fallible, successClasses := strictResults(statement)
 	b.funcResults[name] = declResult{hasResult: statement.HasResult, resultNullable: statement.ResultNullable, fallible: fallible, successClasses: successClasses}
 	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, fallible, nil)
@@ -2380,7 +2384,7 @@ func (b *builder) emitTryDecl(statement *parser.Statement, scope *semantic.Scope
 			}
 			id := scope.Resolve(name)
 			targets = append(targets, id)
-			b.declare(id)
+			b.declare(id, statement.Span)
 			if i < len(res.successClasses) {
 				b.classes[id] = res.successClasses[i]
 				if res.successClasses[i] == semantic.NullabilityNullable {
@@ -2392,7 +2396,7 @@ func (b *builder) emitTryDecl(statement *parser.Statement, scope *semantic.Scope
 		// definite initialization, no conditional state (the §6.3
 		// correlation slice introduces that).
 		for _, id := range targets {
-			b.initialize(id)
+			b.initialize(id, statement.Span)
 		}
 	}
 }
@@ -2478,11 +2482,11 @@ func (b *builder) emitVarDestructuring(statement *parser.Statement, scope *seman
 			return false
 		}
 		errID = scope.Resolve(errName)
-		b.declare(errID)
+		b.declare(errID, statement.Span)
 		b.classes[errID] = semantic.NullabilityNullable
 		b.nilable[errID] = true
 		b.errSpans[errID] = statement.Span
-		b.initialize(errID)
+		b.initialize(errID, statement.Span)
 	}
 	success := statement.Names[:len(statement.Names)-1]
 	targets := make([]semantic.BindingID, 0, len(success))
@@ -2498,12 +2502,12 @@ func (b *builder) emitVarDestructuring(statement *parser.Statement, scope *seman
 		}
 		id := scope.Resolve(name)
 		targets = append(targets, id)
-		b.declare(id)
+		b.declare(id, statement.Span)
 		// Story 36: the op stream stays analyzer-optimistic - the
 		// declaration carries Assign, so the kernel never fires
 		// ANUY3001 for a correlated binding; the builder facts keep the
 		// real conditional state and D-4 is the sound diagnostic.
-		b.add(semantic.Assign(id))
+		b.add(semantic.Assign(id), statement.Span)
 		b.assigned[id] = true
 		if i < len(res.successClasses) {
 			b.classes[id] = res.successClasses[i]
@@ -2594,7 +2598,7 @@ func (b *builder) emitReturn(statement *parser.Statement, scope *semantic.Scope)
 	if len(statement.Values) > 0 {
 		b.readIdents(statement, scope)
 		b.analyzeClosures(statement, scope, nil)
-		b.add(semantic.Return())
+		b.add(semantic.Return(), statement.Span)
 	}
 	cur := b.cur
 	b.appendBlock()
