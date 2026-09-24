@@ -1521,7 +1521,7 @@ func TestLoweredInheritedCallbackWrapsValidation(t *testing.T) {
 	if !strings.Contains(out, "anuyabi.RequireEnum(") {
 		t.Fatalf("generated wrapper misses the boundary check:\n%s", out)
 	}
-	if !strings.Contains(out, "return func(c Color)") {
+	if !strings.Contains(out, "}(c)") {
 		t.Fatalf("wrapper misses the delegation to the callback body:\n%s", out)
 	}
 }

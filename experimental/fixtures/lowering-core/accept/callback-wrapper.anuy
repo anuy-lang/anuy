@@ -1,0 +1,9 @@
+type Color enum {
+Red
+Green
+}
+func run() {
+goRegister(func(c Color) {
+use(c)
+})
+}

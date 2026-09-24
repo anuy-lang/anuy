@@ -91,6 +91,10 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		// interface embedding - the effective method set carries over
 		// to the generated view.
 		{"interface-embedding.anuy", "type ReadWriter interface {\n\tReader\n\tWriter", true},
+		// Story 55 (RFC-008 §6.9.10): a callback with invariant-bearing
+		// parameters lowers to the validating wrapper literal - the
+		// §6.8 checks run before the body at the argument position.
+		{"callback-wrapper.anuy", "anuyabi.RequireEnum(", false},
 	}
 	dir := filepath.Join("..", "fixtures", "lowering-core", "accept")
 	files, err := filepath.Glob(filepath.Join(dir, "*.anuy"))

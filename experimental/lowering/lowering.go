@@ -775,6 +775,60 @@ func (l *lowerer) paramTypeInvariant(t *parser.TypeExpr) bool {
 	return false
 }
 
+// wrapCallback renders the validating wrapper literal for a callback
+// with invariant-bearing parameters (story 55, RFC-008 §6.9.10): the
+// §6.8 boundary checks run before the body literal is invoked, and the
+// wrapper stays at the argument position so captures remain lexical.
+// Result-carrying and seen-map (pointer-cycle) callbacks stay rejected —
+// the result-carrying and seen-map wrapper slices are separate work.
+func (l *lowerer) wrapCallback(value parser.Value) (string, error) {
+	cl := value.Closure
+	if cl.HasResult || len(cl.ResultList) > 0 {
+		return "", fmt.Errorf("experimental lowering: result-carrying callback requires the result-carrying wrapper slice")
+	}
+	stmt := parser.Statement{Kind: parser.Function, Names: []string{"__anuy_cb"}, Closure: cl}
+	checks, needsSeen, err := l.boundaryChecks(&stmt)
+	if err != nil {
+		return "", err
+	}
+	if needsSeen {
+		return "", fmt.Errorf("experimental lowering: callback parameter requires the seen-map wrapper slice")
+	}
+	if len(checks) == 0 {
+		return l.value(value)
+	}
+	var params strings.Builder
+	names := make([]string, 0, len(cl.Params))
+	for i, p := range cl.Params {
+		if i > 0 {
+			params.WriteString(", ")
+		}
+		typeText := p.Type
+		if p.TypeExpr != nil {
+			text, err := l.goType(p.TypeExpr)
+			if err != nil {
+				return "", err
+			}
+			typeText = text
+		}
+		params.WriteString(p.Name + " " + typeText)
+		names = append(names, p.Name)
+	}
+	inner, err := l.value(value)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("func(" + params.String() + ") {\n")
+	for _, check := range checks {
+		b.WriteString(check)
+	}
+	l.boundaryUsed = true
+	b.WriteString("\t" + inner + "(" + strings.Join(names, ", ") + ")\n")
+	b.WriteString("}")
+	return b.String(), nil
+}
+
 // callStatement lowers the call statement (story 05). Arguments emit
 // through the value renderer (story 15: raw text and func literals;
 // they were dropped entirely before). A safe-tail argument rejects -
@@ -798,12 +852,16 @@ func (l *lowerer) callStatement(body *strings.Builder, call *parser.NavigationEx
 			return fmt.Errorf("experimental lowering: safe-tail call argument is not supported")
 		}
 		if value.Closure != nil && l.closureHasInvariantParams(value.Closure) {
-			// Story 54 (RFC-007 §6.9.7–6.9.8): a callback crossing to Go
-			// is a foreign entry - its invariant-bearing parameters must
-			// be validated by a wrapper, and the wrapper slice does not
-			// exist yet. Verbatim lowering would let the foreign caller
-			// feed unvalidated values into the safe body.
-			return fmt.Errorf("experimental lowering: callback parameter carries an invariant and requires a validating wrapper")
+			// Story 55 (RFC-008 §6.9.10): a callback crossing to Go is a
+			// foreign entry (§6.9.7 RFC-007) - the literal lowers to a
+			// validating wrapper at the argument position, so captures
+			// remain lexical.
+			wrapped, werr := l.wrapCallback(value)
+			if werr != nil {
+				return werr
+			}
+			args = append(args, wrapped)
+			continue
 		}
 		text, err := l.value(value)
 		if err != nil {
