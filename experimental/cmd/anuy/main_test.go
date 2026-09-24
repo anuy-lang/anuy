@@ -149,7 +149,7 @@ func TestEmitGoStdout(t *testing.T) {
 func TestEmitGoOutputFile(t *testing.T) {
 	path := writeTemp(t, "var x int = 1\nx\n")
 	out := filepath.Join(t.TempDir(), "out.go")
-	code, _, stderr := runCLI([]string{"emit-go", path, "-o", out})
+	code, _, stderr := runCLI([]string{"emit-go", "-o", out, path})
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
 	}
@@ -188,7 +188,7 @@ func TestBuildOutputDir(t *testing.T) {
 	if err := os.MkdirAll(outDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	code, _, stderr := runCLI([]string{"build", path, "-o", outDir})
+	code, _, stderr := runCLI([]string{"build", "-o", outDir, path})
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
 	}
