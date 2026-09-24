@@ -2053,7 +2053,7 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 		}
 		return
 	}
-	b.add(semantic.Read(id), statement.Span)
+	b.add(semantic.Read(id), call.ReceiverSpan)
 	if len(call.Segments) > 0 {
 		if call.Segments[0].Safe {
 			// D-4 (RFC-002 §8.2.4, ADR-0005): a safe call on a receiver
