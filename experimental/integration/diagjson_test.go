@@ -32,7 +32,35 @@ type jsonDocument struct {
 
 // The cascade reproducer (CONTRACTS §2, decision 4) serializes as one
 // primary with its suppressed deref nested as related, each carrying its
-// own registry code.
+// own registry code. The zero offsets pin today's contract: kernel-emitted
+// diagnostics carry SourceSpan{} until span plumbing lands (F-47-2).
+const cascadeGolden = `{
+  "version": 1,
+  "diagnostics": [
+    {
+      "code": "ANUY3001",
+      "severity": "Error",
+      "category": "ReadBeforeInitialization",
+      "message": "read before initialization",
+      "span": {
+        "file": "",
+        "start": 0,
+        "end": 0
+      },
+      "related": [
+        {
+          "code": "ANUY4001",
+          "span": {
+            "file": "",
+            "start": 0,
+            "end": 0
+          }
+        }
+      ]
+    }
+  ]
+}`
+
 func TestDiagnosticsJSONCascadeCarriesCodes(t *testing.T) {
 	result, err := AnalyzeSource("var user User?\nvar f = func() {\nuser.save()\n}\n")
 	if err != nil {
@@ -41,6 +69,9 @@ func TestDiagnosticsJSONCascadeCarriesCodes(t *testing.T) {
 	data, err := DiagnosticsJSON(result)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if string(data) != cascadeGolden {
+		t.Fatalf("cascade JSON mismatch:\n got: %s\nwant: %s", data, cascadeGolden)
 	}
 	var doc jsonDocument
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -62,7 +93,27 @@ func TestDiagnosticsJSONCascadeCarriesCodes(t *testing.T) {
 }
 
 // The advisory lint surface: severity survives serialization as registry
-// data (RFC-011 §6.2.16), the message is catalog rendering.
+// data (RFC-011 §6.2.16), the message is catalog rendering, and the span
+// is the real parser span of the declaration site — integration-level
+// diagnostics plumb spans today (unlike kernel emission, F-47-2).
+const lintGolden = `{
+  "version": 1,
+  "diagnostics": [
+    {
+      "code": "ANUY5001",
+      "severity": "Warning",
+      "category": "UncheckedError",
+      "message": "error value is not checked",
+      "span": {
+        "file": "",
+        "start": 0,
+        "end": 20
+      },
+      "related": []
+    }
+  ]
+}`
+
 func TestDiagnosticsJSONLintSeverity(t *testing.T) {
 	result, err := AnalyzeSource("var err error? = f()\n")
 	if err != nil {
@@ -71,6 +122,9 @@ func TestDiagnosticsJSONLintSeverity(t *testing.T) {
 	data, err := DiagnosticsJSON(result)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if string(data) != lintGolden {
+		t.Fatalf("lint JSON mismatch:\n got: %s\nwant: %s", data, lintGolden)
 	}
 	var doc jsonDocument
 	if err := json.Unmarshal(data, &doc); err != nil {
