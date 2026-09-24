@@ -1,0 +1,18 @@
+type Color enum {
+Red
+Green
+Blue
+}
+func run() {
+var text string
+var c Color = Color.Red
+switch c {
+case Color.Red:
+text = "red"
+case Color.Green:
+text = "green"
+case Color.Blue:
+text = "blue"
+}
+_ = text
+}

@@ -77,6 +77,11 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		// result - the `== nil` condition dispatches through the carrier
 		// predicate instead of the non-compiling struct comparison.
 		{"inferred-carrier-dispatch.anuy", "if u.IsNil() {", false},
+		// Story 51 (RFC-006 §6.6): the match integration boundary - the
+		// exhaustive arm-initialization switch lowers to the ordinary
+		// enum dispatch; the init join is kernel dataflow (no lowering
+		// surface).
+		{"match-init.anuy", "case ColorRed:", true},
 	}
 	dir := filepath.Join("..", "fixtures", "lowering-core", "accept")
 	files, err := filepath.Glob(filepath.Join(dir, "*.anuy"))

@@ -1603,7 +1603,7 @@ type token struct {
 	start, end int // absolute byte offsets
 }
 
-var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true, "interface": true, "impl": true, "unsafe": true}
+var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true, "interface": true, "impl": true, "unsafe": true, "try": true}
 
 // IntrinsicNames reserves the compiler-intrinsic namespace (story 41,
 // RFC-007 §6.6.13): a declaration with one of these names is a parse
@@ -2665,6 +2665,11 @@ func parseValueList(tokens []token, start int, line sourceLine) ([]Value, error)
 			return nil, newError(UnsupportedSyntax, t.start, "unexpected = in expression")
 		case t.kind == tokenBlank:
 			return nil, newError(BlankIdentifierRead, t.start, "_ does not hold a value")
+		case t.kind == tokenIdent && t.text == "try":
+			// Story 51 (RFC-006 §6.6.5, RFC-005 §6.5.6/§6.5.7): try is a
+			// whole-RHS propagation form, never a value — a hidden try
+			// inside an expression is not allowed in v1.
+			return nil, newError(UnsupportedSyntax, t.start, "try requires the whole right-hand side")
 		case !isValueToken(t):
 			return nil, newError(UnsupportedSyntax, t.start, fmt.Sprintf("unexpected token %q in expression", t.text))
 		}
