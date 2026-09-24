@@ -130,3 +130,118 @@ func TestCheckLoweringRejectExitsOne(t *testing.T) {
 		t.Fatalf("output misses the wrapper reject reason:\n%s", stdout)
 	}
 }
+
+// --- Story 58 (RFC-010 §6.4.1–6.4.2, §6.4.5–6.4.6, §6.4.11–6.4.12) ---
+
+// emit-go materializes the Go ABI view; default output is stdout.
+func TestEmitGoStdout(t *testing.T) {
+	path := writeTemp(t, "var x int = 1\nx\n")
+	code, stdout, stderr := runCLI([]string{"emit-go", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "package fixture") || !strings.Contains(stdout, "func Run()") {
+		t.Fatalf("emitted Go misses the generated shape:\n%s", stdout)
+	}
+}
+
+// emit-go -o writes the generated Go to the given file.
+func TestEmitGoOutputFile(t *testing.T) {
+	path := writeTemp(t, "var x int = 1\nx\n")
+	out := filepath.Join(t.TempDir(), "out.go")
+	code, _, stderr := runCLI([]string{"emit-go", path, "-o", out})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil || !strings.Contains(string(data), "func Run()") {
+		t.Fatalf("out file = %q, err = %v", data, err)
+	}
+}
+
+// build materializes <base>.anuy.go next to the source (§6.4.2 v1:
+// the final go build belongs to the user's Go toolchain).
+func TestBuildWritesGeneratedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hello.anuy")
+	if err := os.WriteFile(path, []byte("var x int = 1\nx\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := runCLI([]string{"build", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "hello.anuy.go"))
+	if err != nil || !strings.Contains(string(data), "func Run()") {
+		t.Fatalf("built file = %q, err = %v", data, err)
+	}
+}
+
+// build -o places the generated file into the given directory.
+func TestBuildOutputDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hello.anuy")
+	if err := os.WriteFile(path, []byte("var x int = 1\nx\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "gen")
+	if err := os.MkdirAll(outDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := runCLI([]string{"build", path, "-o", outDir})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "hello.anuy.go")); err != nil {
+		t.Fatalf("built file missing in -o dir: %v", err)
+	}
+}
+
+// build reports diagnostics with exit 1 (same §6.12.20 policy).
+func TestBuildDiagnosticsExitOne(t *testing.T) {
+	path := writeTemp(t, "x\n")
+	code, stdout, _ := runCLI([]string{"build", path})
+	if code != 1 || !strings.Contains(stdout, "error[ANUY2001]") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// run compiles and executes the program in a temp module; ANUY_REPLACE_ROOT
+// points the module at the repository (dev workflow). The program exit code
+// passes through.
+func TestRunExecutesProgram(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "var x int = 1\nx = x + 41\nx\n")
+	code, stdout, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+}
+
+// §6.4.6: program args after `--` are passed through, not parsed as
+// compiler flags.
+func TestRunSeparatesProgramArgs(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "var x = 1\nx\n")
+	code, _, _ := runCLI([]string{"run", path, "--", "--port", "8080"})
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 (program args must not be compiler flags)", code)
+	}
+}
+
+// run reports semantic diagnostics with exit 1 before compiling.
+func TestRunDiagnosticsExitOne(t *testing.T) {
+	path := writeTemp(t, "x\n")
+	code, stdout, _ := runCLI([]string{"run", path})
+	if code != 1 || !strings.Contains(stdout, "error[ANUY2001]") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
