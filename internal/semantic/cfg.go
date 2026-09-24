@@ -162,6 +162,10 @@ const (
 	// D-5): a dispatch on an interface-typed receiver calls a method the
 	// interface does not declare - the method set is exact.
 	UndefinedInterfaceMember DiagnosticCategory = "UndefinedInterfaceMember"
+	// InterfaceConflict is the RFC-004 §6.3.2 category (story 53): the
+	// same method name with different signatures across embedded
+	// interfaces of one interface.
+	InterfaceConflict DiagnosticCategory = "InterfaceConflict"
 	// MissingExplicitConformance is the RFC-004 §8.1.4 category (story
 	// 40, D-4): a concrete value converts to an interface whose impl
 	// record does not cover the value's type.

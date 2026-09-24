@@ -1,0 +1,27 @@
+type File struct {
+id int
+}
+func (f File) Read() int {
+return f.id
+}
+func (f File) Write() int {
+return f.id
+}
+interface Reader {
+Read() int
+}
+interface Writer {
+Write() int
+}
+interface ReadWriter {
+Reader
+Writer
+}
+impl ReadWriter for File
+func use(rw ReadWriter) {
+rw.Read()
+}
+func run() {
+var f = File{id: 1}
+use(f)
+}

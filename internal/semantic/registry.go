@@ -86,6 +86,7 @@ var (
 	ImplUnknownInterfaceDescriptor       = register(ImplUnknownInterface, "ANUY7004", SeverityError)       // RFC-004 §6.1.3
 	UndefinedInterfaceMemberDescriptor   = register(UndefinedInterfaceMember, "ANUY7005", SeverityError)   // RFC-004 §8.1.5 (D-5)
 	MissingExplicitConformanceDescriptor = register(MissingExplicitConformance, "ANUY7006", SeverityError) // RFC-004 §8.1.4 (D-4)
+	InterfaceConflictDescriptor          = register(InterfaceConflict, "ANUY7007", SeverityError)          // RFC-004 §6.3.2
 
 	// Unsafe block (8xxx).
 	UnsafeOperationOutsideDescriptor   = register(UnsafeOperationOutside, "ANUY8001", SeverityError)   // RFC-007 §8.2.1 (D-1)
@@ -135,6 +136,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		ImplUnknownInterfaceDescriptor,
 		UndefinedInterfaceMemberDescriptor,
 		MissingExplicitConformanceDescriptor,
+		InterfaceConflictDescriptor,
 		UnsafeOperationOutsideDescriptor,
 		UnsafeCallOutsideContextDescriptor,
 		RedundantUnsafeAssertionDescriptor,
@@ -204,6 +206,7 @@ var catalog = map[Code]string{
 	"ANUY7004": "impl references an undeclared interface",
 	"ANUY7005": "interface does not declare the called method",
 	"ANUY7006": "value cannot be used as the interface without an explicit impl",
+	"ANUY7007": "embedded interfaces declare the same method with different signatures",
 	"ANUY5001": "error value is not checked",
 	"ANUY8001": "unsafe operation requires an unsafe context",
 	"ANUY8002": "call to an unsafe function requires an unsafe context",

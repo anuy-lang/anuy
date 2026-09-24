@@ -17,10 +17,11 @@ func TestEmbeddedInterfaceDispatch(t *testing.T) {
 }
 
 // §6.3.3 (the central rule): impls of Reader and Writer do not imply
-// ReadWriter — using the value as ReadWriter without the explicit impl
-// reports ANUY7006.
+// ReadWriter — a conversion to ReadWriter without the explicit impl
+// reports ANUY7006. (The declaration form is the story 40 conversion
+// surface; call-argument conversions are its pre-existing boundary.)
 func TestEmbeddedExplicitnessRequiresOwnImpl(t *testing.T) {
-	source := "type File struct {\nid int\n}\nfunc (f File) Read() int {\nreturn f.id\n}\nfunc (f File) Write() int {\nreturn f.id\n}\ninterface Reader {\nRead() int\n}\ninterface Writer {\nWrite() int\n}\ninterface ReadWriter {\nReader\nWriter\n}\nimpl Reader for File\nimpl Writer for File\nfunc use(rw ReadWriter) {\nrw.Read()\n}\nfunc run() {\nvar f = File{id: 1}\nuse(f)\n}\n"
+	source := "type File struct {\nid int\n}\nfunc (f File) Read() int {\nreturn f.id\n}\nfunc (f File) Write() int {\nreturn f.id\n}\ninterface Reader {\nRead() int\n}\ninterface Writer {\nWrite() int\n}\ninterface ReadWriter {\nReader\nWriter\n}\nimpl Reader for File\nimpl Writer for File\nfunc run() {\nvar f = File{id: 1}\nvar rw ReadWriter = f\nrw.Read()\n}\n"
 	result, err := AnalyzeSource(source)
 	if err != nil {
 		t.Fatal(err)

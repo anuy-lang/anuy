@@ -94,8 +94,13 @@ type methodInfo struct {
 // ifaceMethod is one interface method signature (story 39, RFC-004
 // §6.1.1) reduced to the nullability-level match this layer compares.
 type ifaceMethod struct {
-	name           string
-	params         []semantic.Nullability
+	name   string
+	params []semantic.Nullability
+	// paramTypes/resultType carry the type identities (canonical
+	// spellings) — the §6.3.2 conflict check compares signatures at the
+	// type level, not the nullability level (story 53).
+	paramTypes     []string
+	resultType     string
 	hasResult      bool
 	resultNullable bool
 	// resultError marks the `error?` result spelling (story 40): a
@@ -661,12 +666,67 @@ func (b *builder) registerInterface(decl *parser.InterfaceDecl) {
 		if method.ResultTypeExpr != nil && method.ResultTypeExpr.Kind == parser.NamedType && method.ResultTypeExpr.Name == "error" {
 			sig.resultError = true
 		}
+		if method.HasResult && method.ResultTypeExpr != nil {
+			sig.resultType = method.ResultTypeExpr.Canonical()
+		}
 		for _, p := range method.Params {
 			sig.params = append(sig.params, nullabilityOfParam(p))
+			if p.TypeExpr != nil {
+				sig.paramTypes = append(sig.paramTypes, p.TypeExpr.Canonical())
+			}
 		}
 		info.methods = append(info.methods, sig)
 	}
+	// Story 53 (RFC-004 §6.3.2): the effective method set is the union
+	// of the direct methods and the embedded interfaces' sets. Embedded
+	// interfaces register before use (the declaration-before-use slice
+	// contract); an unknown embed reports ANUY7004, an identical
+	// duplicate method merges (§6.3.2), and the same name with a
+	// different signature is a compile error (ANUY7007).
+	for _, embed := range decl.Embeds {
+		emb, ok := b.interfaces[embed]
+		if !ok {
+			b.report(semantic.ImplUnknownInterface, decl.Span)
+			continue
+		}
+		for _, m := range emb.methods {
+			existing, dup := methodByName(info.methods, m.name)
+			if !dup {
+				info.methods = append(info.methods, m)
+				continue
+			}
+			if !ifaceMethodEqual(existing, m) {
+				b.report(semantic.InterfaceConflict, decl.Span)
+			}
+		}
+	}
 	b.interfaces[decl.Name] = info
+}
+
+// methodByName reports the method with the given name and whether it
+// exists.
+func methodByName(methods []ifaceMethod, name string) (ifaceMethod, bool) {
+	for _, m := range methods {
+		if m.name == name {
+			return m, true
+		}
+	}
+	return ifaceMethod{}, false
+}
+
+// ifaceMethodEqual compares signatures at the type-identity level —
+// the §6.3.2 conflict rule ("the same name with incompatible
+// signatures"); dispatch and impl checks stay at the nullability level.
+func ifaceMethodEqual(a, b ifaceMethod) bool {
+	if a.name != b.name || a.hasResult != b.hasResult || a.resultNullable != b.resultNullable || a.resultError != b.resultError || a.resultType != b.resultType || len(a.params) != len(b.params) {
+		return false
+	}
+	for i := range a.params {
+		if a.params[i] != b.params[i] || a.paramTypes[i] != b.paramTypes[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // emitImpl validates one explicit conformance (story 39, RFC-004

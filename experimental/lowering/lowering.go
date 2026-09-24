@@ -1575,6 +1575,11 @@ func (l *lowerer) interfaceDecl(decls *strings.Builder, statement *parser.Statem
 	decl := statement.Interface
 	var b strings.Builder
 	b.WriteString("type " + decl.Name + " interface {\n")
+	// Story 53 (RFC-004 §6.3.2): embedded interfaces render as Go
+	// interface embedding — the effective method set carries over.
+	for _, embed := range decl.Embeds {
+		b.WriteString("\t" + embed + "\n")
+	}
 	for _, method := range decl.Methods {
 		parts := make([]string, 0, len(method.Params))
 		for _, p := range method.Params {

@@ -87,6 +87,10 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		// gets the validating boundary wrapper (§6.8), the value
 		// receiver and the interface dispatch stay plain.
 		{"enum-interface.anuy", "func (c *Color) Bump() {", false},
+		// Story 53 (RFC-004 §6.3.2): embedded interfaces render as Go
+		// interface embedding - the effective method set carries over
+		// to the generated view.
+		{"interface-embedding.anuy", "type ReadWriter interface {\n\tReader\n\tWriter", true},
 	}
 	dir := filepath.Join("..", "fixtures", "lowering-core", "accept")
 	files, err := filepath.Glob(filepath.Join(dir, "*.anuy"))
