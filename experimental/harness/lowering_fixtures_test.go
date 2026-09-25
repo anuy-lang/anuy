@@ -55,14 +55,14 @@ func TestLoweringCoreAcceptFixturesLower(t *testing.T) {
 		{"interface-reader.anuy", "type Reader interface {", true},
 		{"interface-dispatch.anuy", "var r Reader = f", true},
 		{"unsafe-core.anuy", "d := u", false},
-		{"native-nil-pointer.anuy", "var p *User\n\tp = nil", true},
+		{"native-nil-pointer.anuy", "var p *User\n//line source.anuy:2\n\tp = nil", true},
 		{"native-nil-map.anuy", "var m map[string]User", true},
 		{"native-nil-error.anuy", "var err error", true},
 		// Story 42 (RFC-009 §6.8): exported declarations split into the
 		// validating wrapper plus the `__anuy_` native entry; generated
 		// calls inside CallBoth retarget to the native entry while the
 		// unwrapped Add and plain stay verbatim.
-		{"foreign-entry.anuy", "__anuy_UseUser(u)\n\tn := __anuy_First(u)", false},
+		{"foreign-entry.anuy", "__anuy_UseUser(u)\n//line source.anuy:33\n\tn := __anuy_First(u)", false},
 		// Story 43 (RFC-009 §6.8.8–6.8.9): aggregates get per-type
 		// validators; User can reach a pointer cycle, so its validator
 		// carries the visited set while the acyclic Badge one does not.

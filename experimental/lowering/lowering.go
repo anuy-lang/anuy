@@ -17,11 +17,21 @@ const anuyabiImport = "import \"github.com/anuy-lang/anuy/anuyabi\"\n\n"
 
 // Lower emits deliberately minimal experimental Go for accepted narrow syntax.
 func Lower(source string) (string, error) {
+	// Story 59 (RFC-010 §6.9.8): the pathless entry anchors to a canonical
+	// spelling, so one-text pins stay deterministic (§6.2.11 one lowering).
+	return LowerFile("source.anuy", source)
+}
+
+// LowerFile lowers source, anchoring generated positions to path via
+// //line directives (story 59, RFC-010 §6.9.8): the Go toolchain itself
+// reports diagnostics against the Anuy source. The path spelling is
+// carried verbatim into the generated text (§6.9.3).
+func LowerFile(path, source string) (string, error) {
 	program, err := parser.Parse(source)
 	if err != nil {
 		return "", err
 	}
-	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}, funcResults: map[string]*parser.TypeExpr{}, structs: map[string][]parser.StructField{}, hasInvMemo: map[string]bool{}, hasInvWip: map[string]bool{}, seenMemo: map[string]bool{}, seenWip: map[string]bool{}}
+	l := &lowerer{path: path, source: source, carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}, funcResults: map[string]*parser.TypeExpr{}, structs: map[string][]parser.StructField{}, typeSpans: map[string]parser.Span{}, hasInvMemo: map[string]bool{}, hasInvWip: map[string]bool{}, seenMemo: map[string]bool{}, seenWip: map[string]bool{}}
 	// Story 16: top-level functions hoist to package-level declarations.
 	// The Run body lowers first, so the tracking maps are populated by the
 	// time the hoisted function bodies are rendered (captures stay
@@ -38,16 +48,19 @@ func Lower(source string) (string, error) {
 				// before any body lowers - the carrier() native-nil check
 				// consults them regardless of the render order.
 				l.interfaces[statement.Interface.Name] = true
+				l.typeSpans[statement.Interface.Name] = statement.Span
 			}
 			if statement.Enum != nil {
 				// Story 42 (RFC-009 §6.8.6): the variant count pins the
 				// contiguous discriminant range of the boundary check.
 				l.enums[statement.Enum.Name] = len(statement.Enum.Variants)
+				l.typeSpans[statement.Enum.Name] = statement.Span
 			}
 			if statement.Struct != nil {
 				// Story 43 (RFC-009 §6.8.16): the declared fields are the
 				// type-graph input of the aggregate boundary analysis.
 				l.structs[statement.Struct.Name] = statement.Struct.Fields
+				l.typeSpans[statement.Struct.Name] = statement.Span
 			}
 		case parser.Impl:
 			// Story 39 (RFC-004 §6.8.2): impl is semantic metadata -
@@ -106,14 +119,21 @@ func Lower(source string) (string, error) {
 	}
 	var decls strings.Builder
 	for i := range types {
+		l.directive(&decls, types[i].Span)
 		if err := l.typeDecl(&decls, &types[i]); err != nil {
 			return "", err
 		}
 	}
-	for _, src := range l.validators {
-		decls.WriteString(src)
+	for _, v := range l.validators {
+		// Synthetic declarations anchor to the owning type (§6.9.8), not
+		// to the physical line they occupy.
+		l.directive(&decls, v.anchor)
+		decls.WriteString(v.src)
 	}
 	for i := range funcs {
+		// One directive per declaration: the foreign-entry wrapper (story
+		// 42) and the `__anuy_` native entry share the owner's anchor.
+		l.directive(&decls, funcs[i].Span)
 		if err := l.function(&decls, &funcs[i]); err != nil {
 			return "", err
 		}
@@ -136,6 +156,14 @@ func Lower(source string) (string, error) {
 // native-nil nullable shape (story 13 dispatch tracking - `*T?`, `(map…)?`,
 // `error?`) and whether the generated file needs the carrier prelude.
 type lowerer struct {
+	// path/source carry the //line anchor inputs (story 59, RFC-010
+	// §6.9.8): path verbatim as passed by the caller (§6.9.3), source for
+	// the offset→line conversion of statement spans.
+	path   string
+	source string
+	// typeSpans maps a declared type name to its declaration span - the
+	// anchor of the synthetic validators derived from that type (§6.9.8).
+	typeSpans  map[string]parser.Span
 	carriers   map[string]string
 	nativeNil  map[string]bool
 	interfaces map[string]bool
@@ -156,8 +184,9 @@ type lowerer struct {
 	seenMemo map[string]bool
 	seenWip  map[string]bool
 	// validators holds the emitted per-type validator sources (§6.8.16),
-	// lazily planned and deterministically sorted (§13 rule 76).
-	validators []string
+	// lazily planned and deterministically sorted (§13 rule 76), with the
+	// owning type's span as the //line anchor (story 59, §6.9.8).
+	validators []anchored
 	// wrappedFns holds the exported top-level functions that receive a
 	// foreign-entry wrapper (story 42, RFC-009 §6.8): direct generated
 	// calls to them retarget to the `__anuy_` native entry (§6.8.14).
@@ -192,9 +221,39 @@ type lowerer struct {
 	temps int
 }
 
+// anchored pairs a synthetic declaration with the source span it anchors
+// to (story 59, RFC-010 §6.9.8).
+type anchored struct {
+	src    string
+	anchor parser.Span
+}
+
+// directive anchors the next generated line to the construct's source
+// line (story 59, RFC-010 §6.9.8). Go honors //line only at the start of
+// a line, so the emission is always at column zero; zero spans (fully
+// synthetic statements) stay unanchored.
+func (l *lowerer) directive(w *strings.Builder, span parser.Span) {
+	if l.path == "" || span.End <= 0 {
+		return
+	}
+	fmt.Fprintf(w, "//line %s:%d\n", l.path, lineOf(l.source, span.Start))
+}
+
+// lineOf converts a byte offset to its 1-based source line.
+func lineOf(source string, offset int) int {
+	line := 1
+	for i := 0; i < offset && i < len(source); i++ {
+		if source[i] == '\n' {
+			line++
+		}
+	}
+	return line
+}
+
 func (l *lowerer) statements(body *strings.Builder, statements []parser.Statement) (string, error) {
 	var last string
 	for _, statement := range statements {
+		l.directive(body, statement.Span)
 		names := strings.Join(statement.Names, ", ")
 		switch statement.Kind {
 		case parser.Var:
@@ -1483,7 +1542,7 @@ func (l *lowerer) planValidators(funcs []parser.Statement) error {
 		if err != nil {
 			return err
 		}
-		l.validators = append(l.validators, src)
+		l.validators = append(l.validators, anchored{src: src, anchor: l.typeSpans[name]})
 	}
 	return nil
 }

@@ -18,7 +18,7 @@ func TestLowerVarAssignmentToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar x int\n\tx = 1\n\t_ = x\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar x int\n//line source.anuy:2\n\tx = 1\n\t_ = x\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -29,7 +29,7 @@ func TestLowerMultipleAssignmentToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar x int = 1\n\tvar y int = 2\n\tx, y = y, x\n\t_ = y\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar x int = 1\n//line source.anuy:2\n\tvar y int = 2\n//line source.anuy:3\n\tx, y = y, x\n\t_ = y\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -43,7 +43,7 @@ func TestLowerNullableVarDeclToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\t_ = u\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar u anuyabi.Nullable[User]\n\t_ = u\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -109,7 +109,7 @@ func TestLowerNullableClosureParamToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tf := func(x anuyabi.Nullable[int]) {\n}\n\t_ = f\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tf := func(x anuyabi.Nullable[int]) {\n}\n\t_ = f\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -131,7 +131,7 @@ func TestLowerClosureLiteralToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar x int = 1\n\tincrement := func() {\n\tx = x + 1\n}\n\t_ = increment\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar x int = 1\n//line source.anuy:2\n\tincrement := func() {\n//line source.anuy:3\n\tx = x + 1\n}\n\t_ = increment\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -142,7 +142,7 @@ func TestLowerConditionLoopToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar ready bool = true\n\tvar x int\n\tfor ready {\n\tx = 1\n\t}\n\tx = 2\n\t_ = x\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar ready bool = true\n//line source.anuy:2\n\tvar x int\n//line source.anuy:3\n\tfor ready {\n//line source.anuy:4\n\tx = 1\n\t}\n//line source.anuy:6\n\tx = 2\n\t_ = x\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -153,7 +153,7 @@ func TestLowerInfiniteLoopToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar x int\n\tfor {\n\tif x == 1 {\n\tbreak\n\t}\n\t}\n\tx = 1\n\t_ = x\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar x int\n//line source.anuy:2\n\tfor {\n//line source.anuy:3\n\tif x == 1 {\n//line source.anuy:4\n\tbreak\n\t}\n\t}\n//line source.anuy:7\n\tx = 1\n\t_ = x\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -164,7 +164,7 @@ func TestLowerIterationLoopToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar total int\n\tfor _, user := range users {\n\ttotal = total + 1\n\t}\n\t_ = total\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar total int\n//line source.anuy:2\n\tfor _, user := range users {\n//line source.anuy:3\n\ttotal = total + 1\n\t}\n\t_ = total\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -175,7 +175,7 @@ func TestLowerBreakContinuePassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar i int = 0\n\tfor {\n\ti = i + 1\n\tif i == 3 {\n\tbreak\n\t}\n\tif i == 2 {\n\tcontinue\n\t}\n\t}\n\t_ = i\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar i int = 0\n//line source.anuy:2\n\tfor {\n//line source.anuy:3\n\ti = i + 1\n//line source.anuy:4\n\tif i == 3 {\n//line source.anuy:5\n\tbreak\n\t}\n//line source.anuy:7\n\tif i == 2 {\n//line source.anuy:8\n\tcontinue\n\t}\n\t}\n\t_ = i\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -196,7 +196,7 @@ func TestLowerBlockToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar x int = 1\n\t{\n\tx = 2\n\t}\n\t_ = x\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar x int = 1\n//line source.anuy:2\n\t{\n//line source.anuy:3\n\tx = 2\n\t}\n\t_ = x\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -207,7 +207,7 @@ func TestLowerBlankDiscardToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvalue, _ := f()\n\t_, y = 1, 2\n\t_ = y\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvalue, _ := f()\n//line source.anuy:2\n\t_, y = 1, 2\n\t_ = y\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -221,7 +221,7 @@ func TestLowerCallStatementsToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar user User = getUser()\n\tclear()\n\tuser.save()\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar user User = getUser()\n//line source.anuy:2\n\tclear()\n//line source.anuy:3\n\tuser.save()\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -234,7 +234,7 @@ func TestLowerNullablePointerStaysNative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar p *User\n\tp = nil\n\t_ = p\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar p *User\n//line source.anuy:2\n\tp = nil\n\t_ = p\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -319,7 +319,7 @@ func TestLowerNullableNarrowingScenarioDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\tif !u.IsNil() {\n\tu.save()\n\t}\n\t_ = u\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar u anuyabi.Nullable[User]\n//line source.anuy:2\n\tif !u.IsNil() {\n//line source.anuy:3\n\tu.save()\n\t}\n\t_ = u\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -370,7 +370,7 @@ func TestLowerSafeCallCarrierDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\tif !u.IsNil() {\n\tu.Value.save()\n\t}\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar u anuyabi.Nullable[User]\n//line source.anuy:2\n\tif !u.IsNil() {\n\tu.Value.save()\n\t}\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -383,7 +383,7 @@ func TestLowerSafeCallNativeNilGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n\tvar err error\n\tif err != nil {\n\terr.Error()\n\t}\n}\n"
+	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar err error\n//line source.anuy:2\n\tif err != nil {\n\terr.Error()\n\t}\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -521,7 +521,7 @@ func TestLowerSafeValueCarrierReceiverCarrierTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar a anuyabi.Nullable[User]\n\tvar c anuyabi.Nullable[int]\n\tif !a.IsNil() {\n\tc = anuyabi.Some(a.Value.count)\n\t} else {\n\tc = anuyabi.None[int]()\n\t}\n\t_ = c\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar a anuyabi.Nullable[User]\n//line source.anuy:2\n\tvar c anuyabi.Nullable[int]\n\tif !a.IsNil() {\n\tc = anuyabi.Some(a.Value.count)\n\t} else {\n\tc = anuyabi.None[int]()\n\t}\n\t_ = c\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -534,7 +534,7 @@ func TestLowerSafeValueNativeNilReceiverCarrierTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar err error\n\tvar s anuyabi.Nullable[string]\n\tif err != nil {\n\ts = anuyabi.Some(err.Error())\n\t} else {\n\ts = anuyabi.None[string]()\n\t}\n\t_ = s\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar err error\n//line source.anuy:2\n\tvar s anuyabi.Nullable[string]\n\tif err != nil {\n\ts = anuyabi.Some(err.Error())\n\t} else {\n\ts = anuyabi.None[string]()\n\t}\n\t_ = s\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -547,7 +547,7 @@ func TestLowerSafeValueCarrierReceiverNativeNilTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar a anuyabi.Nullable[User]\n\tvar p *User\n\tif !a.IsNil() {\n\tp = a.Value.profile\n\t} else {\n\tp = nil\n\t}\n\t_ = p\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar a anuyabi.Nullable[User]\n//line source.anuy:2\n\tvar p *User\n\tif !a.IsNil() {\n\tp = a.Value.profile\n\t} else {\n\tp = nil\n\t}\n\t_ = p\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -559,7 +559,7 @@ func TestLowerSafeValueAssignCarrierTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar a anuyabi.Nullable[User]\n\tvar c anuyabi.Nullable[int]\n\tif !a.IsNil() {\n\tc = anuyabi.Some(a.Value.count)\n\t} else {\n\tc = anuyabi.None[int]()\n\t}\n\t_ = c\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar a anuyabi.Nullable[User]\n//line source.anuy:2\n\tvar c anuyabi.Nullable[int]\n//line source.anuy:3\n\tif !a.IsNil() {\n\tc = anuyabi.Some(a.Value.count)\n\t} else {\n\tc = anuyabi.None[int]()\n\t}\n\t_ = c\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -573,7 +573,7 @@ func TestLowerSafeValueCallMemberDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar n anuyabi.Nullable[int]\n\tvar b anuyabi.Nullable[bool]\n\tif !n.IsNil() {\n\tb = anuyabi.Some(n.Value.IsNil())\n\t} else {\n\tb = anuyabi.None[bool]()\n\t}\n\t_ = b\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar n anuyabi.Nullable[int]\n//line source.anuy:2\n\tvar b anuyabi.Nullable[bool]\n\tif !n.IsNil() {\n\tb = anuyabi.Some(n.Value.IsNil())\n\t} else {\n\tb = anuyabi.None[bool]()\n\t}\n\t_ = b\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -692,7 +692,7 @@ func TestLowerCallStatementClosureArgument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "\tu.m(func(x int) {\n\ty = x\n})\n") {
+	if !strings.Contains(got, "\tu.m(func(x int) {\n//line source.anuy:3\n\ty = x\n})\n") {
 		t.Fatalf("Lower() = %q, wants the closure literal argument", got)
 	}
 }
@@ -704,7 +704,7 @@ func TestLowerSafeCallArgumentsInsideGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func Run() {\n\tvar u anuyabi.Nullable[User]\n\tif !u.IsNil() {\n\tu.Value.send(payload())\n\t}\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar u anuyabi.Nullable[User]\n//line source.anuy:2\n\tif !u.IsNil() {\n\tu.Value.send(payload())\n\t}\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -736,7 +736,7 @@ func TestLowerFuncDeclVoidToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc f() {\n\treturn\n}\n\nfunc Run() {\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nfunc f() {\n//line source.anuy:2\n\treturn\n}\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -748,7 +748,7 @@ func TestLowerFuncDeclResultAndCallE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc twice(n int) int {\n\treturn n + n\n}\n\nfunc Run() {\n\ttwice(1)\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nfunc twice(n int) int {\n//line source.anuy:2\n\treturn n + n\n}\n\nfunc Run() {\n//line source.anuy:4\n\ttwice(1)\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -761,7 +761,7 @@ func TestLowerFuncDeclCarrierResultNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "func find() anuyabi.Nullable[User] {\n\treturn anuyabi.None[User]()\n}\n\nfunc Run() {\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\n//line source.anuy:1\nfunc find() anuyabi.Nullable[User] {\n//line source.anuy:2\n\treturn anuyabi.None[User]()\n}\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -775,10 +775,10 @@ func TestLowerFuncDeclReturnSomeAndCarrierCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "func find() anuyabi.Nullable[User] {\n\treturn u\n}") {
+	if !strings.Contains(got, "func find() anuyabi.Nullable[User] {\n//line source.anuy:3\n\treturn u\n}") {
 		t.Fatalf("Lower() = %q, wants carrier copy passthrough", got)
 	}
-	if !strings.Contains(got, "func pick() anuyabi.Nullable[User] {\n\treturn anuyabi.Some(42)\n}") {
+	if !strings.Contains(got, "func pick() anuyabi.Nullable[User] {\n//line source.anuy:6\n\treturn anuyabi.Some(42)\n}") {
 		t.Fatalf("Lower() = %q, wants Some wrapping", got)
 	}
 }
@@ -789,7 +789,7 @@ func TestLowerFuncDeclNativeNilResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc wrap() error {\n\treturn nil\n}\n\nfunc Run() {\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nfunc wrap() error {\n//line source.anuy:2\n\treturn nil\n}\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -823,7 +823,7 @@ func TestLowerMethodDeclCarrierResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "func (u User) find() anuyabi.Nullable[User] {\n\treturn anuyabi.None[User]()\n}") {
+	if !strings.Contains(got, "func (u User) find() anuyabi.Nullable[User] {\n//line source.anuy:2\n\treturn anuyabi.None[User]()\n}") {
 		t.Fatalf("Lower() = %q, wants the method with carrier result", got)
 	}
 	typeCheckGenerated(t, "type User struct {\nid int\n}\nfunc (u *User?) touch() {\n}\n")
@@ -876,7 +876,7 @@ func TestLowerStructDeclarationToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\ntype User struct {\n\tid UserID\n\tname string\n\tmanager *User\n}\n\nfunc Run() {\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\ntype User struct {\n\tid UserID\n\tname string\n\tmanager *User\n}\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -888,7 +888,7 @@ func TestLowerStructFieldTagged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n" + anuyabiImport + "type Holder struct {\n\tn anuyabi.Nullable[int]\n}\n\nfunc Run() {\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\n//line source.anuy:1\ntype Holder struct {\n\tn anuyabi.Nullable[int]\n}\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -902,7 +902,7 @@ func TestLowerEnumDeclarationToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\ntype Color uint32\n\nconst (\n\tColorRed Color = 1\n\tColorGreen Color = 2\n\tColorBlue Color = 3\n)\n\nfunc Run() {\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\ntype Color uint32\n\nconst (\n\tColorRed Color = 1\n\tColorGreen Color = 2\n\tColorBlue Color = 3\n)\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -970,7 +970,7 @@ func TestLowerReturnErrorAndTry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "func Save() error {\n\treturn nil\n") {
+	if !strings.Contains(got, "func Save() error {\n//line source.anuy:2\n\treturn nil\n") {
 		t.Fatalf("Lower() = %q, wants the plain error return", got)
 	}
 	tryGot, err := Lower("func Log(msg string) error? {\nreturn nil\n}\nfunc Save() error? {\ntry Log(\"x\")\nreturn nil\n}\n")
@@ -1212,7 +1212,7 @@ func TestLowerForeignEntryPointerWrapperSplits(t *testing.T) {
 	if !strings.Contains(got, wrapper) {
 		t.Fatalf("Lower() = %q, wants wrapper %q", got, wrapper)
 	}
-	if !strings.Contains(got, "func __anuy_UseUser(u *User) {\n\tu.id = 2\n}") {
+	if !strings.Contains(got, "func __anuy_UseUser(u *User) {\n//line source.anuy:5\n\tu.id = 2\n}") {
 		t.Fatalf("Lower() = %q, wants internal with the body", got)
 	}
 	typeCheckGenerated(t, source)
@@ -1294,7 +1294,7 @@ func TestLowerForeignEntryElidesWithoutInvariants(t *testing.T) {
 	if strings.Contains(got, "__anuy_") {
 		t.Fatalf("Lower() = %q, must not split unwrapped declarations", got)
 	}
-	if !strings.Contains(got, "func Add(a int, b int) int {\n\treturn a\n}") {
+	if !strings.Contains(got, "func Add(a int, b int) int {\n//line source.anuy:2\n\treturn a\n}") {
 		t.Fatalf("Lower() = %q, wants the merged implementation", got)
 	}
 }
@@ -1310,7 +1310,7 @@ func TestLowerForeignEntryUnexportedStaysPlain(t *testing.T) {
 	if strings.Contains(got, "__anuy_use") {
 		t.Fatalf("Lower() = %q, must not wrap unexported declarations", got)
 	}
-	if !strings.Contains(got, "func use(u *User) {\n\tu.id = 2\n}") {
+	if !strings.Contains(got, "func use(u *User) {\n//line source.anuy:5\n\tu.id = 2\n}") {
 		t.Fatalf("Lower() = %q, wants the verbatim unexported function", got)
 	}
 }
