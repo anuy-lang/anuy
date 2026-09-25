@@ -5,7 +5,7 @@
 **Title:** Lowering and Generated Go Contract
 **Language:** Anuy
 **Area:** Backend / Go ABI / Representation / Source Mapping
-**Version:** 6
+**Version:** 7
 **Date:** 2026-09-25
 **Requires:** RFC-000, RFC-001, RFC-002, RFC-003, RFC-004, RFC-005, RFC-006, RFC-007, RFC-008, RFC-010, RFC-011
 **Supersedes:** —
@@ -21,6 +21,8 @@ Section 12 assigns every remaining question before `Accepted` to its responsible
 Version 5, 2026-09-24: nil-comparison dispatch and representation inference for inferred bindings. §6.7.12: `x == nil`/`x != nil` over the carrier representation lower to the carrier predicate — a verbatim struct-vs-nil comparison is not emitted. §6.7.13: a binding without a declared spelling inherits the representation of its single-call initializer's declared result — dispatch follows the representation, not the spelling (the lowering analogue of RFC-002 §6.3.11).
 
 Version 6, 2026-09-25: published as the canonical English text of the Accepted RFC; §6.7.6–§6.7.13 and §6.8.11–§6.8.17 carry the validated contract of the ABI support package, whose physical import path is fixed in §6.7.6 (`github.com/anuy-lang/anuy/anuyabi`, same-module). No semantic changes.
+
+Version 7, 2026-09-25: line-directive presentation channel (story 01-59, RFC-010 §6.9.8). §6.10.11: generated Go MAY carry Go `//line` directives anchoring positions to the Anuy source — an in-band channel for CLI build diagnostics (RFC-010 §6.9.5), honored by the Go toolchain itself. Directives are presentation metadata: they do not change generated semantics, and the canonical SourceMap (§6.11.1) remains the contract for tooling consumers and is not derived from them.
 
 ---
 
@@ -1771,6 +1773,19 @@ Generated Go imports only packages required by lowered code/support.
 Import aliases are backend-private unless part of published source readability.
 
 Collision resolution must be deterministic.
+
+#### 6.10.11 Line directives
+
+Generated Go MAY carry Go `//line` directives anchoring generated positions to the Anuy source (story 59, RFC-010 §6.9.8):
+
+```text
+//line <source-path>:<line>
+```
+
+- the directive path is the user-visible source path spelling as passed to the compiler, never an absolute build-machine or cache path (RFC-010 §6.9.3);
+- user-derived declarations and statements anchor to their source lines; synthetic declarations (boundary wrappers, validators, the `__anuy_` native entries) anchor to the owning source declaration (RFC-010 §6.9.6);
+- Go honors the directive only at the start of a line, so the emission is at column zero;
+- directives are presentation metadata for the CLI build-diagnostic channel (RFC-010 §6.9.5). They MUST NOT change generated semantics; the canonical SourceMap (§6.11.1) is independent and MUST NOT be derived from them.
 
 ### 6.11 SourceMap, Tooling and Optimizations
 
