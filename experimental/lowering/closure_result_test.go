@@ -20,7 +20,10 @@ func TestLowerResultCarryingCallbackWrapper(t *testing.T) {
 	for _, want := range []string{
 		"func(c Color) int {",
 		`anuyabi.RequireEnum("c", uint32(c), 2)`,
-		"return __anuy_cb(c)",
+		// The wrapper delegates to the inline closure literal (story 55
+		// shape) with the result returned as-is.
+		"return func(c Color) int {",
+		"}(c)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Lower() misses %q:\n%s", want, got)

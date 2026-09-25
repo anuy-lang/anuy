@@ -1079,14 +1079,19 @@ func TestParseFunctionDeclarationResultType(t *testing.T) {
 	}
 }
 
-func TestParseRejectsResultTypeOnClosureValue(t *testing.T) {
-	// Result types belong to the declaration forms (story 08 Q4-A); a
-	// closure literal stays result-less.
-	_, err := Parse("var f = func() User {\n}\n")
-	if err == nil {
-		t.Fatal("closure literal accepted a result type")
+func TestParseAcceptsResultTypeOnClosureValue(t *testing.T) {
+	// Story 68 (RFC-008 §6.9.10 v4): the closure literal takes a declared
+	// result - result-carrying callbacks lower to the validating wrapper
+	// with result propagation (§6.9.7 RFC-007). Supersedes the story 08
+	// Q4-A result-less boundary.
+	program, err := Parse("var f = func() User {\n}\n")
+	if err != nil {
+		t.Fatalf("closure literal rejected a result type: %v", err)
 	}
-	requireCategory(t, err, UnsupportedSyntax)
+	cl := program.Statements[0].Values[0].Closure
+	if cl == nil || !cl.HasResult || cl.ResultTypeExpr == nil || cl.ResultTypeExpr.Name != "User" {
+		t.Fatalf("closure = %+v, want the declared User result", cl)
+	}
 }
 
 func TestParseReturnWithValueInResultDeclaration(t *testing.T) {

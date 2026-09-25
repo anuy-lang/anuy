@@ -991,9 +991,6 @@ func (l *lowerer) paramTypeInvariant(t *parser.TypeExpr) bool {
 // the result-carrying and seen-map wrapper slices are separate work.
 func (l *lowerer) wrapCallback(value parser.Value) (string, error) {
 	cl := value.Closure
-	if cl.HasResult || len(cl.ResultList) > 0 {
-		return "", fmt.Errorf("experimental lowering: result-carrying callback requires the result-carrying wrapper slice")
-	}
 	stmt := parser.Statement{Kind: parser.Function, Names: []string{"__anuy_cb"}, Closure: cl}
 	checks, needsSeen, err := l.boundaryChecks(&stmt)
 	if err != nil {
@@ -1026,13 +1023,23 @@ func (l *lowerer) wrapCallback(value parser.Value) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	results, err := l.closureResultText(cl)
+	if err != nil {
+		return "", err
+	}
 	var b strings.Builder
-	b.WriteString("func(" + params.String() + ") {\n")
+	b.WriteString("func(" + params.String() + ")" + results + " {\n")
 	for _, check := range checks {
 		b.WriteString(check)
 	}
 	l.boundaryUsed = true
-	b.WriteString("\t" + inner + "(" + strings.Join(names, ", ") + ")\n")
+	// §6.9.7 RFC-007: the wrapper maps results back into the Go ABI - the
+	// inner call's results return as-is (story 68).
+	delegate := ""
+	if cl.HasResult {
+		delegate = "return "
+	}
+	b.WriteString("\t" + delegate + inner + "(" + strings.Join(names, ", ") + ")\n")
 	b.WriteString("}")
 	return b.String(), nil
 }
@@ -2102,6 +2109,34 @@ func assumeNonNullOperandText(text string) (string, bool) {
 	return text[len(prefix) : len(text)-1], true
 }
 
+// closureResultText renders a closure's declared result for the
+// generated signature (story 68): the fallible list per position
+// (§6.5.3-style strict ABI), otherwise the single type.
+func (l *lowerer) closureResultText(cl *parser.Closure) (string, error) {
+	if !cl.HasResult {
+		return "", nil
+	}
+	if len(cl.ResultList) > 0 {
+		parts := make([]string, 0, len(cl.ResultList))
+		for _, t := range cl.ResultList {
+			text, err := l.goType(t)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, text)
+		}
+		return " (" + strings.Join(parts, ", ") + ")", nil
+	}
+	if cl.ResultTypeExpr == nil {
+		return "", nil
+	}
+	text, err := l.goType(cl.ResultTypeExpr)
+	if err != nil {
+		return "", err
+	}
+	return " " + text, nil
+}
+
 func (l *lowerer) value(value parser.Value) (string, error) {
 	if value.Closure == nil {
 		// Story 41 (RFC-007 §6.6.6): assume_non_nil is a promise, not a
@@ -2134,7 +2169,11 @@ func (l *lowerer) value(value parser.Value) (string, error) {
 		}
 		b.WriteString(p.Name + " " + typeText)
 	}
-	b.WriteString(") {\n")
+	results, err := l.closureResultText(cl)
+	if err != nil {
+		return "", err
+	}
+	b.WriteString(")" + results + " {\n")
 	if _, err := l.statements(&b, cl.Body); err != nil {
 		return "", err
 	}
