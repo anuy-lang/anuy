@@ -437,6 +437,28 @@ func inModule(dir string) bool {
 	}
 }
 
+// reportPackageFailure renders the classified package check failure:
+// a rendered diagnostic line (stdout) or a usage/internal message
+// (stderr).
+func reportPackageFailure(failure *packageFailure, cmd string, stdout, stderr io.Writer) int {
+	if failure.diag != "" {
+		fmt.Fprintln(stdout, failure.diag)
+	} else {
+		fmt.Fprintf(stderr, "anuy %s: %s\n", cmd, failure.msg)
+	}
+	return failure.code
+}
+
+// lowerPackageFiles lowers one package directory into the merged
+// generated file (story 62).
+func lowerPackageFiles(files []integration.SourceFile) (string, error) {
+	lowerFiles := make([]lowering.File, len(files))
+	for i, f := range files {
+		lowerFiles[i] = lowering.File{Path: f.Path, Source: f.Source}
+	}
+	return lowering.LowerPackage(lowerFiles)
+}
+
 // runBuildDir implements `anuy build <dir>` (story 62, §6.4.1): the
 // package checks as one unit and materializes ONE merged generated file
 // (<package>.anuy.go, §6.2.6 RFC-010) before the §6.4.2 package-mode Go
@@ -444,12 +466,7 @@ func inModule(dir string) bool {
 func runBuildDir(dir string, stdout, stderr io.Writer) int {
 	files, result, failure := analyzePackage(dir)
 	if failure != nil {
-		if failure.diag != "" {
-			fmt.Fprintln(stdout, failure.diag)
-		} else {
-			fmt.Fprintln(stderr, "anuy build:", failure.msg)
-		}
-		return failure.code
+		return reportPackageFailure(failure, "build", stdout, stderr)
 	}
 	if hasErrorSeverity(result.Diagnostics) {
 		// Semantic errors: report instead of materializing.
@@ -467,11 +484,7 @@ func runBuildDir(dir string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	lowerFiles := make([]lowering.File, len(files))
-	for i, f := range files {
-		lowerFiles[i] = lowering.File{Path: f.Path, Source: f.Source}
-	}
-	generated, err := lowering.LowerPackage(lowerFiles)
+	generated, err := lowerPackageFiles(files)
 	if err != nil {
 		// A soundness-boundary reject is a user-facing check failure.
 		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
@@ -513,7 +526,11 @@ func runEmitGo(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: anuy emit-go [-o file] <file.anuy>")
 		return exitUsage
 	}
-	path := fs.Arg(0)
+	target := fs.Arg(0)
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		return runEmitGoDir(target, *outFile, stdout, stderr)
+	}
+	path := target
 	out := checkStages(path)
 	if code, handled := out.stageFailure(path, stdout, stderr); handled {
 		return code
@@ -528,6 +545,33 @@ func runEmitGo(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 	if err := os.WriteFile(*outFile, []byte(out.generated), 0o644); err != nil {
+		fmt.Fprintln(stderr, "anuy emit-go:", err)
+		return exitUsage
+	}
+	return exitOK
+}
+
+// runEmitGoDir implements `anuy emit-go <dir>` (story 65, §6.4.11): the
+// merged Go ABI view of the package.
+func runEmitGoDir(dir, outFile string, stdout, stderr io.Writer) int {
+	files, result, failure := analyzePackage(dir)
+	if failure != nil {
+		return reportPackageFailure(failure, "emit-go", stdout, stderr)
+	}
+	if hasErrorSeverity(result.Diagnostics) {
+		printPackageDiagnostics(stdout, files, result.Diagnostics)
+		return exitDiag
+	}
+	generated, err := lowerPackageFiles(files)
+	if err != nil {
+		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
+		return exitDiag
+	}
+	if outFile == "" {
+		fmt.Fprint(stdout, generated)
+		return exitOK
+	}
+	if err := os.WriteFile(outFile, []byte(generated), 0o644); err != nil {
 		fmt.Fprintln(stderr, "anuy emit-go:", err)
 		return exitUsage
 	}
@@ -560,6 +604,9 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	path := fs.Arg(0)
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return runRunDir(path, progArgs, stdout, stderr)
+	}
 	out := checkStages(path)
 	if code, handled := out.stageFailure(path, stdout, stderr); handled {
 		return code
@@ -568,7 +615,33 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		printDiagnostics(stdout, path, out.source, out.result.Diagnostics)
 		return exitDiag
 	}
+	return runGenerated(out.generated, progArgs, stdout, stderr)
+}
 
+// runRunDir implements `anuy run <dir>` (story 65, §6.4.5): the merged
+// package program executes with the union imports.
+func runRunDir(dir string, progArgs []string, stdout, stderr io.Writer) int {
+	files, result, failure := analyzePackage(dir)
+	if failure != nil {
+		return reportPackageFailure(failure, "run", stdout, stderr)
+	}
+	if hasErrorSeverity(result.Diagnostics) {
+		printPackageDiagnostics(stdout, files, result.Diagnostics)
+		return exitDiag
+	}
+	generated, err := lowerPackageFiles(files)
+	if err != nil {
+		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
+		return exitDiag
+	}
+	return runGenerated(generated, progArgs, stdout, stderr)
+}
+
+// runGenerated shapes and executes the generated program in a temporary
+// module (§6.4.5–6.4.6): the first generated line is the package clause
+// (story 61), spliced into `package main` with the Run entry appended;
+// program arguments pass through.
+func runGenerated(generated string, progArgs []string, stdout, stderr io.Writer) int {
 	dir, err := os.MkdirTemp("", "anuy-run-")
 	if err != nil {
 		fmt.Fprintln(stderr, "anuy run:", err)
@@ -585,10 +658,8 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	}
 	// Main shaping of the deterministic generated text (story 47
 	// determinism): the validation program is a package main whose entry
-	// invokes the generated Run. The declared package name (story 61)
-	// is spliced out - the first generated line is always the package
-	// clause.
-	program := "package main\n" + out.generated[strings.IndexByte(out.generated, '\n')+1:] + "\nfunc main() { Run() }\n"
+	// invokes the generated Run.
+	program := "package main\n" + generated[strings.IndexByte(generated, '\n')+1:] + "\nfunc main() { Run() }\n"
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(program), 0o644); err != nil {
 		fmt.Fprintln(stderr, "anuy run:", err)
 		return exitUsage
