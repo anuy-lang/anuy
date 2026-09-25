@@ -395,6 +395,42 @@ func TestCheckDirectoryDuplicateDecl(t *testing.T) {
 	}
 }
 
+// build <dir> materializes ONE merged generated file per package
+// (§6.2.6 RFC-010: physical placement is not a semantic property): all
+// declarations with //line anchors to their sources and a single Run -
+// two per-file Run bodies would collide in one package. The mixed
+// package (two .anuy + handwritten sibling) compiles as one unit.
+func TestBuildDirectoryMergedPackage(t *testing.T) {
+	dir := writePackage(t,
+		"package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\n",
+		"package server\nvar total = Add(1, 2)\nfunc Total() int {\nreturn total\n}\n")
+	sibling := filepath.Join(dir, "use.go")
+	if err := os.WriteFile(sibling, []byte("package server\n\n// Use consumes the generated API of both files.\nfunc Use() int { return Add(2, Total()) }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeModule(t, dir)
+	code, stdout, stderr := runCLI([]string{"build", dir})
+	if code != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	merged, err := os.ReadFile(filepath.Join(dir, "server.anuy.go"))
+	if err != nil {
+		t.Fatalf("merged materialization missing: %v", err)
+	}
+	text := string(merged)
+	if !strings.Contains(text, "//line a.anuy:") || !strings.Contains(text, "//line b.anuy:") {
+		t.Fatalf("merged file misses the per-file //line anchors:\n%s", text)
+	}
+	if strings.Count(text, "func Run()") != 1 {
+		t.Fatalf("merged file carries %d Run declarations, want one:\n%s", strings.Count(text, "func Run()"), text)
+	}
+	for _, stale := range []string{"a.anuy.go", "b.anuy.go"} {
+		if _, err := os.Stat(filepath.Join(dir, stale)); err == nil {
+			t.Fatalf("per-file materialization %s exists - the package generates one file", stale)
+		}
+	}
+}
+
 // run reports semantic diagnostics with exit 1 before compiling.
 func TestRunDiagnosticsExitOne(t *testing.T) {
 	path := writeTemp(t, "x\n")
