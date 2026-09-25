@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,6 +168,9 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	target := fs.Arg(0)
+	if isPackagePattern(target) {
+		return runCheckPattern(target, *jsonOut, stdout, stderr)
+	}
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		return runCheckDir(target, *jsonOut, stdout, stderr)
 	}
@@ -268,6 +272,104 @@ func analyzePackage(dir string) ([]integration.SourceFile, integration.Result, *
 		return files, result, &packageFailure{code: exitUsage, msg: err.Error()}
 	}
 	return files, result, nil
+}
+
+// isPackagePattern reports whether the target is a package pattern
+// (§6.4.1): the `/...` suffix or the bare `...`.
+func isPackagePattern(target string) bool {
+	return target == "..." || strings.HasSuffix(target, "/...")
+}
+
+// matchPackages expands a package pattern (§6.4.1) to package
+// directories: every directory below the pattern root containing at
+// least one .anuy file, in sorted order. Go-ignored names (dot and
+// underscore prefixes, testdata) do not match.
+func matchPackages(pattern string) ([]string, error) {
+	root := strings.TrimSuffix(strings.TrimSuffix(pattern, "..."), "/")
+	if root == "" {
+		root = "."
+	}
+	var dirs []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path != root && d.IsDir() {
+			if name := d.Name(); strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" {
+				return filepath.SkipDir
+			}
+		}
+		if matches, _ := filepath.Glob(filepath.Join(path, "*.anuy")); len(matches) > 0 {
+			dirs = append(dirs, path)
+		}
+		return nil
+	})
+	sort.Strings(dirs)
+	return dirs, err
+}
+
+// runCheckPattern implements `anuy check <pattern>` (story 66, §6.4.1):
+// every matched package is checked - diagnostics aggregate into one
+// document with file attribution (§6.12.19), the go stage runs per
+// package, and any Error fails the run while the remaining packages are
+// still processed. A pattern matching no packages succeeds silently
+// (cmd/go convention).
+func runCheckPattern(pattern string, jsonOut bool, stdout, stderr io.Writer) int {
+	dirs, err := matchPackages(pattern)
+	if err != nil {
+		fmt.Fprintln(stderr, "anuy check:", err)
+		return exitUsage
+	}
+	if len(dirs) == 0 {
+		return exitOK
+	}
+	code := exitOK
+	var all []semantic.Diagnostic
+	for _, dir := range dirs {
+		files, result, failure := analyzePackage(dir)
+		if failure != nil {
+			if failure.diag != "" {
+				fmt.Fprintln(stdout, failure.diag)
+			} else {
+				fmt.Fprintf(stderr, "anuy check: %s\n", failure.msg)
+			}
+			code = worstCode(code, failure.code)
+			continue
+		}
+		all = append(all, result.Diagnostics...)
+		if !jsonOut {
+			printPackageDiagnostics(stdout, files, result.Diagnostics)
+		}
+		stage := exitOK
+		if hasErrorSeverity(result.Diagnostics) {
+			stage = exitDiag
+		} else {
+			stage = checkPackageGoStage(files, dir, stdout, stderr)
+		}
+		code = worstCode(code, stage)
+	}
+	if jsonOut {
+		data, jerr := integration.DiagnosticsJSON(integration.Result{Diagnostics: all})
+		if jerr != nil {
+			fmt.Fprintln(stderr, "anuy check:", jerr)
+			return exitUsage
+		}
+		stdout.Write(data)
+		stdout.Write([]byte("\n"))
+	}
+	return code
+}
+
+// worstCode returns the more severe exit code (usage/internal outranks a
+// diagnostic failure).
+func worstCode(a, b int) int {
+	if a >= b {
+		return a
+	}
+	return b
 }
 
 // runCheckDir implements `anuy check <dir>` (story 62, §6.4.1): the
