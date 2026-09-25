@@ -45,7 +45,7 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: anuy <command> [flags] — commands: check, build, emit-go, run")
+		fmt.Fprintln(stderr, "usage: anuy <command> [flags] — commands: check, build, emit-go, run, test")
 		return exitUsage
 	}
 	switch args[0] {
@@ -57,8 +57,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runEmitGo(args[1:], stdout, stderr)
 	case "run":
 		return runRun(args[1:], stdout, stderr)
+	case "test":
+		return runTest(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown command %q — commands: check, build, emit-go, run\n", args[0])
+		fmt.Fprintf(stderr, "unknown command %q — commands: check, build, emit-go, run, test\n", args[0])
 		return exitUsage
 	}
 }
@@ -475,6 +477,11 @@ func readPackage(dir string) ([]integration.SourceFile, int, string) {
 	}
 	files := make([]integration.SourceFile, 0, len(paths))
 	for _, p := range paths {
+		if strings.HasSuffix(p, "_test.anuy") {
+			// Story 67: test files belong to the test variant - the
+			// production commands generate without them (§6.5.2).
+			continue
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return nil, exitUsage, err.Error()
@@ -482,6 +489,158 @@ func readPackage(dir string) ([]integration.SourceFile, int, string) {
 		files = append(files, integration.SourceFile{Path: p, Source: string(data)})
 	}
 	return files, exitOK, ""
+}
+
+// runTest implements `anuy test <dir>` (story 67, §6.5.1): the package's
+// production and test files generate two merged files - the production
+// view and the _test.go test variant (§6.5.2/§6.5.5) - and the go test
+// runtime runs them with the standard vet subset and cache (§6.5.7–6.5.8).
+// The materializations are transient - removed on every path (§6.12.2).
+func runTest(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("anuy test", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: anuy test <dir>")
+		return exitUsage
+	}
+	dir := fs.Arg(0)
+	if isPackagePattern(dir) {
+		fmt.Fprintln(stderr, "anuy test: package patterns are not supported - test takes a single package")
+		return exitUsage
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		fmt.Fprintln(stderr, "anuy test:", dir, "is not a package directory")
+		return exitUsage
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		fmt.Fprintln(stderr, "anuy test: the Go toolchain is required:", err)
+		return exitUsage
+	}
+	if !inModule(dir) {
+		fmt.Fprintln(stderr, "anuy test: no go.mod found above", dir, "- anuy test runs inside a Go module (go mod init)")
+		return exitUsage
+	}
+	prodPaths, testPaths, err := discoverTestFiles(dir)
+	if err != nil {
+		fmt.Fprintln(stderr, "anuy test:", err)
+		return exitUsage
+	}
+	if len(prodPaths) == 0 {
+		fmt.Fprintln(stderr, "anuy test:", dir, "has no production .anuy files")
+		return exitUsage
+	}
+	prod, err := readSources(prodPaths)
+	if err != nil {
+		fmt.Fprintln(stderr, "anuy test:", err)
+		return exitUsage
+	}
+	tests, err := readSources(testPaths)
+	if err != nil {
+		fmt.Fprintln(stderr, "anuy test:", err)
+		return exitUsage
+	}
+	all := append(append([]integration.SourceFile{}, prod...), tests...)
+	result, err := integration.AnalyzeFiles(all)
+	if err != nil {
+		var fe *integration.FileError
+		if errors.As(err, &fe) {
+			source := fileSource(all, fe.Path)
+			line, col := lineCol(source, fe.Err.Offset)
+			fmt.Fprintf(stdout, "%s:%d:%d: %s[%s]: %s\n", fe.Path, line, col,
+				strings.ToLower(string(fe.Err.Severity)), fe.Err.Code, fe.Err.Message)
+			return exitDiag
+		}
+		fmt.Fprintln(stderr, "anuy test:", err)
+		return exitUsage
+	}
+	if hasErrorSeverity(result.Diagnostics) {
+		printPackageDiagnostics(stdout, all, result.Diagnostics)
+		return exitDiag
+	}
+
+	prodText, err := lowerPackageFiles(prod)
+	if err != nil {
+		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
+		return exitDiag
+	}
+	testText, err := lowerTestFiles(tests)
+	if err != nil {
+		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
+		return exitDiag
+	}
+	pkg := packageName(prodText)
+	prodTarget := filepath.Join(dir, pkg+".anuy.go")
+	testTarget := filepath.Join(dir, pkg+".anuy_test.go")
+	if err := os.WriteFile(prodTarget, []byte(prodText), 0o644); err != nil {
+		fmt.Fprintln(stderr, "anuy test:", err)
+		return exitUsage
+	}
+	if err := os.WriteFile(testTarget, []byte(testText), 0o644); err != nil {
+		fmt.Fprintln(stderr, "anuy test:", err)
+		return exitUsage
+	}
+	defer func() {
+		os.Remove(prodTarget)
+		os.Remove(testTarget)
+	}()
+
+	cmd := exec.Command("go", "test", ".")
+	cmd.Dir = dir
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if ok := asExitError(err, &exitErr); ok {
+			return exitDiag
+		}
+		fmt.Fprintln(stderr, "anuy test:", err)
+		return exitUsage
+	}
+	return exitOK
+}
+
+// discoverTestFiles splits a directory's .anuy files into production and
+// test groups (§6.5.2), both sorted.
+func discoverTestFiles(dir string) (prod, tests []string, err error) {
+	paths, err := filepath.Glob(filepath.Join(dir, "*.anuy"))
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		if strings.HasSuffix(p, "_test.anuy") {
+			tests = append(tests, p)
+			continue
+		}
+		prod = append(prod, p)
+	}
+	return prod, tests, nil
+}
+
+// readSources reads the given files as package sources.
+func readSources(paths []string) ([]integration.SourceFile, error) {
+	files := make([]integration.SourceFile, 0, len(paths))
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, integration.SourceFile{Path: p, Source: string(data)})
+	}
+	return files, nil
+}
+
+// fileSource returns the source of the named file (empty when absent).
+func fileSource(files []integration.SourceFile, path string) string {
+	for _, f := range files {
+		if f.Path == path {
+			return f.Source
+		}
+	}
+	return ""
 }
 
 // printPackageDiagnostics renders diagnostics with per-file coordinates
@@ -627,6 +786,16 @@ func lowerPackageFiles(files []integration.SourceFile) (string, error) {
 		lowerFiles[i] = lowering.File{Path: f.Path, Source: f.Source}
 	}
 	return lowering.LowerPackage(lowerFiles)
+}
+
+// lowerTestFiles lowers one package directory's test files into the
+// merged test-variant file (story 67).
+func lowerTestFiles(files []integration.SourceFile) (string, error) {
+	lowerFiles := make([]lowering.File, len(files))
+	for i, f := range files {
+		lowerFiles[i] = lowering.File{Path: f.Path, Source: f.Source}
+	}
+	return lowering.LowerTestPackage(lowerFiles)
 }
 
 // runBuildDir implements `anuy build <dir>` (story 62, §6.4.1): the

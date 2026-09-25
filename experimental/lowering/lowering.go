@@ -65,10 +65,22 @@ type filePlan struct {
 // one package. The clause is uniform across the files (checked upstream,
 // ANUY9002); the first file's name names the package.
 func LowerPackage(files []File) (string, error) {
+	return lowerPackage(files, false)
+}
+
+// LowerTestPackage lowers the test variant of a package (story 67,
+// §6.5.2/§6.5.4): the test file's declarations are not published-API
+// foreign entries, so the §6.8 boundary wrappers do not apply to them -
+// the variant carries no anuyabi dependency of its own.
+func LowerTestPackage(files []File) (string, error) {
+	return lowerPackage(files, true)
+}
+
+func lowerPackage(files []File, testVariant bool) (string, error) {
 	if len(files) == 0 {
 		return "", errors.New("lowering: no files")
 	}
-	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}, funcResults: map[string]*parser.TypeExpr{}, structs: map[string][]parser.StructField{}, typeSpans: map[string]parser.Span{}, typeFiles: map[string]File{}, validatorsPlanned: map[string]bool{}, hasInvMemo: map[string]bool{}, hasInvWip: map[string]bool{}, seenMemo: map[string]bool{}, seenWip: map[string]bool{}}
+	l := &lowerer{testVariant: testVariant, carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}, funcResults: map[string]*parser.TypeExpr{}, structs: map[string][]parser.StructField{}, typeSpans: map[string]parser.Span{}, typeFiles: map[string]File{}, validatorsPlanned: map[string]bool{}, hasInvMemo: map[string]bool{}, hasInvWip: map[string]bool{}, seenMemo: map[string]bool{}, seenWip: map[string]bool{}}
 	plans := make([]filePlan, len(files))
 	for i := range files {
 		program, err := parser.Parse(files[i].Source)
@@ -135,9 +147,13 @@ func LowerPackage(files []File) (string, error) {
 	}
 	out.WriteString(decls.String())
 	out.WriteString(funcsBuf.String())
-	out.WriteString("func Run() {\n")
-	out.WriteString(body.String())
-	out.WriteString("}\n")
+	// The test variant carries no program entry - the Run synthesis is
+	// the production program body (story 67, §6.5.2).
+	if !testVariant {
+		out.WriteString("func Run() {\n")
+		out.WriteString(body.String())
+		out.WriteString("}\n")
+	}
 	return out.String(), nil
 }
 
@@ -186,7 +202,11 @@ func (l *lowerer) plan(plan *filePlan) error {
 	plan.types, plan.funcs = types, funcs
 	// Story 42 (RFC-009 §6.8): plan the boundary wrappers before any body
 	// renders - direct calls retarget to the native entry (§6.8.14)
-	// regardless of declaration order.
+	// regardless of declaration order. The test variant (story 67) plans
+	// none: test declarations are not published-API foreign entries.
+	if l.testVariant {
+		return l.planValidators(funcs)
+	}
 	for i := range funcs {
 		statement := funcs[i]
 		name := statement.Names[0]
@@ -278,6 +298,10 @@ type lowerer struct {
 	// the offset→line conversion of statement spans.
 	path   string
 	source string
+	// testVariant marks the test-variant lowering (story 67, §6.5.2):
+	// its exported declarations are not published-API foreign entries -
+	// §6.8 boundary wrappers do not plan for them.
+	testVariant bool
 	// typeSpans maps a declared type name to its declaration span - the
 	// anchor of the synthetic validators derived from that type (§6.9.8);
 	// typeFiles carries the owning file of that anchor (story 62).
@@ -1795,7 +1819,9 @@ func (l *lowerer) function(decls *strings.Builder, statement *parser.Statement) 
 	if err != nil {
 		return err
 	}
-	if len(checks) == 0 || !token.IsExported(name) {
+	// The test variant (story 67) renders plain bodies: test
+	// declarations are not published-API foreign entries.
+	if len(checks) == 0 || !token.IsExported(name) || l.testVariant {
 		return l.functionBody(decls, statement, name)
 	}
 	// The wrapper is emitted: its anuyabi.Require checks own the import
