@@ -377,6 +377,7 @@ func TestCheckDirectoryCrossFile(t *testing.T) {
 	dir := writePackage(t,
 		"package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\n",
 		"package server\nAdd(1, 2)\n")
+	writeModule(t, dir)
 	code, stdout, stderr := runCLI([]string{"check", dir})
 	if code != 0 {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)

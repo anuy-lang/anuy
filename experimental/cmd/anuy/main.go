@@ -276,12 +276,7 @@ func analyzePackage(dir string) ([]integration.SourceFile, integration.Result, *
 func runCheckDir(dir string, jsonOut bool, stdout, stderr io.Writer) int {
 	files, result, failure := analyzePackage(dir)
 	if failure != nil {
-		if failure.diag != "" {
-			fmt.Fprintln(stdout, failure.diag)
-		} else {
-			fmt.Fprintln(stderr, "anuy check:", failure.msg)
-		}
-		return failure.code
+		return reportPackageFailure(failure, "check", stdout, stderr)
 	}
 
 	if jsonOut {
@@ -297,6 +292,50 @@ func runCheckDir(dir string, jsonOut bool, stdout, stderr io.Writer) int {
 	}
 	if hasErrorSeverity(result.Diagnostics) {
 		return exitDiag
+	}
+	// §6.4.8: the go type-check stage (story 65) - transient
+	// materialization of the merged package, removed on every path
+	// (§6.12.2).
+	return checkPackageGoStage(files, dir, stdout, stderr)
+}
+
+// checkPackageGoStage runs the §6.4.8 go type-check stage for a package
+// directory (story 65): the merged generated file materializes next to
+// the sources so the mixed package compiles in the user's module
+// context, and is removed on every path - check leaves no artifacts
+// (§6.12.2). Go diagnostics come back in .anuy coordinates through the
+// //line directives (§6.9.8).
+func checkPackageGoStage(files []integration.SourceFile, dir string, stdout, stderr io.Writer) int {
+	if _, err := exec.LookPath("go"); err != nil {
+		fmt.Fprintln(stderr, "anuy check: the Go toolchain is required for the type-check stage:", err)
+		return exitUsage
+	}
+	if !inModule(dir) {
+		fmt.Fprintln(stderr, "anuy check: no go.mod found above", dir, "- the type-check stage runs inside a Go module (go mod init)")
+		return exitUsage
+	}
+	generated, err := lowerPackageFiles(files)
+	if err != nil {
+		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
+		return exitDiag
+	}
+	target := filepath.Join(dir, packageName(generated)+".anuy.go")
+	if err := os.WriteFile(target, []byte(generated), 0o644); err != nil {
+		fmt.Fprintln(stderr, "anuy check:", err)
+		return exitUsage
+	}
+	defer os.Remove(target)
+	cmd := exec.Command("go", "build", ".")
+	cmd.Dir = dir
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if ok := asExitError(err, &exitErr); ok {
+			return exitDiag
+		}
+		fmt.Fprintln(stderr, "anuy check:", err)
+		return exitUsage
 	}
 	return exitOK
 }
@@ -437,6 +476,12 @@ func inModule(dir string) bool {
 	}
 }
 
+// packageName reads the package clause of generated text - always the
+// first line (story 61).
+func packageName(generated string) string {
+	return strings.TrimPrefix(generated[:strings.IndexByte(generated, '\n')], "package ")
+}
+
 // reportPackageFailure renders the classified package check failure:
 // a rendered diagnostic line (stdout) or a usage/internal message
 // (stderr).
@@ -490,9 +535,7 @@ func runBuildDir(dir string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
 		return exitDiag
 	}
-	name := strings.TrimSuffix(generated[:strings.IndexByte(generated, '\n')], "\n")
-	name = strings.TrimPrefix(name, "package ")
-	target := filepath.Join(dir, name+".anuy.go")
+	target := filepath.Join(dir, packageName(generated)+".anuy.go")
 	if err := os.WriteFile(target, []byte(generated), 0o644); err != nil {
 		fmt.Fprintln(stderr, "anuy build:", err)
 		return exitUsage
