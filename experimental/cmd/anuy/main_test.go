@@ -613,3 +613,41 @@ func TestEmitGoDirectoryMerged(t *testing.T) {
 		t.Fatalf("merged view carries %d Run declarations, want one:\n%s", strings.Count(stdout, "func Run()"), stdout)
 	}
 }
+
+// §6.4.8 (story 65): check <dir> runs the go type-check stage - an
+// unknown callee in a package file fails check, remapped to its .anuy
+// line (closes the F-64-3 boundary for directories). The transient
+// materialization is cleaned up even on failure (§6.12.2).
+func TestCheckDirectoryGoStage(t *testing.T) {
+	dir := writePackage(t,
+		"package server\nvar x = Ghost()\nx\n",
+		"package server\nfunc Total() int {\nreturn 1\n}\n")
+	writeModule(t, dir)
+	code, stdout, stderr := runCLI([]string{"check", dir})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (type-check failure)", code)
+	}
+	if combined := stdout + stderr; !strings.Contains(combined, "a.anuy:2:") || !strings.Contains(combined, "undefined: Ghost") {
+		t.Fatalf("output misses the remapped diagnostic:\n%s", combined)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "server.anuy.go")); err == nil {
+		t.Fatal("transient materialization left behind after the failure")
+	}
+}
+
+// A clean mixed package passes the go stage silently - the handwritten
+// sibling consumes the generated API of both files.
+func TestCheckDirectoryMixedClean(t *testing.T) {
+	dir := writePackage(t,
+		"package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\n",
+		"package server\nfunc Total() int {\nreturn Add(1, 2)\n}\nTotal()\n")
+	sibling := filepath.Join(dir, "use.go")
+	if err := os.WriteFile(sibling, []byte("package server\n\nfunc Use() int { return Add(2, Total()) }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeModule(t, dir)
+	code, stdout, stderr := runCLI([]string{"check", dir})
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q, want silent success", code, stdout, stderr)
+	}
+}
