@@ -463,6 +463,9 @@ func (lp *lineParser) parsePackageClause(program *Program) error {
 		if name == "" {
 			return newError(UnsupportedSyntax, line.offset, "package clause requires a name")
 		}
+		if name == "_" {
+			return newError(UnsupportedSyntax, line.offset, "package name must not be the blank identifier")
+		}
 		if !isIdentifier(name) {
 			return newError(UnsupportedSyntax, line.offset, "package name must be a Go identifier")
 		}

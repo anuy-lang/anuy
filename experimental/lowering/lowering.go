@@ -139,7 +139,7 @@ func LowerFile(path, source string) (string, error) {
 		}
 	}
 	var out strings.Builder
-	out.WriteString("package fixture\n\n")
+	out.WriteString("package " + program.Package + "\n\n")
 	if l.taggedUsed || l.boundaryUsed {
 		out.WriteString(anuyabiImport)
 	}

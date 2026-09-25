@@ -1,10 +1,10 @@
 // Command anuy is the experimental CLI of the validation layer
 // (ADR-0007 L0). Implemented slices of RFC-010 §6.4: `anuy check`
-// (§6.4.7–6.4.9), `anuy build` (§6.4.1–6.4.2: materialization plus the
-// Go-build invocation, §6.9.8 //line remap), `anuy emit-go`
-// (§6.4.11–6.4.12) and `anuy run` (§6.4.5–6.4.6, temp-module).
-// Diagnostics render per RFC-011 §6.12.1/§6.12.19 with the §6.12.20
-// exit codes.
+// (§6.4.7–6.4.9), `anuy build` (§6.4.1–6.4.2: package-mode Go-build
+// invocation over the materialized mixed package, §6.9.8 //line remap),
+// `anuy emit-go` (§6.4.11–6.4.12) and `anuy run` (§6.4.5–6.4.6,
+// temp-module). Diagnostics render per RFC-011 §6.12.1/§6.12.19 with
+// the §6.12.20 exit codes.
 package main
 
 import (
@@ -189,19 +189,19 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 }
 
 // runBuild implements `anuy build` (§6.4.1–6.4.2): check, materialize
-// the generated Go next to the source (or under -o) and invoke the Go
-// toolchain over it in the user's module context (§6.4.2 item 4). Go
+// the generated Go next to the source and invoke the Go build over the
+// logical mixed package (§6.4.2 item 4, story 61): the package directory
+// compiles as one unit - generated files and handwritten siblings. Go
 // errors come back in .anuy coordinates through the //line directives
 // (§6.9.8); success is silent (cmd/go convention).
 func runBuild(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("anuy build", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	outDir := fs.String("o", "", "output directory for the generated Go file")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: anuy build [-o dir] <file.anuy>")
+		fmt.Fprintln(stderr, "usage: anuy build <file.anuy>")
 		return exitUsage
 	}
 	path := fs.Arg(0)
@@ -217,27 +217,26 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 
 	// Environment pre-check happens before materialization: a doomed run
 	// must not leave generated artifacts behind (§6.12.2).
+	dir := filepath.Dir(path)
 	if _, err := exec.LookPath("go"); err != nil {
 		fmt.Fprintln(stderr, "anuy build: the Go toolchain is required:", err)
 		return exitUsage
 	}
-	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	target := filepath.Join(filepath.Dir(path), base+".anuy.go")
-	if *outDir != "" {
-		target = filepath.Join(*outDir, base+".anuy.go")
-	}
-	targetDir := filepath.Dir(target)
-	if !inModule(targetDir) {
-		fmt.Fprintln(stderr, "anuy build: no go.mod found above", targetDir, "- anuy build runs inside a Go module (go mod init)")
+	if !inModule(dir) {
+		fmt.Fprintln(stderr, "anuy build: no go.mod found above", dir, "- anuy build runs inside a Go module (go mod init)")
 		return exitUsage
 	}
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	target := filepath.Join(dir, base+".anuy.go")
 	if err := os.WriteFile(target, []byte(out.generated), 0o644); err != nil {
 		fmt.Fprintln(stderr, "anuy build:", err)
 		return exitUsage
 	}
 
-	cmd := exec.Command("go", "build", filepath.Base(target))
-	cmd.Dir = targetDir
+	// Package-mode build (§6.4.2 item 4): the whole package - generated
+	// file and handwritten siblings - compiles as one unit.
+	cmd := exec.Command("go", "build", ".")
+	cmd.Dir = dir
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
@@ -357,8 +356,10 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	}
 	// Main shaping of the deterministic generated text (story 47
 	// determinism): the validation program is a package main whose entry
-	// invokes the generated Run.
-	program := strings.Replace(out.generated, "package fixture", "package main", 1) + "\nfunc main() { Run() }\n"
+	// invokes the generated Run. The declared package name (story 61)
+	// is spliced out - the first generated line is always the package
+	// clause.
+	program := "package main\n" + out.generated[strings.IndexByte(out.generated, '\n')+1:] + "\nfunc main() { Run() }\n"
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(program), 0o644); err != nil {
 		fmt.Fprintln(stderr, "anuy run:", err)
 		return exitUsage

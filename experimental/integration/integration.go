@@ -55,6 +55,9 @@ func goCompatDiagnostics(program parser.Program) []semantic.Diagnostic {
 		diags = append(diags, semantic.NewDiagnostic(semantic.GoReservedIdentifierDescriptor, 0,
 			semantic.SourceSpan{Start: span.Start, End: span.End}))
 	}
+	// The package name is emitted verbatim as the generated package
+	// clause (story 61) - part of the §6.4.13 surface.
+	report(program.Package, program.PackageSpan)
 	var walk func(statements []parser.Statement)
 	walk = func(statements []parser.Statement) {
 		for i := range statements {

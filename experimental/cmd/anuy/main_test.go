@@ -178,8 +178,8 @@ func TestEmitGoOutputFile(t *testing.T) {
 	}
 }
 
-// build materializes <base>.anuy.go next to the source (§6.4.2 v1:
-// the final go build belongs to the user's Go toolchain).
+// build materializes <base>.anuy.go next to the source (§6.4.2: the
+// package build runs over the materialized package directory).
 func TestBuildWritesGeneratedFile(t *testing.T) {
 	dir := t.TempDir()
 	writeModule(t, dir)
@@ -194,27 +194,6 @@ func TestBuildWritesGeneratedFile(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(dir, "hello.anuy.go"))
 	if err != nil || !strings.Contains(string(data), "func Run()") {
 		t.Fatalf("built file = %q, err = %v", data, err)
-	}
-}
-
-// build -o places the generated file into the given directory.
-func TestBuildOutputDir(t *testing.T) {
-	dir := t.TempDir()
-	writeModule(t, dir)
-	path := filepath.Join(dir, "hello.anuy")
-	if err := os.WriteFile(path, []byte("var x int = 1\nx\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	outDir := filepath.Join(dir, "gen")
-	if err := os.MkdirAll(outDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	code, _, stderr := runCLI([]string{"build", "-o", outDir, path})
-	if code != 0 {
-		t.Fatalf("code = %d, stderr = %q", code, stderr)
-	}
-	if _, err := os.Stat(filepath.Join(outDir, "hello.anuy.go")); err != nil {
-		t.Fatalf("built file missing in -o dir: %v", err)
 	}
 }
 
