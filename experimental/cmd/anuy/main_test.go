@@ -163,6 +163,7 @@ func TestEmitGoOutputFile(t *testing.T) {
 // the final go build belongs to the user's Go toolchain).
 func TestBuildWritesGeneratedFile(t *testing.T) {
 	dir := t.TempDir()
+	writeModule(t, dir)
 	path := filepath.Join(dir, "hello.anuy")
 	if err := os.WriteFile(path, []byte("var x int = 1\nx\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -180,6 +181,7 @@ func TestBuildWritesGeneratedFile(t *testing.T) {
 // build -o places the generated file into the given directory.
 func TestBuildOutputDir(t *testing.T) {
 	dir := t.TempDir()
+	writeModule(t, dir)
 	path := filepath.Join(dir, "hello.anuy")
 	if err := os.WriteFile(path, []byte("var x int = 1\nx\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -243,5 +245,86 @@ func TestRunDiagnosticsExitOne(t *testing.T) {
 	code, stdout, _ := runCLI([]string{"run", path})
 	if code != 1 || !strings.Contains(stdout, "error[ANUY2001]") {
 		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// --- Story 59 (RFC-010 §6.4.2 п. 4–5, §6.9.8) ---
+
+// writeModule creates the module context the build invocation needs
+// (§6.4.2 item 4: Go builds inside the user's module).
+func writeModule(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module fixture\n\ngo 1.24\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// §6.4.2 item 4: build invokes the Go toolchain over the materialized
+// file; success is silent with exit 0 (cmd/go convention).
+func TestBuildGoInvocationSuccess(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir)
+	path := filepath.Join(dir, "hello.anuy")
+	if err := os.WriteFile(path, []byte("var x int = 1\nx\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := runCLI([]string{"build", path})
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("code=%d stdout=%q stderr=%q, want silent success", code, stdout, stderr)
+	}
+}
+
+// §6.4.2 item 5/§6.9.8: a Go-side failure surfaces in .anuy coordinates —
+// the //line directives make the toolchain itself blame the source.
+// `range` is not reserved in Anuy but is a Go keyword: the collision is
+// invisible to check (§6.4.9) and only go build sees it — exit 1 (the
+// §6.12.20 Error class).
+func TestBuildGoCollisionRemapsToSource(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir)
+	path := filepath.Join(dir, "range.anuy")
+	if err := os.WriteFile(path, []byte("var range = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := runCLI([]string{"build", path})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (Go build failure)", code)
+	}
+	if combined := stdout + stderr; !strings.Contains(combined, "range.anuy:") {
+		t.Fatalf("output misses the remapped .anuy position:\n%s", combined)
+	}
+}
+
+// §6.12.20 (v7): no module context — usage/internal failure, exit 2; the
+// environment is not a source diagnostic. Nothing is materialized.
+func TestBuildNoModuleExitsTwo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hello.anuy")
+	if err := os.WriteFile(path, []byte("var x int = 1\nx\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := runCLI([]string{"build", path})
+	if code != 2 {
+		t.Fatalf("code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "go.mod") {
+		t.Fatalf("stderr misses the module hint:\n%s", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hello.anuy.go")); err == nil {
+		t.Fatal("generated file materialized despite the environment failure")
+	}
+}
+
+// §6.12.20 (v7): the Go toolchain itself unavailable — exit 2.
+func TestBuildNoGoToolchainExitsTwo(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir)
+	path := filepath.Join(dir, "hello.anuy")
+	if err := os.WriteFile(path, []byte("var x int = 1\nx\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+	if code, _, stderr := runCLI([]string{"build", path}); code != 2 {
+		t.Fatalf("code = %d, want 2 (stderr: %q)", code, stderr)
 	}
 }
