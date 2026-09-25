@@ -415,7 +415,16 @@ type Program struct {
 	// (RFC-015 §6.1 v3).
 	Package     string
 	PackageSpan Span
-	Statements  []Statement
+	// Imports is the header import clause (story 63, RFC-015 §6.15 v5):
+	// the paths of the generated import block, in source order.
+	Imports    []Import
+	Statements []Statement
+}
+
+// Import is one header `import "path"` clause.
+type Import struct {
+	Path string
+	Span Span
 }
 
 // Parse accepts typed declarations, single and multiple assignment, closure
@@ -436,6 +445,9 @@ func Parse(source string) (Program, error) {
 	lp := &lineParser{lines: lines}
 	program := Program{Package: "fixture"}
 	if err := lp.parsePackageClause(&program); err != nil {
+		return Program{}, err
+	}
+	if err := lp.parseImportClause(&program); err != nil {
 		return Program{}, err
 	}
 	statements, err := lp.parseStatements()
@@ -515,6 +527,60 @@ func isIdentifier(name string) bool {
 		}
 	}
 	return true
+}
+
+// parseImportClause consumes the header import lines (story 63, RFC-015
+// §6.15 v5): single-line `import "path"` after the package clause,
+// before any other statement. Named, dot and blank forms are outside
+// the slice and reject. The clause is file-header only - a later
+// `import` line is a misplaced clause and rejects.
+func (lp *lineParser) parseImportClause(program *Program) error {
+	for lp.pos < len(lp.lines) {
+		line := lp.lines[lp.pos]
+		if line.text == "" || strings.HasPrefix(line.text, "//") {
+			lp.pos++
+			continue
+		}
+		if !isImportClause(line.text) {
+			break
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(line.text, "import"))
+		if !isStringLiteral(rest) {
+			return newError(UnsupportedSyntax, line.offset, `import form is import "path"`)
+		}
+		path := rest[1 : len(rest)-1]
+		if path == "" {
+			return newError(UnsupportedSyntax, line.offset, "import requires a path")
+		}
+		program.Imports = append(program.Imports, Import{Path: path, Span: Span{Start: line.offset, End: line.offset + len(line.text)}})
+		lp.pos++
+	}
+	return lp.rejectLaterImports()
+}
+
+// isImportClause reports whether the line opens an import clause.
+func isImportClause(text string) bool {
+	return text == "import" || strings.HasPrefix(text, "import ")
+}
+
+// isStringLiteral reports whether the text is a complete double-quoted
+// string.
+func isStringLiteral(text string) bool {
+	return len(text) >= 2 && text[0] == '"' && text[len(text)-1] == '"'
+}
+
+// rejectLaterImports rejects `import` lines after the header clause.
+func (lp *lineParser) rejectLaterImports() error {
+	for i := lp.pos; i < len(lp.lines); i++ {
+		line := lp.lines[i]
+		if line.text == "" || strings.HasPrefix(line.text, "//") {
+			continue
+		}
+		if isImportClause(line.text) {
+			return newError(UnsupportedSyntax, line.offset, "import must precede statements")
+		}
+	}
+	return nil
 }
 
 type sourceLine struct {
@@ -1692,7 +1758,7 @@ type token struct {
 	start, end int // absolute byte offsets
 }
 
-var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true, "interface": true, "impl": true, "unsafe": true, "try": true}
+var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true, "interface": true, "impl": true, "unsafe": true, "try": true, "import": true}
 
 // IntrinsicNames reserves the compiler-intrinsic namespace (story 41,
 // RFC-007 §6.6.13): a declaration with one of these names is a parse
