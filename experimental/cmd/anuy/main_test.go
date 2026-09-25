@@ -454,6 +454,31 @@ func TestRunPrintsStdout(t *testing.T) {
 	}
 }
 
+// §6.4.8 (story 64): the Go type-check stage - an unknown callee in an
+// initializer fails check through the toolchain, in .anuy coordinates
+// (closes F-62-1: the check stage no longer silently skips what go build
+// catches).
+func TestCheckGoStageCatchesUnknownCallee(t *testing.T) {
+	path := writeTemp(t, "package p\nvar x = Ghost()\nx\n")
+	code, stdout, stderr := runCLI([]string{"check", path})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (type-check failure)", code)
+	}
+	if combined := stdout + stderr; !strings.Contains(combined, "test.anuy:2:") || !strings.Contains(combined, "undefined: Ghost") {
+		t.Fatalf("output misses the remapped diagnostic:\n%s", combined)
+	}
+}
+
+// The type-check stage requires the Go toolchain: unavailable toolchain
+// is a usage/internal failure (§6.12.20 v7), not a source diagnostic.
+func TestCheckNoGoToolchainExitsTwo(t *testing.T) {
+	path := writeTemp(t, "var x int = 1\nx\n")
+	t.Setenv("PATH", "")
+	if code, _, stderr := runCLI([]string{"check", path}); code != 2 {
+		t.Fatalf("code = %d, want 2, stderr = %q", code, stderr)
+	}
+}
+
 // run reports semantic diagnostics with exit 1 before compiling.
 func TestRunDiagnosticsExitOne(t *testing.T) {
 	path := writeTemp(t, "x\n")
