@@ -104,6 +104,25 @@ func TestCheckJSONFlag(t *testing.T) {
 	}
 }
 
+// §6.4.13 (story 60): the collision is a check-stage diagnostic - the
+// §6.12.1 human line with the §6.2.15 code, exit 1.
+func TestCheckGoReservedIdentifier(t *testing.T) {
+	path := writeTemp(t, "var range = 1\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "test.anuy:1:1: error[ANUY9001]") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// §6.12.19: the machine document carries the code.
+func TestCheckGoReservedIdentifierJSON(t *testing.T) {
+	path := writeTemp(t, "var range = 1\n")
+	code, stdout, _ := runCLI([]string{"check", "-json", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY9001") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
 // §6.12.20: usage failures exit 2.
 func TestCheckUsageExitsTwo(t *testing.T) {
 	if code, _, _ := runCLI([]string{"check"}); code != 2 {
@@ -274,24 +293,25 @@ func TestBuildGoInvocationSuccess(t *testing.T) {
 	}
 }
 
-// §6.4.2 item 5/§6.9.8: a Go-side failure surfaces in .anuy coordinates —
-// the //line directives make the toolchain itself blame the source.
-// `range` is not reserved in Anuy but is a Go keyword: the collision is
-// invisible to check (§6.4.9) and only go build sees it — exit 1 (the
-// §6.12.20 Error class).
-func TestBuildGoCollisionRemapsToSource(t *testing.T) {
+// §6.4.13 (story 60): the Go-keyword collision is caught at check - the
+// coded diagnostic precedes materialization (§6.4.9). The //line remap
+// machinery stays covered by the lowering directive pins and the
+// build-success e2e (story 59 evidence).
+func TestBuildGoCollisionCaughtAtCheck(t *testing.T) {
 	dir := t.TempDir()
-	writeModule(t, dir)
 	path := filepath.Join(dir, "range.anuy")
 	if err := os.WriteFile(path, []byte("var range = 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, stdout, stderr := runCLI([]string{"build", path})
 	if code != 1 {
-		t.Fatalf("code = %d, want 1 (Go build failure)", code)
+		t.Fatalf("code = %d, want 1 (check failure)", code)
 	}
-	if combined := stdout + stderr; !strings.Contains(combined, "range.anuy:") {
-		t.Fatalf("output misses the remapped .anuy position:\n%s", combined)
+	if !strings.Contains(stdout, "error[ANUY9001]") {
+		t.Fatalf("output misses the coded diagnostic:\n%s%s", stdout, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "range.anuy.go")); err == nil {
+		t.Fatal("generated file materialized despite the check failure")
 	}
 }
 
