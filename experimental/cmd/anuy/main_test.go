@@ -572,3 +572,44 @@ func TestBuildNoGoToolchainExitsTwo(t *testing.T) {
 		t.Fatalf("code = %d, want 2 (stderr: %q)", code, stderr)
 	}
 }
+
+// --- Story 65 (§6.4.1, §6.4.5, §6.4.7–6.4.8, §6.12.2) ---
+
+// §6.4.5: run executes the package program; the union imports give the
+// stdout channel.
+func TestRunDirectoryPrintsStdout(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	dir := writePackage(t,
+		"package server\nfunc Total() int {\nreturn 40 + 2\n}\n",
+		"package server\nimport \"fmt\"\nvar t = Total()\nfmt.Println(\"total:\", t)\n")
+	code, stdout, stderr := runCLI([]string{"run", dir})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "total: 42") {
+		t.Fatalf("stdout misses the package output:\n%q", stdout)
+	}
+}
+
+// §6.4.11: emit-go <dir> prints the merged ABI view - anchors of both
+// files, one Run.
+func TestEmitGoDirectoryMerged(t *testing.T) {
+	dir := writePackage(t,
+		"package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\n",
+		"package server\nfunc Total() int {\nreturn Add(1, 2)\n}\nTotal()\n")
+	code, stdout, stderr := runCLI([]string{"emit-go", dir})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "//line "+filepath.Join(dir, "a.anuy")+":") ||
+		!strings.Contains(stdout, "//line "+filepath.Join(dir, "b.anuy")+":") {
+		t.Fatalf("merged view misses the per-file anchors:\n%s", stdout)
+	}
+	if strings.Count(stdout, "func Run()") != 1 {
+		t.Fatalf("merged view carries %d Run declarations, want one:\n%s", strings.Count(stdout, "func Run()"), stdout)
+	}
+}
