@@ -652,3 +652,63 @@ func TestCheckDirectoryMixedClean(t *testing.T) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q, want silent success", code, stdout, stderr)
 	}
 }
+
+// --- Story 66 (§6.4.1: package patterns) ---
+
+// writeTree writes a package tree: a clean root package, clean alpha,
+// broken beta (unknown callee), and packages in Go-ignored directories
+// (testdata, underscore, dot prefixes).
+func writeTree(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeModule(t, dir)
+	files := map[string]string{
+		"root.anuy":       "package main\nvar ok = 1\nok\n",
+		"alpha/a.anuy":    "package alpha\nfunc Add(a int, b int) int {\nreturn a + b\n}\n",
+		"beta/b.anuy":     "package beta\nvar x = Ghost()\nx\n",
+		"testdata/t.anuy": "package testdata\nvar y = AlsoGhost()\ny\n",
+		"_hidden/h.anuy":  "package hidden\nvar z = HiddenGhost()\nz\n",
+		".dot/d.anuy":     "package dot\nvar w = DotGhost()\nw\n",
+	}
+	for name, src := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// §6.4.1: the pattern checks every matched package - the broken beta
+// fails the run with the remapped diagnostic while the tree walks in
+// sorted order; Go-ignored directories (testdata, underscore, dot) do
+// not match.
+func TestCheckPatternAggregates(t *testing.T) {
+	dir := writeTree(t)
+	code, stdout, stderr := runCLI([]string{"check", filepath.Join(dir, "...")})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (beta type-check failure), stderr = %q", code, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "b.anuy:2:") || !strings.Contains(combined, "undefined: Ghost") {
+		t.Fatalf("output misses the beta diagnostic:\n%s", combined)
+	}
+	if strings.Contains(combined, "AlsoGhost") || strings.Contains(combined, "HiddenGhost") || strings.Contains(combined, "DotGhost") {
+		t.Fatalf("ignored directories matched:\n%s", combined)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "beta", "beta.anuy.go")); err == nil {
+		t.Fatal("transient materialization left behind after the failure")
+	}
+}
+
+// A pattern matching no packages succeeds silently (cmd/go convention).
+func TestCheckPatternNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	code, stdout, _ := runCLI([]string{"check", filepath.Join(dir, "...")})
+	if code != 0 || stdout != "" {
+		t.Fatalf("code = %d, stdout = %q, want silent success", code, stdout)
+	}
+}
