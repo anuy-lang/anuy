@@ -312,6 +312,59 @@ func TestBuildRejectsOutputDir(t *testing.T) {
 	}
 }
 
+// --- Story 62 (RFC-015 §6.1 v4, §6.4.1; RFC-011 v9) ---
+
+// writePackage writes two files of one package directory.
+func writePackage(t *testing.T, aSource, bSource string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, src := range map[string]string{"a.anuy": aSource, "b.anuy": bSource} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// §6.4.1: a directory argument checks the whole package. Clause mismatch
+// across the directory's files is ANUY9002 (RFC-011 v9) - the generated
+// Go would not form a package - blamed on the mismatching file, exit 1.
+func TestCheckDirectoryMismatch(t *testing.T) {
+	dir := writePackage(t,
+		"package server\nvar x int = 1\nx\n",
+		"package client\nvar y int = 2\ny\n")
+	code, stdout, stderr := runCLI([]string{"check", dir})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "b.anuy:1:1: error[ANUY9002]") {
+		t.Fatalf("output misses the mismatch diagnostic:\n%s", stdout)
+	}
+}
+
+// A directory without .anuy files is a usage failure.
+func TestCheckDirectoryEmpty(t *testing.T) {
+	if code, _, stderr := runCLI([]string{"check", t.TempDir()}); code != 2 {
+		t.Fatalf("code = %d, want 2, stderr = %q", code, stderr)
+	}
+}
+
+// Diagnostics in package mode carry the source file (§6.12.19): an
+// undefined read in b.anuy is blamed on b.anuy, not on the directory or
+// the first file.
+func TestCheckDirectoryFileAttribution(t *testing.T) {
+	dir := writePackage(t,
+		"package server\nvar x int = 1\nx\n",
+		"package server\ny\n")
+	code, stdout, _ := runCLI([]string{"check", dir})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(stdout, "b.anuy:1:1: error[ANUY2001]") {
+		t.Fatalf("output misses the b.anuy-attributed diagnostic:\n%s", stdout)
+	}
+}
+
 // run reports semantic diagnostics with exit 1 before compiling.
 func TestRunDiagnosticsExitOne(t *testing.T) {
 	path := writeTemp(t, "x\n")
