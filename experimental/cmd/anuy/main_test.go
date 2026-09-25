@@ -663,7 +663,7 @@ func writeTree(t *testing.T) string {
 	dir := t.TempDir()
 	writeModule(t, dir)
 	files := map[string]string{
-		"root.anuy":       "package main\nvar ok = 1\nok\n",
+		"root.anuy":       "package root\nvar ok = 1\nok\n",
 		"alpha/a.anuy":    "package alpha\nfunc Add(a int, b int) int {\nreturn a + b\n}\n",
 		"beta/b.anuy":     "package beta\nvar x = Ghost()\nx\n",
 		"testdata/t.anuy": "package testdata\nvar y = AlsoGhost()\ny\n",
@@ -734,10 +734,11 @@ func TestBuildPatternAggregates(t *testing.T) {
 // explicitly (§6.4.4).
 func TestPatternRejectedForRunAndEmitGo(t *testing.T) {
 	dir := writeTree(t)
-	if code, _, _ := runCLI([]string{"run", filepath.Join(dir, "...")}); code != 2 {
-		t.Fatalf("run pattern code = %d, want 2", code)
+	pattern := filepath.Join(dir, "...")
+	if code, _, stderr := runCLI([]string{"run", pattern}); code != 2 || !strings.Contains(stderr, "pattern") {
+		t.Fatalf("run pattern code = %d, stderr = %q, want explicit pattern rejection", code, stderr)
 	}
-	if code, _, _ := runCLI([]string{"emit-go", filepath.Join(dir, "...")}); code != 2 {
-		t.Fatalf("emit-go pattern code = %d, want 2", code)
+	if code, _, stderr := runCLI([]string{"emit-go", pattern}); code != 2 || !strings.Contains(stderr, "pattern") {
+		t.Fatalf("emit-go pattern code = %d, stderr = %q, want explicit pattern rejection", code, stderr)
 	}
 }

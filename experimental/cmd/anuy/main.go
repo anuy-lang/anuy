@@ -363,6 +363,26 @@ func runCheckPattern(pattern string, jsonOut bool, stdout, stderr io.Writer) int
 	return code
 }
 
+// runBuildPattern implements `anuy build <pattern>` (story 66, §6.4.1):
+// every matched package builds (persistent materialization - build's
+// product); any failure fails the run while the remaining packages are
+// still built. A pattern matching no packages succeeds silently.
+func runBuildPattern(pattern string, stdout, stderr io.Writer) int {
+	dirs, err := matchPackages(pattern)
+	if err != nil {
+		fmt.Fprintln(stderr, "anuy build:", err)
+		return exitUsage
+	}
+	if len(dirs) == 0 {
+		return exitOK
+	}
+	code := exitOK
+	for _, dir := range dirs {
+		code = worstCode(code, runBuildDir(dir, stdout, stderr))
+	}
+	return code
+}
+
 // worstCode returns the more severe exit code (usage/internal outranks a
 // diagnostic failure).
 func worstCode(a, b int) int {
@@ -501,6 +521,9 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	path := fs.Arg(0)
+	if isPackagePattern(path) {
+		return runBuildPattern(path, stdout, stderr)
+	}
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		return runBuildDir(path, stdout, stderr)
 	}
@@ -672,6 +695,10 @@ func runEmitGo(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	target := fs.Arg(0)
+	if isPackagePattern(target) {
+		fmt.Fprintln(stderr, "anuy emit-go: package patterns are not supported - emit-go takes a single package")
+		return exitUsage
+	}
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		return runEmitGoDir(target, *outFile, stdout, stderr)
 	}
@@ -749,6 +776,10 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	path := fs.Arg(0)
+	if isPackagePattern(path) {
+		fmt.Fprintln(stderr, "anuy run: package patterns are not supported - run takes a single program")
+		return exitUsage
+	}
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		return runRunDir(path, progArgs, stdout, stderr)
 	}
