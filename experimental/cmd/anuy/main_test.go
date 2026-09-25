@@ -365,6 +365,36 @@ func TestCheckDirectoryFileAttribution(t *testing.T) {
 	}
 }
 
+// §6.1 RFC-015: package-private declarations are reachable from any file
+// of the same package - b.anuy calls a.anuy's Add without imports
+// (§6.10.2 RFC-010: declaration order is not observable). The call must
+// be a statement: package-level initializer calls are unchecked in the
+// experimental layer (pre-existing gap, story-62 findings).
+func TestCheckDirectoryCrossFile(t *testing.T) {
+	dir := writePackage(t,
+		"package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\n",
+		"package server\nAdd(1, 2)\n")
+	code, stdout, stderr := runCLI([]string{"check", dir})
+	if code != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+}
+
+// The merged namespace rejects duplicate declarations across files
+// (§6.16 RFC-015: namespace collisions MUST be rejected).
+func TestCheckDirectoryDuplicateDecl(t *testing.T) {
+	dir := writePackage(t,
+		"package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\n",
+		"package server\nfunc Add(a int, b int) int {\nreturn a\n}\n")
+	code, stdout, _ := runCLI([]string{"check", dir})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (duplicate across files)", code)
+	}
+	if !strings.Contains(stdout, "error[ANUY2003]") {
+		t.Fatalf("output misses the redeclaration diagnostic:\n%s", stdout)
+	}
+}
+
 // run reports semantic diagnostics with exit 1 before compiling.
 func TestRunDiagnosticsExitOne(t *testing.T) {
 	path := writeTemp(t, "x\n")
