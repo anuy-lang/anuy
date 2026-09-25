@@ -4,6 +4,7 @@ package parser
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/anuy-lang/anuy/internal/semantic"
 )
@@ -407,7 +408,15 @@ type Statement struct {
 // sets Names to the binding and Values to the collection expression;
 // infinite form leaves both empty. Body holds the loop body.
 
-type Program struct{ Statements []Statement }
+type Program struct {
+	// Package is the declared package name (story 61, RFC-010 §6.1.7):
+	// the generated Go package name. Files without a clause stay in the
+	// transitional single-file mode with the default `fixture`
+	// (RFC-015 §6.1 v3).
+	Package     string
+	PackageSpan Span
+	Statements  []Statement
+}
 
 // Parse accepts typed declarations, single and multiple assignment, closure
 // literals in single-value initializers, if/else statements with blocks, the
@@ -425,11 +434,84 @@ func Parse(source string) (Program, error) {
 		offset += len(raw)
 	}
 	lp := &lineParser{lines: lines}
+	program := Program{Package: "fixture"}
+	if err := lp.parsePackageClause(&program); err != nil {
+		return Program{}, err
+	}
 	statements, err := lp.parseStatements()
 	if err != nil {
 		return Program{}, err
 	}
-	return Program{Statements: statements}, nil
+	program.Statements = statements
+	return program, nil
+}
+
+// parsePackageClause consumes an optional opening `package <name>` line
+// (story 61, RFC-015 §6.1 v3). The clause is file-opening: any later
+// `package` line is a misplaced or duplicate clause and rejects.
+func (lp *lineParser) parsePackageClause(program *Program) error {
+	for lp.pos < len(lp.lines) {
+		line := lp.lines[lp.pos]
+		if line.text == "" || strings.HasPrefix(line.text, "//") {
+			lp.pos++
+			continue
+		}
+		if !isPackageClause(line.text) {
+			return nil
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(line.text, "package"))
+		if name == "" {
+			return newError(UnsupportedSyntax, line.offset, "package clause requires a name")
+		}
+		if !isIdentifier(name) {
+			return newError(UnsupportedSyntax, line.offset, "package name must be a Go identifier")
+		}
+		if isReservedName(name) {
+			return newError(UnsupportedSyntax, line.offset, "package name is a reserved word")
+		}
+		program.Package = name
+		program.PackageSpan = Span{Start: line.offset, End: line.offset + len(line.text)}
+		lp.pos++
+		return lp.rejectLaterClauses()
+	}
+	return nil
+}
+
+// isPackageClause reports whether the line opens a package clause.
+func isPackageClause(text string) bool {
+	return text == "package" || strings.HasPrefix(text, "package ")
+}
+
+// rejectLaterClauses rejects `package` lines after the clause position -
+// they are either duplicates or mid-file misplaced clauses.
+func (lp *lineParser) rejectLaterClauses() error {
+	for i := lp.pos; i < len(lp.lines); i++ {
+		line := lp.lines[i]
+		if line.text == "" || strings.HasPrefix(line.text, "//") {
+			continue
+		}
+		if isPackageClause(line.text) {
+			return newError(UnsupportedSyntax, line.offset, "package clause must be the first statement")
+		}
+	}
+	return nil
+}
+
+// isIdentifier applies the Go identifier shape: unicode letters and
+// underscores anywhere, digits except first.
+func isIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r == '_', unicode.IsLetter(r):
+		case i > 0 && unicode.IsDigit(r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 type sourceLine struct {

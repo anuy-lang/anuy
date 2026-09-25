@@ -1,9 +1,22 @@
 package parser
 
 import (
-	"strings"
+	"errors"
 	"testing"
 )
+
+// rejectPackageAssert asserts the parse rejects with the ANUY1001 code.
+func rejectPackageAssert(t *testing.T, source string) {
+	t.Helper()
+	_, err := Parse(source)
+	if err == nil {
+		t.Fatalf("Parse(%q) accepted an invalid package clause", source)
+	}
+	var perr *Error
+	if !errors.As(err, &perr) || perr.Code != "ANUY1001" {
+		t.Fatalf("Parse(%q) = %v, want ANUY1001", source, err)
+	}
+}
 
 // Story 61 (RFC-010 §6.1.7, RFC-015 §6.1 v3): a .anuy file MAY open with
 // a Go-compatible package clause; the declared name becomes the generated
@@ -45,29 +58,22 @@ func TestPackageClausePositionRejects(t *testing.T) {
 		"var x int = 1\npackage server\n", // not the first line
 		"package a\npackage b\n",          // duplicate clause
 	} {
-		if _, err := Parse(source); err == nil {
-			t.Fatalf("Parse(%q) accepted a misplaced package clause", source)
-		} else if !strings.Contains(err.Error(), "ANUY1001") {
-			t.Fatalf("Parse(%q) = %v, want ANUY1001", source, err)
-		}
+		rejectPackageAssert(t, source)
 	}
 }
 
 // The name must be a Go identifier outside the Anuy reserved words
-// (RFC-015 §6.1 v3).
+// (RFC-015 §6.1 v3). A Go keyword outside the Anuy set (`range`) parses
+// here and is caught at check by §6.4.13 (ANUY9001) - same split as
+// binding identifiers.
 func TestPackageClauseNameRejects(t *testing.T) {
 	for _, source := range []string{
-		"package\n",       // no name
-		"package 9x\n",    // not an identifier
-		"package a.b\n",   // not an identifier
-		"package if\n",    // Anuy reserved
-		"package range\n", // Go keyword - reachable surface of §6.4.13
+		"package\n",     // no name
+		"package 9x\n",  // not an identifier
+		"package a.b\n", // not an identifier
+		"package if\n",  // Anuy reserved
 	} {
-		if _, err := Parse(source); err == nil {
-			t.Fatalf("Parse(%q) accepted an invalid package name", source)
-		} else if !strings.Contains(err.Error(), "ANUY1001") {
-			t.Fatalf("Parse(%q) = %v, want ANUY1001", source, err)
-		}
+		rejectPackageAssert(t, source)
 	}
 }
 
