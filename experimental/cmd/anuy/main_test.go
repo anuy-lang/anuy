@@ -712,3 +712,32 @@ func TestCheckPatternNoMatch(t *testing.T) {
 		t.Fatalf("code = %d, stdout = %q, want silent success", code, stdout)
 	}
 }
+
+// §6.4.1: build <pattern> builds every matched package; a failing
+// package fails the run (its materialization persists - build's product)
+// while the others still build.
+func TestBuildPatternAggregates(t *testing.T) {
+	dir := writeTree(t)
+	code, _, stderr := runCLI([]string{"build", filepath.Join(dir, "...")})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (beta failure), stderr = %q", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "alpha", "alpha.anuy.go")); err != nil {
+		t.Fatalf("alpha not materialized: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "root.anuy.go")); err != nil {
+		t.Fatalf("root not materialized: %v", err)
+	}
+}
+
+// run and emit-go take a single program/package - patterns reject
+// explicitly (§6.4.4).
+func TestPatternRejectedForRunAndEmitGo(t *testing.T) {
+	dir := writeTree(t)
+	if code, _, _ := runCLI([]string{"run", filepath.Join(dir, "...")}); code != 2 {
+		t.Fatalf("run pattern code = %d, want 2", code)
+	}
+	if code, _, _ := runCLI([]string{"emit-go", filepath.Join(dir, "...")}); code != 2 {
+		t.Fatalf("emit-go pattern code = %d, want 2", code)
+	}
+}
