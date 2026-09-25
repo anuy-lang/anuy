@@ -2047,7 +2047,7 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 			if len(names) != 1 {
 				return Statement{}, newError(UnsupportedSyntax, tokens[i+1].start, "closure initializer requires a single binding")
 			}
-			cl, cerr := lp.parseClosure(tokens, i+1, line, false)
+			cl, cerr := lp.parseClosure(tokens, i+1, line, true)
 			if cerr != nil {
 				return Statement{}, cerr
 			}
@@ -2096,7 +2096,7 @@ func (lp *lineParser) parseAssign(tokens []token, line sourceLine) (Statement, e
 		if len(names) != 1 {
 			return Statement{}, newError(UnsupportedSyntax, tokens[i+1].start, "closure initializer requires a single binding")
 		}
-		cl, cerr := lp.parseClosure(tokens, i+1, line, false)
+		cl, cerr := lp.parseClosure(tokens, i+1, line, true)
 		if cerr != nil {
 			return Statement{}, cerr
 		}
