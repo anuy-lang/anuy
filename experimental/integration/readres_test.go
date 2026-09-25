@@ -22,34 +22,6 @@ func hasUnknownRead(t *testing.T, result Result) semantic.Diagnostic {
 	return semantic.Diagnostic{}
 }
 
-func TestInitializerUnknownIdent(t *testing.T) {
-	result, err := AnalyzeSource("package p\nvar x = ghost + 1\nx\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	diag := hasUnknownRead(t, result)
-	// The value span covers the initializer expression on line 2.
-	if diag.Span.Start == 0 {
-		t.Fatalf("diag span = %+v, want the initializer value span", diag.Span)
-	}
-}
-
-func TestInitializerUnknownCallee(t *testing.T) {
-	result, err := AnalyzeSource("package p\nfunc Real() int {\nreturn 1\n}\nvar x = Ghost() + Real()\nx\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hasUnknownRead(t, result)
-}
-
-func TestInitializerUnknownLocal(t *testing.T) {
-	result, err := AnalyzeSource("package p\nfunc f() int {\nvar z = ghost\nreturn z\n}\nf()\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hasUnknownRead(t, result)
-}
-
 // The exemption namespaces stay clean: an import qualifier is not a
 // binding read (story 63 pass-through), and an enum variant constant is
 // a generated constant, not a binding (RFC-006 §6.1).

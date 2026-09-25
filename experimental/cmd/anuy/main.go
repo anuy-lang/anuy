@@ -191,6 +191,47 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	if out.hasErrorDiag {
 		return exitDiag
 	}
+	// §6.4.8: the Go package/type compatibility check stage (story 64) -
+	// the generated Go compiles against the toolchain before check
+	// passes.
+	return checkGoStage(out.generated, stdout, stderr)
+}
+
+// checkGoStage runs the §6.4.8 Go type-check stage (story 64): the
+// generated Go compiles in a temporary module - no execution, no
+// artifacts (§6.12.2). Go diagnostics come back in .anuy coordinates
+// through the //line directives (§6.9.8).
+func checkGoStage(generated string, stdout, stderr io.Writer) int {
+	if _, err := exec.LookPath("go"); err != nil {
+		fmt.Fprintln(stderr, "anuy check: the Go toolchain is required for the type-check stage:", err)
+		return exitUsage
+	}
+	dir, err := os.MkdirTemp("", "anuy-check-")
+	if err != nil {
+		fmt.Fprintln(stderr, "anuy check:", err)
+		return exitUsage
+	}
+	defer os.RemoveAll(dir)
+	if err := writeTempModule(dir); err != nil {
+		fmt.Fprintln(stderr, "anuy check:", err)
+		return exitUsage
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fixture.go"), []byte(generated), 0o644); err != nil {
+		fmt.Fprintln(stderr, "anuy check:", err)
+		return exitUsage
+	}
+	cmd := exec.Command("go", "build", ".")
+	cmd.Dir = dir
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if ok := asExitError(err, &exitErr); ok {
+			return exitDiag
+		}
+		fmt.Fprintln(stderr, "anuy check:", err)
+		return exitUsage
+	}
 	return exitOK
 }
 
@@ -369,6 +410,18 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
+// writeTempModule writes the run/check temporary module (story 58/64):
+// the published anuyabi satisfies the generated imports;
+// ANUY_REPLACE_ROOT redirects to a repository checkout for the
+// development workflow.
+func writeTempModule(dir string) error {
+	gomod := "module runtmp\n\ngo 1.24\n\nrequire github.com/anuy-lang/anuy " + anuyabiVersion + "\n"
+	if root := os.Getenv("ANUY_REPLACE_ROOT"); root != "" {
+		gomod += "\nreplace github.com/anuy-lang/anuy => " + root + "\n"
+	}
+	return os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644)
+}
+
 // inModule reports whether a go.mod governs dir or any parent — the
 // module context the §6.4.2 Go-build invocation requires.
 func inModule(dir string) bool {
@@ -526,11 +579,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	// Temporary module: the published anuyabi satisfies the generated
 	// imports; ANUY_REPLACE_ROOT redirects to a repository checkout for
 	// the development workflow.
-	gomod := "module runtmp\n\ngo 1.24\n\nrequire github.com/anuy-lang/anuy " + anuyabiVersion + "\n"
-	if root := os.Getenv("ANUY_REPLACE_ROOT"); root != "" {
-		gomod += "\nreplace github.com/anuy-lang/anuy => " + root + "\n"
-	}
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644); err != nil {
+	if err := writeTempModule(dir); err != nil {
 		fmt.Fprintln(stderr, "anuy run:", err)
 		return exitUsage
 	}

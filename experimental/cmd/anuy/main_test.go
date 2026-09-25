@@ -73,7 +73,10 @@ func TestCheckErrorSeverityExitsOne(t *testing.T) {
 
 // §6.12.20: advisory (Warning) diagnostics do not fail check — exit 0.
 func TestCheckAdvisoryExitsZero(t *testing.T) {
-	path := writeTemp(t, "var err error? = f()\n")
+	// The callee is declared (story 64: the type-check stage resolves
+	// initializer callees) - the pin stays on the advisory-vs-error
+	// distinction.
+	path := writeTemp(t, "func f() error? {\nreturn nil\n}\nvar err error? = f()\n")
 	code, stdout, _ := runCLI([]string{"check", path})
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 (advisory does not fail)", code)
