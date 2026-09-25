@@ -360,7 +360,7 @@ func TestCheckDirectoryFileAttribution(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
-	if !strings.Contains(stdout, "b.anuy:1:1: error[ANUY2001]") {
+	if !strings.Contains(stdout, "b.anuy:2:1: error[ANUY2001]") {
 		t.Fatalf("output misses the b.anuy-attributed diagnostic:\n%s", stdout)
 	}
 }

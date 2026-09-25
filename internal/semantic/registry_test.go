@@ -60,6 +60,7 @@ var approvedScheme = []struct {
 	{"UnsafeOperationOutside", "ANUY8001", SeverityError},
 	{"UnsafeCallOutsideContext", "ANUY8002", SeverityError},
 	{"GoReservedIdentifier", "ANUY9001", SeverityError},
+	{"PackageMismatch", "ANUY9002", SeverityError},
 	{"RedundantUnsafeAssertion", "ANUY5002", SeverityWarning},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }

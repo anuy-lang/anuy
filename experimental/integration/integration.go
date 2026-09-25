@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"errors"
 	"go/token"
 	"sort"
 	"strings"
@@ -28,13 +29,83 @@ func AnalyzeSource(source string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	return analyzeSourceFile("", source, program)
+}
+
+// SourceFile is one file of a package directory (story 62, RFC-015
+// §6.1 v4).
+type SourceFile struct {
+	Path   string
+	Source string
+}
+
+// FileError pairs a parse reject with its file (story 62): package-mode
+// callers render the diagnostic against the failing file.
+type FileError struct {
+	Path string
+	Err  *parser.Error
+}
+
+func (e *FileError) Error() string { return e.Path + ": " + e.Err.Error() }
+
+// AnalyzeFiles analyzes a package directory's files (story 62, RFC-015
+// §6.1 v4). The clause must be uniform across the files (ANUY9002,
+// including the transitional `fixture` default); this slice analyzes
+// each file in its own namespace - the merged package namespace lands
+// with the cross-file resolution work. Diagnostics carry the source
+// file (§6.12.19).
+func AnalyzeFiles(files []SourceFile) (Result, error) {
+	programs := make([]parser.Program, len(files))
+	for i, f := range files {
+		program, err := parser.Parse(f.Source)
+		if err != nil {
+			var perr *parser.Error
+			if errors.As(err, &perr) {
+				return Result{}, &FileError{Path: f.Path, Err: perr}
+			}
+			return Result{}, err
+		}
+		programs[i] = program
+	}
+	result := Result{}
+	for i := 1; i < len(programs); i++ {
+		if programs[i].Package == programs[0].Package {
+			continue
+		}
+		span := programs[i].PackageSpan
+		if span.End == 0 {
+			// File without a clause: the file-level fallback span (§6.2.18).
+			span = parser.Span{Start: 0, End: len(files[i].Source)}
+		}
+		result.Diagnostics = append(result.Diagnostics, semantic.NewDiagnostic(
+			semantic.PackageMismatchDescriptor, 0,
+			semantic.SourceSpan{File: files[i].Path, Start: span.Start, End: span.End}))
+	}
+	if len(result.Diagnostics) > 0 {
+		return result, nil
+	}
+	for i, f := range files {
+		fileResult, err := analyzeSourceFile(f.Path, f.Source, programs[i])
+		if err != nil {
+			return Result{}, err
+		}
+		result.Diagnostics = append(result.Diagnostics, fileResult.Diagnostics...)
+	}
+	return result, nil
+}
+
+// analyzeSourceFile runs the check stages over one parsed file. An empty
+// path keeps the single-file presentation (spans without a file); the
+// package mode stamps every span with its source file (§6.12.19).
+func analyzeSourceFile(path, source string, program parser.Program) (Result, error) {
 	b := newBuilder()
+	b.file = path
 	b.emit(program.Statements, semantic.NewScope())
 	result := Result{}
 	result.Diagnostics = append(result.Diagnostics, b.diagnostics...)
 	result.Diagnostics = append(result.Diagnostics, b.analyze().Diagnostics...)
 	result.Diagnostics = append(result.Diagnostics, b.uncheckedErrors()...)
-	result.Diagnostics = append(result.Diagnostics, goCompatDiagnostics(program)...)
+	result.Diagnostics = append(result.Diagnostics, goCompatDiagnostics(path, program)...)
 	return result, nil
 }
 
@@ -46,14 +117,14 @@ func AnalyzeSource(source string) (Result, error) {
 // generated constants carry the type prefix (RFC-009 §6.10). Params and
 // receiver names carry no own span on the declaration - the statement
 // fallback applies (§6.2.18).
-func goCompatDiagnostics(program parser.Program) []semantic.Diagnostic {
+func goCompatDiagnostics(path string, program parser.Program) []semantic.Diagnostic {
 	var diags []semantic.Diagnostic
 	report := func(name string, span parser.Span) {
 		if name == "_" || !token.IsKeyword(name) {
 			return
 		}
 		diags = append(diags, semantic.NewDiagnostic(semantic.GoReservedIdentifierDescriptor, 0,
-			semantic.SourceSpan{Start: span.Start, End: span.End}))
+			semantic.SourceSpan{File: path, Start: span.Start, End: span.End}))
 	}
 	// The package name is emitted verbatim as the generated package
 	// clause (story 61) - part of the §6.4.13 surface.
@@ -127,7 +198,7 @@ func (b *builder) uncheckedErrors() []semantic.Diagnostic {
 	out := make([]semantic.Diagnostic, 0, len(ids))
 	for _, id := range ids {
 		span := b.errSpans[id]
-		out = append(out, semantic.NewDiagnostic(semantic.UncheckedErrorDescriptor, id, semantic.SourceSpan{Start: span.Start, End: span.End}))
+		out = append(out, semantic.NewDiagnostic(semantic.UncheckedErrorDescriptor, id, semantic.SourceSpan{File: b.errFiles[id], Start: span.Start, End: span.End}))
 	}
 	return out
 }
@@ -201,6 +272,9 @@ type declResult struct {
 }
 
 type builder struct {
+	// file is the source file of the statements being emitted (story 62):
+	// package mode stamps every diagnostic span with it (§6.12.19).
+	file         string
 	blocks       []semantic.Block
 	facts        []map[semantic.BindingID]bool // initialization facts at the end of each block
 	nonNil       []map[semantic.BindingID]bool // non-nil narrowing facts, parallel to facts (story 05)
@@ -250,6 +324,9 @@ type builder struct {
 	// binding (R1 lint, CONTRACTS §3); reads tracks every binding read
 	// anywhere in the flow (flow-insensitive "read somewhere" is enough).
 	errSpans map[semantic.BindingID]parser.Span
+	// errFiles records the source file of every errSpans entry (story 62,
+	// §6.12.19 file attribution in package mode).
+	errFiles map[semantic.BindingID]string
 	reads    map[semantic.BindingID]bool
 	// pure records declared functions annotated `//anuy:pure` (story 07
 	// effects proposal): a trusted contract - their calls apply no
@@ -313,6 +390,7 @@ func newBuilder() *builder {
 		declared:       map[semantic.BindingID]bool{},
 		assigned:       map[semantic.BindingID]bool{},
 		errSpans:       map[semantic.BindingID]parser.Span{},
+		errFiles:       map[semantic.BindingID]string{},
 		reads:          map[semantic.BindingID]bool{},
 		pure:           map[semantic.BindingID]bool{},
 		methods:        map[string]methodInfo{},
@@ -339,7 +417,7 @@ func (b *builder) appendBlock() {
 }
 
 func (b *builder) add(op semantic.Operation, span parser.Span) {
-	op.Span = semantic.SourceSpan{Start: span.Start, End: span.End}
+	op.Span = semantic.SourceSpan{File: b.file, Start: span.Start, End: span.End}
 	switch op.Kind {
 	case semantic.ReadOperation, semantic.DerefOperation:
 		// Both operations read the binding's value: any of them lifts the
@@ -1256,6 +1334,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 					b.nilable[id] = true
 					if statement.TypeExpr.Name == "error" {
 						b.errSpans[id] = statement.Span
+						b.errFiles[id] = b.file
 					}
 				}
 				// Declared class (story 08, G1): a named type is non-null or
@@ -2047,6 +2126,7 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		declared:     map[semantic.BindingID]bool{},
 		assigned:     map[semantic.BindingID]bool{},
 		errSpans:     map[semantic.BindingID]parser.Span{},
+		errFiles:     map[semantic.BindingID]string{},
 		reads:        map[semantic.BindingID]bool{},
 		pure:         b.pure,
 		// Story 22: the field model maps are shared read-only (the closure
@@ -2088,6 +2168,7 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 	}
 	for id, span := range cb.errSpans {
 		b.errSpans[id] = span
+		b.errFiles[id] = cb.errFiles[id]
 	}
 	var mutators []semantic.BindingID
 	for id := range cb.assigned {
@@ -2626,6 +2707,7 @@ func (b *builder) emitVarDestructuring(statement *parser.Statement, scope *seman
 		b.classes[errID] = semantic.NullabilityNullable
 		b.nilable[errID] = true
 		b.errSpans[errID] = statement.Span
+		b.errFiles[errID] = b.file
 		b.initialize(errID, statement.Span)
 	}
 	success := statement.Names[:len(statement.Names)-1]
@@ -2933,7 +3015,7 @@ func (b *builder) report(category semantic.DiagnosticCategory, span parser.Span)
 	if !ok {
 		panic("integration: unregistered diagnostic category " + category)
 	}
-	b.diagnostics = append(b.diagnostics, semantic.NewDiagnostic(desc, 0, semantic.SourceSpan{Start: span.Start, End: span.End}))
+	b.diagnostics = append(b.diagnostics, semantic.NewDiagnostic(desc, 0, semantic.SourceSpan{File: b.file, Start: span.Start, End: span.End}))
 }
 
 // nullabilityOfParam classifies a declared parameter type (story 08): a

@@ -44,6 +44,11 @@ const UncheckedError DiagnosticCategory = "UncheckedError"
 // collides with a Go reserved word.
 const GoReservedIdentifier DiagnosticCategory = "GoReservedIdentifier"
 
+// PackageMismatch is the Go compatibility category (story 62, RFC-015
+// §6.1 v4): package clauses of one package directory differ, so the
+// generated Go does not form a package.
+const PackageMismatch DiagnosticCategory = "PackageMismatch"
+
 // The registry — the single source of truth for category → (code,
 // severity) (CONTRACTS §1.2), the approved proposal table verbatim.
 var (
@@ -100,6 +105,7 @@ var (
 	// Go compatibility block (9xxx): backend-projection validity (story
 	// 60, RFC-010 §6.4.13).
 	GoReservedIdentifierDescriptor = register(GoReservedIdentifier, "ANUY9001", SeverityError)
+	PackageMismatchDescriptor      = register(PackageMismatch, "ANUY9002", SeverityError)
 
 	// Lint block (5xxx): advisory analyzers.
 	UncheckedErrorDescriptor           = register(UncheckedError, "ANUY5001", SeverityWarning)           // R1
@@ -149,6 +155,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		UnsafeOperationOutsideDescriptor,
 		UnsafeCallOutsideContextDescriptor,
 		GoReservedIdentifierDescriptor,
+		PackageMismatchDescriptor,
 		RedundantUnsafeAssertionDescriptor,
 		UncheckedErrorDescriptor,
 	}
@@ -221,6 +228,7 @@ var catalog = map[Code]string{
 	"ANUY8001": "unsafe operation requires an unsafe context",
 	"ANUY8002": "call to an unsafe function requires an unsafe context",
 	"ANUY9001": "identifier collides with a Go reserved word",
+	"ANUY9002": "package clause mismatch across the directory's files",
 	"ANUY5002": "assume_non_nil on a value already known to be non-null",
 }
 

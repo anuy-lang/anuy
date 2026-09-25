@@ -8,12 +8,14 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/anuy-lang/anuy/experimental/integration"
@@ -161,10 +163,14 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: anuy check [-json] <file.anuy>")
+		fmt.Fprintln(stderr, "usage: anuy check [-json] <file.anuy | dir>")
 		return exitUsage
 	}
-	path := fs.Arg(0)
+	target := fs.Arg(0)
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		return runCheckDir(target, *jsonOut, stdout, stderr)
+	}
+	path := target
 	out := checkStages(path)
 	if code, handled := out.stageFailure(path, stdout, stderr); handled {
 		return code
@@ -186,6 +192,93 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		return exitDiag
 	}
 	return exitOK
+}
+
+// runCheckDir implements `anuy check <dir>` (story 62, §6.4.1): the
+// directory's .anuy files are one package (§6.1.5 RFC-010). Diagnostics
+// carry the source file (§6.12.19).
+func runCheckDir(dir string, jsonOut bool, stdout, stderr io.Writer) int {
+	files, failCode, failMsg := readPackage(dir)
+	if files == nil {
+		fmt.Fprintln(stderr, "anuy check:", failMsg)
+		return failCode
+	}
+	result, err := integration.AnalyzeFiles(files)
+	if err != nil {
+		var fe *integration.FileError
+		if errors.As(err, &fe) {
+			var source string
+			for _, f := range files {
+				if f.Path == fe.Path {
+					source = f.Source
+				}
+			}
+			line, col := lineCol(source, fe.Err.Offset)
+			fmt.Fprintf(stdout, "%s:%d:%d: %s[%s]: %s\n", fe.Path, line, col,
+				strings.ToLower(string(fe.Err.Severity)), fe.Err.Code, fe.Err.Message)
+			return exitDiag
+		}
+		fmt.Fprintln(stderr, "anuy check:", err)
+		return exitUsage
+	}
+
+	if jsonOut {
+		data, jerr := integration.DiagnosticsJSON(result)
+		if jerr != nil {
+			fmt.Fprintln(stderr, "anuy check:", jerr)
+			return exitUsage
+		}
+		stdout.Write(data)
+		stdout.Write([]byte("\n"))
+	} else {
+		printPackageDiagnostics(stdout, files, result.Diagnostics)
+	}
+	if hasErrorSeverity(result.Diagnostics) {
+		return exitDiag
+	}
+	return exitOK
+}
+
+// readPackage discovers the .anuy files of one package directory
+// (§6.1.5 RFC-010) in deterministic (sorted) order.
+func readPackage(dir string) ([]integration.SourceFile, int, string) {
+	paths, err := filepath.Glob(filepath.Join(dir, "*.anuy"))
+	if err != nil {
+		return nil, exitUsage, err.Error()
+	}
+	sort.Strings(paths)
+	if len(paths) == 0 {
+		return nil, exitUsage, dir + " has no .anuy files"
+	}
+	files := make([]integration.SourceFile, 0, len(paths))
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil, exitUsage, err.Error()
+		}
+		files = append(files, integration.SourceFile{Path: p, Source: string(data)})
+	}
+	return files, exitOK, ""
+}
+
+// printPackageDiagnostics renders diagnostics with per-file coordinates
+// (§6.12.19: the span names its source file).
+func printPackageDiagnostics(w io.Writer, files []integration.SourceFile, diags []semantic.Diagnostic) {
+	sources := make(map[string]string, len(files))
+	for _, f := range files {
+		sources[f.Path] = f.Source
+	}
+	var print func(diags []semantic.Diagnostic)
+	print = func(diags []semantic.Diagnostic) {
+		for _, d := range diags {
+			line, col := lineCol(sources[d.Span.File], d.Span.Start)
+			message, _ := semantic.Message(d.Code)
+			fmt.Fprintf(w, "%s:%d:%d: %s[%s]: %s\n", d.Span.File, line, col,
+				strings.ToLower(string(d.Severity)), d.Code, message)
+			print(d.Related)
+		}
+	}
+	print(diags)
 }
 
 // runBuild implements `anuy build` (§6.4.1–6.4.2): check, materialize
