@@ -1,9 +1,10 @@
 // Command anuy is the experimental CLI of the validation layer
 // (ADR-0007 L0). Implemented slices of RFC-010 §6.4: `anuy check`
-// (§6.4.7–6.4.9), `anuy build` (§6.4.1–6.4.2, v1: materialization
-// without the Go-build invocation), `anuy emit-go` (§6.4.11–6.4.12)
-// and `anuy run` (§6.4.5–6.4.6, temp-module). Diagnostics render per
-// RFC-011 §6.12.1/§6.12.19 with the §6.12.20 exit codes.
+// (§6.4.7–6.4.9), `anuy build` (§6.4.1–6.4.2: materialization plus the
+// Go-build invocation, §6.9.8 //line remap), `anuy emit-go`
+// (§6.4.11–6.4.12) and `anuy run` (§6.4.5–6.4.6, temp-module).
+// Diagnostics render per RFC-011 §6.12.1/§6.12.19 with the §6.12.20
+// exit codes.
 package main
 
 import (
@@ -122,7 +123,7 @@ func checkStages(path string) checkOutcome {
 
 	// Lowering validation belongs to check (§6.4.8/§6.4.9): a
 	// soundness-boundary reject is a user-facing check failure.
-	text, lerr := lowering.Lower(out.source)
+	text, lerr := lowering.LowerFile(path, out.source)
 	if lerr != nil {
 		out.lowerFailure = fmt.Sprintf("%s: error: %v", path, lerr)
 		return out
@@ -187,10 +188,11 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// runBuild implements `anuy build` v1 (§6.4.1–6.4.2): check and
-// materialize the generated Go next to the source (or under -o). The
-// final Go-toolchain build belongs to the user's module (§2: Go owns
-// final build mechanics).
+// runBuild implements `anuy build` (§6.4.1–6.4.2): check, materialize
+// the generated Go next to the source (or under -o) and invoke the Go
+// toolchain over it in the user's module context (§6.4.2 item 4). Go
+// errors come back in .anuy coordinates through the //line directives
+// (§6.9.8); success is silent (cmd/go convention).
 func runBuild(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("anuy build", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -213,20 +215,57 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 		return exitDiag
 	}
 
+	// Environment pre-check happens before materialization: a doomed run
+	// must not leave generated artifacts behind (§6.12.2).
+	if _, err := exec.LookPath("go"); err != nil {
+		fmt.Fprintln(stderr, "anuy build: the Go toolchain is required:", err)
+		return exitUsage
+	}
 	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	target := filepath.Join(filepath.Dir(path), base+".anuy.go")
 	if *outDir != "" {
 		target = filepath.Join(*outDir, base+".anuy.go")
 	}
+	targetDir := filepath.Dir(target)
+	if !inModule(targetDir) {
+		fmt.Fprintln(stderr, "anuy build: no go.mod found above", targetDir, "- anuy build runs inside a Go module (go mod init)")
+		return exitUsage
+	}
 	if err := os.WriteFile(target, []byte(out.generated), 0o644); err != nil {
 		fmt.Fprintln(stderr, "anuy build:", err)
 		return exitUsage
 	}
-	fmt.Fprintln(stdout, target)
-	if out.hasErrorDiag {
-		return exitDiag
+
+	cmd := exec.Command("go", "build", filepath.Base(target))
+	cmd.Dir = targetDir
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if ok := asExitError(err, &exitErr); ok {
+			// Go-toolchain diagnostics are the §6.12.20 Error class
+			// (v7) - already in .anuy coordinates via //line.
+			return exitDiag
+		}
+		fmt.Fprintln(stderr, "anuy build:", err)
+		return exitUsage
 	}
 	return exitOK
+}
+
+// inModule reports whether a go.mod governs dir or any parent — the
+// module context the §6.4.2 Go-build invocation requires.
+func inModule(dir string) bool {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 // runEmitGo implements `anuy emit-go` (§6.4.11–6.4.12): materialize the
