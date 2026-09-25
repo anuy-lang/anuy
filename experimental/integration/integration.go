@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"go/token"
 	"sort"
 	"strings"
 	"unicode"
@@ -33,7 +34,77 @@ func AnalyzeSource(source string) (Result, error) {
 	result.Diagnostics = append(result.Diagnostics, b.diagnostics...)
 	result.Diagnostics = append(result.Diagnostics, b.analyze().Diagnostics...)
 	result.Diagnostics = append(result.Diagnostics, b.uncheckedErrors()...)
+	result.Diagnostics = append(result.Diagnostics, goCompatDiagnostics(program)...)
 	return result, nil
+}
+
+// goCompatDiagnostics implements the identifier half of the §6.4.8 Go
+// compatibility stage (story 60, RFC-010 §6.4.13): names the lowering
+// emits verbatim as Go identifiers must not collide with Go reserved
+// words - the generated Go would not compile. The keyword source is the
+// toolchain's own definition (go/token); enum variants are exempt, their
+// generated constants carry the type prefix (RFC-009 §6.10). Params and
+// receiver names carry no own span on the declaration - the statement
+// fallback applies (§6.2.18).
+func goCompatDiagnostics(program parser.Program) []semantic.Diagnostic {
+	var diags []semantic.Diagnostic
+	report := func(name string, span parser.Span) {
+		if name == "_" || !token.IsKeyword(name) {
+			return
+		}
+		diags = append(diags, semantic.NewDiagnostic(semantic.GoReservedIdentifierDescriptor, 0,
+			semantic.SourceSpan{Start: span.Start, End: span.End}))
+	}
+	var walk func(statements []parser.Statement)
+	walk = func(statements []parser.Statement) {
+		for i := range statements {
+			statement := &statements[i]
+			switch statement.Kind {
+			case parser.Var, parser.Function, parser.TypeDecl, parser.Interface:
+				// Declaration names reach Go verbatim; assignment and
+				// call statements only reference declared bindings.
+				for _, name := range statement.Names {
+					report(name, statement.Span)
+				}
+				if statement.ReceiverName != "" && statement.ReceiverName != "_" {
+					report(statement.ReceiverName, statement.Span)
+				}
+			}
+			if statement.Struct != nil {
+				for _, field := range statement.Struct.Fields {
+					report(field.Name, field.Span)
+				}
+			}
+			if statement.Interface != nil {
+				for _, method := range statement.Interface.Methods {
+					report(method.Name, method.Span)
+				}
+			}
+			if statement.Switch != nil {
+				for _, arm := range statement.Switch.Arms {
+					walk(arm.Body)
+				}
+			}
+			if statement.Closure != nil {
+				for _, param := range statement.Closure.Params {
+					report(param.Name, statement.Span)
+				}
+				walk(statement.Closure.Body)
+			}
+			for _, value := range statement.Values {
+				if value.Closure != nil {
+					for _, param := range value.Closure.Params {
+						report(param.Name, value.Span)
+					}
+					walk(value.Closure.Body)
+				}
+			}
+			walk(statement.Body)
+			walk(statement.Else)
+		}
+	}
+	walk(program.Statements)
+	return diags
 }
 
 // uncheckedErrors implements the R1 lint (CONTRACTS §3): a declared

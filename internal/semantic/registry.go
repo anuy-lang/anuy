@@ -39,6 +39,11 @@ func register(category DiagnosticCategory, code Code, severity Severity) Descrip
 // binding read nowhere (R1); the rule itself lands in 1-6-2-2.
 const UncheckedError DiagnosticCategory = "UncheckedError"
 
+// GoReservedIdentifier is the Go compatibility category (story 60,
+// RFC-010 §6.4.13): the identifier reaches generated Go verbatim and
+// collides with a Go reserved word.
+const GoReservedIdentifier DiagnosticCategory = "GoReservedIdentifier"
+
 // The registry — the single source of truth for category → (code,
 // severity) (CONTRACTS §1.2), the approved proposal table verbatim.
 var (
@@ -92,6 +97,10 @@ var (
 	UnsafeOperationOutsideDescriptor   = register(UnsafeOperationOutside, "ANUY8001", SeverityError)   // RFC-007 §8.2.1 (D-1)
 	UnsafeCallOutsideContextDescriptor = register(UnsafeCallOutsideContext, "ANUY8002", SeverityError) // RFC-007 §8.2.2 (D-2)
 
+	// Go compatibility block (9xxx): backend-projection validity (story
+	// 60, RFC-010 §6.4.13).
+	GoReservedIdentifierDescriptor = register(GoReservedIdentifier, "ANUY9001", SeverityError)
+
 	// Lint block (5xxx): advisory analyzers.
 	UncheckedErrorDescriptor           = register(UncheckedError, "ANUY5001", SeverityWarning)           // R1
 	RedundantUnsafeAssertionDescriptor = register(RedundantUnsafeAssertion, "ANUY5002", SeverityWarning) // RFC-007 §8.2.6 (R)
@@ -139,6 +148,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		InterfaceConflictDescriptor,
 		UnsafeOperationOutsideDescriptor,
 		UnsafeCallOutsideContextDescriptor,
+		GoReservedIdentifierDescriptor,
 		RedundantUnsafeAssertionDescriptor,
 		UncheckedErrorDescriptor,
 	}
@@ -210,6 +220,7 @@ var catalog = map[Code]string{
 	"ANUY5001": "error value is not checked",
 	"ANUY8001": "unsafe operation requires an unsafe context",
 	"ANUY8002": "call to an unsafe function requires an unsafe context",
+	"ANUY9001": "identifier collides with a Go reserved word",
 	"ANUY5002": "assume_non_nil on a value already known to be non-null",
 }
 

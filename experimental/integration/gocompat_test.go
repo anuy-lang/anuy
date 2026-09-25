@@ -36,14 +36,14 @@ func TestGoReservedIdentifierBinding(t *testing.T) {
 
 // The field reaches generated Go verbatim (`v.range`); the AST carries the
 // field span - the exact construct is blamed (§6.2.18). `type User struct
-// {\n` is 18 bytes, so the second-line field starts at offset 18.
+// {\n` is 19 bytes, so the second-line field spans offsets 19..28.
 func TestGoReservedIdentifierStructField(t *testing.T) {
 	result, err := AnalyzeSource("type User struct {\nrange int\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	diag := findGoReserved(t, result.Diagnostics)
-	if diag.Span.Start != 18 {
+	if diag.Span.Start != 19 || diag.Span.End != 28 {
 		t.Fatalf("span = %+v, want the exact field span at 2:1", diag.Span)
 	}
 }

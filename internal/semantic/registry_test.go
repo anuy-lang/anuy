@@ -59,6 +59,7 @@ var approvedScheme = []struct {
 	// Story 41 (RFC-007 §8.2): unsafe core.
 	{"UnsafeOperationOutside", "ANUY8001", SeverityError},
 	{"UnsafeCallOutsideContext", "ANUY8002", SeverityError},
+	{"GoReservedIdentifier", "ANUY9001", SeverityError},
 	{"RedundantUnsafeAssertion", "ANUY5002", SeverityWarning},
 	{"UncheckedError", "ANUY5001", SeverityWarning},
 }
@@ -121,8 +122,8 @@ func TestDiagnosticsCarryRegistryCodeAndSeverity(t *testing.T) {
 // RFC-011 §6.2.16 (v3): severity follows the diagnostic class, not the
 // block — the block is the area. Advisory codes outside the lint block
 // 5xxx must be recorded in advisoryExceptions (and in §6.2.16); block
-// 9xxx stays reserved for backend/tooling-consistency diagnostics
-// (story-47: task 3).
+// 9xxx is validity by default since its v8 activation (story-60, Go
+// compatibility, RFC-010 §6.4.13).
 var advisoryExceptions = map[Code]string{
 	"ANUY4002": "RedundantSafeNavigation", // D-4, ADR-0005
 }
@@ -130,7 +131,7 @@ var advisoryExceptions = map[Code]string{
 func TestRegistrySeverityFollowsCodeBlock(t *testing.T) {
 	for category, desc := range registry {
 		block := desc.Code()[len("ANUY")] - '0'
-		if block == 0 || block == 9 {
+		if block == 0 {
 			t.Fatalf("%s uses reserved block %c (RFC-011 §6.2.15)", category, desc.Code()[len("ANUY")])
 		}
 		switch desc.Severity() {
