@@ -38,6 +38,14 @@ type File struct {
 	Source string
 }
 
+// importAnchor is one declared import with its first-occurrence anchor
+// (story 63, RFC-015 §6.15 v5).
+type importAnchor struct {
+	path  string
+	span  parser.Span
+	owner File
+}
+
 // filePlan is one file's classification inside the package lowering:
 // the statements that render into the package declarations and the Run
 // body, in source order.
@@ -82,6 +90,26 @@ func LowerPackage(files []File) (string, error) {
 		if err := l.renderBody(&body, &plans[i]); err != nil {
 			return "", err
 		}
+	}
+	// Import block: sorted, deduplicated union across the files (story
+	// 63, RFC-015 §6.15 v5); the first occurrence in file order carries
+	// the //line anchor.
+	var imports []importAnchor
+	seen := make(map[string]bool)
+	for i := range plans {
+		for _, imp := range plans[i].program.Imports {
+			if seen[imp.Path] {
+				continue
+			}
+			seen[imp.Path] = true
+			imports = append(imports, importAnchor{imp.Path, imp.Span, plans[i].file})
+		}
+	}
+	sort.Slice(imports, func(a, b int) bool { return imports[a].path < imports[b].path })
+	for _, imp := range imports {
+		l.path, l.source = imp.owner.Path, imp.owner.Source
+		l.directive(&decls, imp.span)
+		fmt.Fprintf(&decls, "import %q\n", imp.path)
 	}
 	for i := range plans {
 		if err := l.renderDecls(&decls, &plans[i]); err != nil {
