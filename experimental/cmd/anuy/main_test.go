@@ -742,3 +742,44 @@ func TestPatternRejectedForRunAndEmitGo(t *testing.T) {
 		t.Fatalf("emit-go pattern code = %d, stderr = %q, want explicit pattern rejection", code, stderr)
 	}
 }
+
+// --- Story 67 (§6.5: anuy test) ---
+
+// writeTestPackage writes a package with production and test files.
+func writeTestPackage(t *testing.T, testSource string) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeModule(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "server.anuy"), []byte("package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\nAdd(1, 2)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "server_test.anuy"), []byte(testSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// §6.5.1: anuy test runs the package tests through the go test runtime;
+// §6.5.4: the test declaration is the ordinary Go-compatible form.
+func TestAnuyTestPassing(t *testing.T) {
+	dir := writeTestPackage(t, "package server\nimport \"testing\"\nfunc TestAdd(t *testing.T) {\n}\n")
+	code, stdout, stderr := runCLI([]string{"test", dir})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "ok") {
+		t.Fatalf("stdout misses the go test summary:\n%s", stdout)
+	}
+}
+
+// A failing test fails the command with the go test output.
+func TestAnuyTestFailing(t *testing.T) {
+	dir := writeTestPackage(t, "package server\nimport \"testing\"\nfunc TestBroken(t *testing.T) {\nt.Fatal(\"boom\")\n}\n")
+	code, stdout, _ := runCLI([]string{"test", dir})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (failing test)", code)
+	}
+	if !strings.Contains(stdout, "boom") {
+		t.Fatalf("stdout misses the test failure:\n%s", stdout)
+	}
+}
