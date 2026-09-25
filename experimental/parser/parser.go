@@ -1524,15 +1524,46 @@ func (lp *lineParser) parseMultilineCallArguments(tokens []token, callOpen int, 
 	if perr != nil {
 		return Statement{}, perr
 	}
-	if closeIdx != len(tokens)-1 || !isPunct(tokens[len(tokens)-1], "{") {
+	if !isPunct(tokens[len(tokens)-1], "{") {
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
 	}
-	cl := Closure{Params: params, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
+	cl := Closure{Params: params}
+	// Story 68 (RFC-008 §6.9.10 v4): an optional declared result between
+	// the parameter list and the block opener.
+	resultCount, frameFallible := 0, false
+	if closeIdx != len(tokens)-1 {
+		mid := tokens[closeIdx : len(tokens)-1]
+		if mid[0].kind == tokenPunct && mid[0].text == "(" {
+			list, listClose, listErr := parseResultList(tokens, closeIdx)
+			if listErr != nil {
+				return Statement{}, listErr
+			}
+			if listClose != len(tokens)-1 {
+				return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
+			}
+			last := list[len(list)-1]
+			cl.HasResult, cl.ResultNullable, cl.ResultTypeExpr, cl.ResultList = true, last.Nullable, last, list
+			resultCount = len(list)
+			frameFallible = last.Nullable && last.Name == "error"
+		} else {
+			typeExpr, typeErr := parseType(mid)
+			if typeErr != nil {
+				return Statement{}, typeErr
+			}
+			cl.HasResult, cl.ResultNullable, cl.ResultTypeExpr = true, typeExpr.Nullable, typeExpr
+			resultCount = 1
+			frameFallible = typeExpr.Kind == NamedType && typeExpr.Name == "error" && typeExpr.Nullable
+		}
+	}
+	cl.Span = Span{Start: line.offset, End: line.offset + len(line.text)}
 	lp.pos++
-	// A closure body is a function boundary: loop depth does not carry in.
+	// A closure body is a function boundary: loop depth does not carry in,
+	// and the result-type frame scopes `return expr` (story 08).
 	savedDepth := lp.loopDepth
 	lp.loopDepth = 0
+	lp.funcStack = append(lp.funcStack, returnFrame{hasResult: cl.HasResult, results: resultCount, fallible: frameFallible})
 	body, suffix, closerLine, berr := lp.parseBlockWithSuffix()
+	lp.funcStack = lp.funcStack[:len(lp.funcStack)-1]
 	lp.loopDepth = savedDepth
 	if berr != nil {
 		return Statement{}, berr

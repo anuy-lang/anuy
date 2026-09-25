@@ -15,7 +15,10 @@ func TestClosureLiteralSingleResultParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	call := program.Statements[0]
+	if len(program.Statements) != 1 || len(program.Statements[0].Closure.Body) != 1 {
+		t.Fatalf("program = %+v, want one function with the call in its body", program)
+	}
+	call := program.Statements[0].Closure.Body[0]
 	if call.Kind != Call || len(call.Values) != 1 || call.Values[0].Closure == nil {
 		t.Fatalf("statement = %+v, want a call with a closure argument", call)
 	}
@@ -36,12 +39,12 @@ func TestClosureLiteralResultVarFormParses(t *testing.T) {
 	}
 }
 
-// A result type without a block still rejects - the block opener
-// terminates the type.
-func TestClosureResultRequiresBlock(t *testing.T) {
-	_, err := Parse("package p\nfunc run() {\ngoRegister(func(c Color) int)\n}\n")
+// A non-fallible result list rejects - the slice gate accepts only the
+// `(T, error?)` shape (story 35, RFC-005 §6.2.4).
+func TestClosureNonFallibleListRejects(t *testing.T) {
+	_, err := Parse("package p\nfunc run() {\ngoRegister(func(c Color) (int, bool) {\nreturn 1, true\n})\n}\n")
 	if err == nil {
-		t.Fatal("Parse accepted a result type without a block")
+		t.Fatal("Parse accepted a non-fallible result list")
 	}
 	var perr *Error
 	if !errors.As(err, &perr) || perr.Code != "ANUY1001" {
