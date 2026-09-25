@@ -258,6 +258,81 @@ func TestRunSeparatesProgramArgs(t *testing.T) {
 	}
 }
 
+// --- Story 61 (RFC-010 §6.1.7, §6.4.2 п. 4, §6.4.4; RFC-015 §6.1 v3) ---
+
+// run shapes the declared package into a main program - the shaping
+// targets the actual package line, not a fixed spelling.
+func TestRunWithDeclaredPackage(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nvar x = 1\nx\n")
+	if code, _, stderr := runCLI([]string{"run", path}); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
+
+// §6.4.2 п. 4: build invokes the Go build over the logical mixed package
+// - the sibling .go sharing the declared package compiles together with
+// the generated file.
+func TestBuildMixedPackage(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir)
+	path := filepath.Join(dir, "server.anuy")
+	if err := os.WriteFile(path, []byte("package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\nAdd(1, 2)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(dir, "use.go")
+	if err := os.WriteFile(sibling, []byte("package server\n\n// Use consumes the generated API inside the same package.\nfunc Use() int { return Add(2, 3) }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := runCLI([]string{"build", path}); code != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+}
+
+// The package build sees the whole package: a broken sibling fails the
+// build with the honest Go diagnostic (file-mode v2 could not see it).
+func TestBuildMixedPackageBrokenSibling(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir)
+	path := filepath.Join(dir, "server.anuy")
+	if err := os.WriteFile(path, []byte("package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\nAdd(1, 2)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(dir, "use.go")
+	if err := os.WriteFile(sibling, []byte("package server\n\nfunc Use() int { return Undefined }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := runCLI([]string{"build", path})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (broken sibling), stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stderr, "use.go") {
+		t.Fatalf("stderr misses the sibling diagnostic:\n%s", stderr)
+	}
+}
+
+// §6.4.4: materialization outside the package dir is incompatible with
+// the package-mode build - the -o flag is rejected explicitly.
+func TestBuildRejectsOutputDir(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir)
+	path := filepath.Join(dir, "hello.anuy")
+	if err := os.WriteFile(path, []byte("var x int = 1\nx\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "gen")
+	if err := os.MkdirAll(outDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := runCLI([]string{"build", "-o", outDir, path}); code != 2 {
+		t.Fatalf("code = %d, want 2 (explicit -o rejection)", code)
+	}
+}
+
 // run reports semantic diagnostics with exit 1 before compiling.
 func TestRunDiagnosticsExitOne(t *testing.T) {
 	path := writeTemp(t, "x\n")

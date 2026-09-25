@@ -61,6 +61,19 @@ func TestGoReservedIdentifierClosureParam(t *testing.T) {
 	}
 }
 
+// The package name reaches generated Go verbatim (`package range`) - it
+// is part of the §6.4.13 surface (story 61).
+func TestGoReservedIdentifierPackageName(t *testing.T) {
+	result, err := AnalyzeSource("package range\nvar x int = 1\nx\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	diag := findGoReserved(t, result.Diagnostics)
+	if diag.Span.Start != 0 {
+		t.Fatalf("span = %+v, want the clause span at 1:1", diag.Span)
+	}
+}
+
 // Names that never reach Go verbatim stay clean: `rangeX` is not a
 // keyword, and enum variants are prefixed by the generated-name contract
 // (`Trange`, RFC-009 §6.10).
