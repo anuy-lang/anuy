@@ -436,6 +436,24 @@ func TestBuildDirectoryMergedPackage(t *testing.T) {
 	}
 }
 
+// §6.15 RFC-015 (story 63): imports give programs the stdout channel -
+// run verifies the printed output, not only exit codes (closes F-58-4).
+func TestRunPrintsStdout(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package main\nimport \"fmt\"\nfmt.Println(\"hello from anuy\")\n")
+	code, stdout, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "hello from anuy") {
+		t.Fatalf("stdout misses the program output:\n%q", stdout)
+	}
+}
+
 // run reports semantic diagnostics with exit 1 before compiling.
 func TestRunDiagnosticsExitOne(t *testing.T) {
 	path := writeTemp(t, "x\n")
