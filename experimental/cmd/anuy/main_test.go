@@ -400,10 +400,12 @@ func TestCheckDirectoryDuplicateDecl(t *testing.T) {
 // declarations with //line anchors to their sources and a single Run -
 // two per-file Run bodies would collide in one package. The mixed
 // package (two .anuy + handwritten sibling) compiles as one unit.
+// Cross-file sharing is through declarations: package-level vars are
+// Run-locals of their own file in the experimental layer.
 func TestBuildDirectoryMergedPackage(t *testing.T) {
 	dir := writePackage(t,
 		"package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\n",
-		"package server\nvar total = Add(1, 2)\nfunc Total() int {\nreturn total\n}\n")
+		"package server\nfunc Total() int {\nreturn Add(1, 2)\n}\nTotal()\n")
 	sibling := filepath.Join(dir, "use.go")
 	if err := os.WriteFile(sibling, []byte("package server\n\n// Use consumes the generated API of both files.\nfunc Use() int { return Add(2, Total()) }\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -418,7 +420,10 @@ func TestBuildDirectoryMergedPackage(t *testing.T) {
 		t.Fatalf("merged materialization missing: %v", err)
 	}
 	text := string(merged)
-	if !strings.Contains(text, "//line a.anuy:") || !strings.Contains(text, "//line b.anuy:") {
+	// Directives carry the command-line path spelling (§6.9.3) - the
+	// test passes an absolute directory.
+	if !strings.Contains(text, "//line "+filepath.Join(dir, "a.anuy")+":") ||
+		!strings.Contains(text, "//line "+filepath.Join(dir, "b.anuy")+":") {
 		t.Fatalf("merged file misses the per-file //line anchors:\n%s", text)
 	}
 	if strings.Count(text, "func Run()") != 1 {

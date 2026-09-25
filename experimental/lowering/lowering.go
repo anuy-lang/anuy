@@ -1,6 +1,7 @@
 package lowering
 
 import (
+	"errors"
 	"fmt"
 	"go/token"
 	"sort"
@@ -27,17 +28,99 @@ func Lower(source string) (string, error) {
 // reports diagnostics against the Anuy source. The path spelling is
 // carried verbatim into the generated text (§6.9.3).
 func LowerFile(path, source string) (string, error) {
-	program, err := parser.Parse(source)
-	if err != nil {
-		return "", err
+	return LowerPackage([]File{{Path: path, Source: source}})
+}
+
+// File is one source file of a package lowering (story 62, RFC-015 §6.1
+// v4).
+type File struct {
+	Path   string
+	Source string
+}
+
+// filePlan is one file's classification inside the package lowering:
+// the statements that render into the package declarations and the Run
+// body, in source order.
+type filePlan struct {
+	file    File
+	program parser.Program
+	types   []parser.Statement
+	funcs   []parser.Statement
+	body    []parser.Statement
+}
+
+// LowerPackage lowers one package directory's files into a single
+// generated file (story 62, §6.2.6 RFC-010: physical placement is not a
+// semantic property): all declarations with //line anchors to their own
+// sources and one Run whose body concatenates the files' statements in
+// the given (deterministic) order - per-file Run bodies would collide in
+// one package. The clause is uniform across the files (checked upstream,
+// ANUY9002); the first file's name names the package.
+func LowerPackage(files []File) (string, error) {
+	if len(files) == 0 {
+		return "", errors.New("lowering: no files")
 	}
-	l := &lowerer{path: path, source: source, carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}, funcResults: map[string]*parser.TypeExpr{}, structs: map[string][]parser.StructField{}, typeSpans: map[string]parser.Span{}, hasInvMemo: map[string]bool{}, hasInvWip: map[string]bool{}, seenMemo: map[string]bool{}, seenWip: map[string]bool{}}
-	// Story 16: top-level functions hoist to package-level declarations.
-	// The Run body lowers first, so the tracking maps are populated by the
-	// time the hoisted function bodies are rendered (captures stay
-	// visible); output order stays functions-first.
-	var bodyStatements, funcs, types []parser.Statement
-	for _, statement := range program.Statements {
+	l := &lowerer{carriers: map[string]string{}, nativeNil: map[string]bool{}, interfaces: map[string]bool{}, enums: map[string]int{}, wrappedFns: map[string]bool{}, funcResults: map[string]*parser.TypeExpr{}, structs: map[string][]parser.StructField{}, typeSpans: map[string]parser.Span{}, typeFiles: map[string]File{}, validatorsPlanned: map[string]bool{}, hasInvMemo: map[string]bool{}, hasInvWip: map[string]bool{}, seenMemo: map[string]bool{}, seenWip: map[string]bool{}}
+	plans := make([]filePlan, len(files))
+	for i := range files {
+		program, err := parser.Parse(files[i].Source)
+		if err != nil {
+			return "", err
+		}
+		plans[i] = filePlan{file: files[i], program: program}
+		if err := l.plan(&plans[i]); err != nil {
+			return "", err
+		}
+	}
+	// Rendering fills the buffers first - the import gate reads flags
+	// (taggedUsed/boundaryUsed) that rendering sets, and the Run bodies
+	// lower before the hoisted function bodies so the tracking maps are
+	// populated when the captures render (story 16); the output order
+	// stays functions-first.
+	var decls, funcsBuf, body strings.Builder
+	for i := range plans {
+		if err := l.renderBody(&body, &plans[i]); err != nil {
+			return "", err
+		}
+	}
+	for i := range plans {
+		if err := l.renderDecls(&decls, &plans[i]); err != nil {
+			return "", err
+		}
+	}
+	for _, v := range l.validators {
+		// Synthetic declarations anchor to the owning type (§6.9.8) in
+		// its own file - not to the physical line they occupy.
+		l.path, l.source = v.owner.Path, v.owner.Source
+		l.directive(&decls, v.anchor)
+		decls.WriteString(v.src)
+	}
+	for i := range plans {
+		if err := l.renderFuncs(&funcsBuf, &plans[i]); err != nil {
+			return "", err
+		}
+	}
+	var out strings.Builder
+	out.WriteString("package " + plans[0].program.Package + "\n\n")
+	if l.taggedUsed || l.boundaryUsed {
+		out.WriteString(anuyabiImport)
+	}
+	out.WriteString(decls.String())
+	out.WriteString(funcsBuf.String())
+	out.WriteString("func Run() {\n")
+	out.WriteString(body.String())
+	out.WriteString("}\n")
+	return out.String(), nil
+}
+
+// plan classifies one file's statements and runs the per-package
+// planning passes over them (stories 16/40/42/43/49: hoisting,
+// pre-registration, wrapper and validator planning).
+func (l *lowerer) plan(plan *filePlan) error {
+	l.path = plan.file.Path
+	l.source = plan.file.Source
+	var funcs, types []parser.Statement
+	for _, statement := range plan.program.Statements {
 		switch statement.Kind {
 		case parser.Function:
 			funcs = append(funcs, statement)
@@ -49,26 +132,30 @@ func LowerFile(path, source string) (string, error) {
 				// consults them regardless of the render order.
 				l.interfaces[statement.Interface.Name] = true
 				l.typeSpans[statement.Interface.Name] = statement.Span
+				l.typeFiles[statement.Interface.Name] = plan.file
 			}
 			if statement.Enum != nil {
 				// Story 42 (RFC-009 §6.8.6): the variant count pins the
 				// contiguous discriminant range of the boundary check.
 				l.enums[statement.Enum.Name] = len(statement.Enum.Variants)
 				l.typeSpans[statement.Enum.Name] = statement.Span
+				l.typeFiles[statement.Enum.Name] = plan.file
 			}
 			if statement.Struct != nil {
 				// Story 43 (RFC-009 §6.8.16): the declared fields are the
 				// type-graph input of the aggregate boundary analysis.
 				l.structs[statement.Struct.Name] = statement.Struct.Fields
 				l.typeSpans[statement.Struct.Name] = statement.Span
+				l.typeFiles[statement.Struct.Name] = plan.file
 			}
 		case parser.Impl:
 			// Story 39 (RFC-004 §6.8.2): impl is semantic metadata -
 			// after checking it erases from the generated Go.
 		default:
-			bodyStatements = append(bodyStatements, statement)
+			plan.body = append(plan.body, statement)
 		}
 	}
+	plan.types, plan.funcs = types, funcs
 	// Story 42 (RFC-009 §6.8): plan the boundary wrappers before any body
 	// renders - direct calls retarget to the native entry (§6.8.14)
 	// regardless of declaration order.
@@ -80,7 +167,7 @@ func LowerFile(path, source string) (string, error) {
 		}
 		checks, _, err := l.boundaryChecks(&statement)
 		if err != nil {
-			return "", err
+			return err
 		}
 		if len(checks) > 0 {
 			l.wrappedFns[name] = true
@@ -106,48 +193,50 @@ func LowerFile(path, source string) (string, error) {
 	// Story 43 (RFC-009 §6.8.16): plan the per-type validators from the
 	// exported signatures - before any body renders, so wrapper and
 	// validator emission share one settled analysis.
-	if err := l.planValidators(funcs); err != nil {
-		return "", err
+	return l.planValidators(funcs)
+}
+
+// renderDecls renders the file's type declarations with its //line
+// anchors.
+func (l *lowerer) renderDecls(out *strings.Builder, plan *filePlan) error {
+	l.path, l.source = plan.file.Path, plan.file.Source
+	for i := range plan.types {
+		l.directive(out, plan.types[i].Span)
+		if err := l.typeDecl(out, &plan.types[i]); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+// renderFuncs renders the file's functions with its //line anchors: one
+// directive per declaration - the foreign-entry wrapper (story 42) and
+// the `__anuy_` native entry share the owner's anchor.
+func (l *lowerer) renderFuncs(out *strings.Builder, plan *filePlan) error {
+	l.path, l.source = plan.file.Path, plan.file.Source
+	for i := range plan.funcs {
+		l.directive(out, plan.funcs[i].Span)
+		if err := l.function(out, &plan.funcs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// renderBody renders the file's Run-body statements with its //line
+// anchors.
+func (l *lowerer) renderBody(out *strings.Builder, plan *filePlan) error {
+	l.path, l.source = plan.file.Path, plan.file.Source
 	var body strings.Builder
-	last, err := l.statements(&body, bodyStatements)
+	last, err := l.statements(&body, plan.body)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if last != "" && !strings.Contains(body.String(), "_ = ") {
 		fmt.Fprintf(&body, "\t_ = %s\n", last)
 	}
-	var decls strings.Builder
-	for i := range types {
-		l.directive(&decls, types[i].Span)
-		if err := l.typeDecl(&decls, &types[i]); err != nil {
-			return "", err
-		}
-	}
-	for _, v := range l.validators {
-		// Synthetic declarations anchor to the owning type (§6.9.8), not
-		// to the physical line they occupy.
-		l.directive(&decls, v.anchor)
-		decls.WriteString(v.src)
-	}
-	for i := range funcs {
-		// One directive per declaration: the foreign-entry wrapper (story
-		// 42) and the `__anuy_` native entry share the owner's anchor.
-		l.directive(&decls, funcs[i].Span)
-		if err := l.function(&decls, &funcs[i]); err != nil {
-			return "", err
-		}
-	}
-	var out strings.Builder
-	out.WriteString("package " + program.Package + "\n\n")
-	if l.taggedUsed || l.boundaryUsed {
-		out.WriteString(anuyabiImport)
-	}
-	out.WriteString(decls.String())
-	out.WriteString("func Run() {\n")
 	out.WriteString(body.String())
-	out.WriteString("}\n")
-	return out.String(), nil
+	return nil
 }
 
 // lowerer carries the per-program state of one lowering run: the names
@@ -162,8 +251,10 @@ type lowerer struct {
 	path   string
 	source string
 	// typeSpans maps a declared type name to its declaration span - the
-	// anchor of the synthetic validators derived from that type (§6.9.8).
+	// anchor of the synthetic validators derived from that type (§6.9.8);
+	// typeFiles carries the owning file of that anchor (story 62).
 	typeSpans  map[string]parser.Span
+	typeFiles  map[string]File
 	carriers   map[string]string
 	nativeNil  map[string]bool
 	interfaces map[string]bool
@@ -185,8 +276,11 @@ type lowerer struct {
 	seenWip  map[string]bool
 	// validators holds the emitted per-type validator sources (§6.8.16),
 	// lazily planned and deterministically sorted (§13 rule 76), with the
-	// owning type's span as the //line anchor (story 59, §6.9.8).
-	validators []anchored
+	// owning type's span as the //line anchor (story 59, §6.9.8);
+	// validatorsPlanned guards against per-file planning re-appending a
+	// shared type's validator (story 62).
+	validators        []anchored
+	validatorsPlanned map[string]bool
 	// wrappedFns holds the exported top-level functions that receive a
 	// foreign-entry wrapper (story 42, RFC-009 §6.8): direct generated
 	// calls to them retarget to the `__anuy_` native entry (§6.8.14).
@@ -226,6 +320,9 @@ type lowerer struct {
 type anchored struct {
 	src    string
 	anchor parser.Span
+	// owner is the file of the type the synthetic declaration derives
+	// from - the //line anchor source (story 62).
+	owner File
 }
 
 // directive anchors the next generated line to the construct's source
@@ -1538,11 +1635,15 @@ func (l *lowerer) planValidators(funcs []parser.Statement) error {
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if l.validatorsPlanned[name] {
+			continue
+		}
+		l.validatorsPlanned[name] = true
 		src, err := l.validatorSource(name)
 		if err != nil {
 			return err
 		}
-		l.validators = append(l.validators, anchored{src: src, anchor: l.typeSpans[name]})
+		l.validators = append(l.validators, anchored{src: src, anchor: l.typeSpans[name], owner: l.typeFiles[name]})
 	}
 	return nil
 }

@@ -194,14 +194,21 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// runCheckDir implements `anuy check <dir>` (story 62, §6.4.1): the
-// directory's .anuy files are one package (§6.1.5 RFC-010). Diagnostics
-// carry the source file (§6.12.19).
-func runCheckDir(dir string, jsonOut bool, stdout, stderr io.Writer) int {
-	files, failCode, failMsg := readPackage(dir)
+// packageFailure is the classified outcome of the package check stages:
+// a rendered parse diagnostic line (stdout, exitDiag) or a usage/internal
+// message (stderr, exitUsage).
+type packageFailure struct {
+	code int
+	msg  string
+	diag string
+}
+
+// analyzePackage runs the check stages over a package directory (story
+// 62): discovery, parse, clause uniformity, merged analysis.
+func analyzePackage(dir string) ([]integration.SourceFile, integration.Result, *packageFailure) {
+	files, code, msg := readPackage(dir)
 	if files == nil {
-		fmt.Fprintln(stderr, "anuy check:", failMsg)
-		return failCode
+		return nil, integration.Result{}, &packageFailure{code: code, msg: msg}
 	}
 	result, err := integration.AnalyzeFiles(files)
 	if err != nil {
@@ -214,12 +221,26 @@ func runCheckDir(dir string, jsonOut bool, stdout, stderr io.Writer) int {
 				}
 			}
 			line, col := lineCol(source, fe.Err.Offset)
-			fmt.Fprintf(stdout, "%s:%d:%d: %s[%s]: %s\n", fe.Path, line, col,
-				strings.ToLower(string(fe.Err.Severity)), fe.Err.Code, fe.Err.Message)
-			return exitDiag
+			return files, result, &packageFailure{code: exitDiag, diag: fmt.Sprintf("%s:%d:%d: %s[%s]: %s", fe.Path, line, col,
+				strings.ToLower(string(fe.Err.Severity)), fe.Err.Code, fe.Err.Message)}
 		}
-		fmt.Fprintln(stderr, "anuy check:", err)
-		return exitUsage
+		return files, result, &packageFailure{code: exitUsage, msg: err.Error()}
+	}
+	return files, result, nil
+}
+
+// runCheckDir implements `anuy check <dir>` (story 62, §6.4.1): the
+// directory's .anuy files are one package (§6.1.5 RFC-010). Diagnostics
+// carry the source file (§6.12.19).
+func runCheckDir(dir string, jsonOut bool, stdout, stderr io.Writer) int {
+	files, result, failure := analyzePackage(dir)
+	if failure != nil {
+		if failure.diag != "" {
+			fmt.Fprintln(stdout, failure.diag)
+		} else {
+			fmt.Fprintln(stderr, "anuy check:", failure.msg)
+		}
+		return failure.code
 	}
 
 	if jsonOut {
@@ -298,6 +319,9 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	path := fs.Arg(0)
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return runBuildDir(path, stdout, stderr)
+	}
 	out := checkStages(path)
 	if code, handled := out.stageFailure(path, stdout, stderr); handled {
 		return code
@@ -358,6 +382,69 @@ func inModule(dir string) bool {
 		}
 		dir = parent
 	}
+}
+
+// runBuildDir implements `anuy build <dir>` (story 62, §6.4.1): the
+// package checks as one unit and materializes ONE merged generated file
+// (<package>.anuy.go, §6.2.6 RFC-010) before the §6.4.2 package-mode Go
+// build.
+func runBuildDir(dir string, stdout, stderr io.Writer) int {
+	files, result, failure := analyzePackage(dir)
+	if failure != nil {
+		if failure.diag != "" {
+			fmt.Fprintln(stdout, failure.diag)
+		} else {
+			fmt.Fprintln(stderr, "anuy build:", failure.msg)
+		}
+		return failure.code
+	}
+	if hasErrorSeverity(result.Diagnostics) {
+		// Semantic errors: report instead of materializing.
+		printPackageDiagnostics(stdout, files, result.Diagnostics)
+		return exitDiag
+	}
+
+	// Environment pre-check happens before materialization (§6.12.2).
+	if _, err := exec.LookPath("go"); err != nil {
+		fmt.Fprintln(stderr, "anuy build: the Go toolchain is required:", err)
+		return exitUsage
+	}
+	if !inModule(dir) {
+		fmt.Fprintln(stderr, "anuy build: no go.mod found above", dir, "- anuy build runs inside a Go module (go mod init)")
+		return exitUsage
+	}
+
+	lowerFiles := make([]lowering.File, len(files))
+	for i, f := range files {
+		lowerFiles[i] = lowering.File{Path: f.Path, Source: f.Source}
+	}
+	generated, err := lowering.LowerPackage(lowerFiles)
+	if err != nil {
+		// A soundness-boundary reject is a user-facing check failure.
+		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
+		return exitDiag
+	}
+	name := strings.TrimSuffix(generated[:strings.IndexByte(generated, '\n')], "\n")
+	name = strings.TrimPrefix(name, "package ")
+	target := filepath.Join(dir, name+".anuy.go")
+	if err := os.WriteFile(target, []byte(generated), 0o644); err != nil {
+		fmt.Fprintln(stderr, "anuy build:", err)
+		return exitUsage
+	}
+
+	cmd := exec.Command("go", "build", ".")
+	cmd.Dir = dir
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if ok := asExitError(err, &exitErr); ok {
+			return exitDiag
+		}
+		fmt.Fprintln(stderr, "anuy build:", err)
+		return exitUsage
+	}
+	return exitOK
 }
 
 // runEmitGo implements `anuy emit-go` (§6.4.11–6.4.12): materialize the
