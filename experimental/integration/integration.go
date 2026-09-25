@@ -48,12 +48,13 @@ type FileError struct {
 
 func (e *FileError) Error() string { return e.Path + ": " + e.Err.Error() }
 
-// AnalyzeFiles analyzes a package directory's files (story 62, RFC-015
-// §6.1 v4). The clause must be uniform across the files (ANUY9002,
-// including the transitional `fixture` default); this slice analyzes
-// each file in its own namespace - the merged package namespace lands
-// with the cross-file resolution work. Diagnostics carry the source
-// file (§6.12.19).
+// AnalyzeFiles analyzes a package directory's files as one package
+// namespace (story 62, RFC-015 §6.1 v4): cross-file references resolve
+// without imports and duplicate declarations reject (§6.10.2 RFC-010 -
+// declaration order is not observable, so interfaces pre-register
+// package-wide before the merged emit). The clause must be uniform
+// across the files (ANUY9002, including the transitional `fixture`
+// default). Diagnostics carry the source file (§6.12.19).
 func AnalyzeFiles(files []SourceFile) (Result, error) {
 	programs := make([]parser.Program, len(files))
 	for i, f := range files {
@@ -84,14 +85,53 @@ func AnalyzeFiles(files []SourceFile) (Result, error) {
 	if len(result.Diagnostics) > 0 {
 		return result, nil
 	}
-	for i, f := range files {
-		fileResult, err := analyzeSourceFile(f.Path, f.Source, programs[i])
-		if err != nil {
-			return Result{}, err
+	// One package namespace: a single scope across the files. Interfaces
+	// pre-register package-wide first - a cross-file `impl` must see its
+	// interface regardless of file order (§6.10.2); the merged emit then
+	// skips the top-level interface statements.
+	b := newBuilder()
+	pkg := semantic.NewScope()
+	for i := range files {
+		b.file = files[i].Path
+		for j := range programs[i].Statements {
+			if st := &programs[i].Statements[j]; st.Kind == parser.Interface {
+				b.registerInterface(st.Interface)
+			}
 		}
-		result.Diagnostics = append(result.Diagnostics, fileResult.Diagnostics...)
+	}
+	for i := range files {
+		b.file = files[i].Path
+		b.emit(withoutInterfaces(programs[i].Statements), pkg)
+	}
+	result.Diagnostics = append(result.Diagnostics, b.diagnostics...)
+	result.Diagnostics = append(result.Diagnostics, b.analyze().Diagnostics...)
+	result.Diagnostics = append(result.Diagnostics, b.uncheckedErrors()...)
+	for i, f := range files {
+		result.Diagnostics = append(result.Diagnostics, goCompatDiagnostics(f.Path, programs[i])...)
 	}
 	return result, nil
+}
+
+// withoutInterfaces returns the top-level statements minus interface
+// declarations (story 62: package-wide pre-registration replaces the
+// per-file registration inside the merged emit).
+func withoutInterfaces(statements []parser.Statement) []parser.Statement {
+	count := 0
+	for i := range statements {
+		if statements[i].Kind == parser.Interface {
+			count++
+		}
+	}
+	if count == 0 {
+		return statements
+	}
+	out := make([]parser.Statement, 0, len(statements)-count)
+	for i := range statements {
+		if statements[i].Kind != parser.Interface {
+			out = append(out, statements[i])
+		}
+	}
+	return out
 }
 
 // analyzeSourceFile runs the check stages over one parsed file. An empty
