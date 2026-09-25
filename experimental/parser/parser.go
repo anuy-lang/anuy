@@ -1944,7 +1944,18 @@ func (p *typeParser) parseOperand() (*TypeExpr, *Error) {
 		return &TypeExpr{Kind: MapType, Key: key, Value: value, Span: Span{Start: t.start, End: value.Span.End}}, nil
 	case t.kind == tokenIdent:
 		p.pos++
-		return &TypeExpr{Kind: NamedType, Name: t.text, Span: Span{Start: t.start, End: t.end}}, nil
+		name := t.text
+		// Story 67 (RFC-015 §6.15 v6): a qualified type name `pkg.Type`
+		// lowers verbatim - the qualifier resolves to the file's import
+		// (pass-through, §6.4.9 RFC-010).
+		for p.take(".") {
+			if p.pos >= len(p.tokens) || p.tokens[p.pos].kind != tokenIdent {
+				return nil, p.errorAtCurrent("expected type name after .")
+			}
+			name += "." + p.tokens[p.pos].text
+			p.pos++
+		}
+		return &TypeExpr{Kind: NamedType, Name: name, Span: Span{Start: t.start, End: p.tokens[p.pos-1].end}}, nil
 	case t.kind == tokenPunct && t.text == "*":
 		p.pos++
 		elem, err := p.parseOperand()
