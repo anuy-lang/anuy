@@ -923,3 +923,23 @@ func TestCheckSafeSegmentMethodValueExitOne(t *testing.T) {
 		t.Fatalf("code = %d, stdout = %q", code, stdout)
 	}
 }
+
+// --- Story 73 (RFC-019 §6.7, F-70-3) ---
+
+// A nullable function invoked in a value position rejects like the
+// statement form - the narrowing rule covers every invocation.
+func TestCheckValuePositionGateExitOne(t *testing.T) {
+	path := writeTemp(t, "var cb (func() int)? = nil\nvar x = cb()\nx\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY4011") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// The narrowed invocation stays valid end to end.
+func TestCheckValuePositionNarrowedExitZero(t *testing.T) {
+	path := writeTemp(t, "var cb (func() int)? = nil\nvar x int = 0\nif cb != nil {\nx = cb()\n}\nx\n")
+	if code, _, stderr := runCLI([]string{"check", path}); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
