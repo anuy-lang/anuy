@@ -141,15 +141,20 @@ func TestCheckUsageExitsTwo(t *testing.T) {
 
 // §6.4.8/§6.4.9: lowering validation belongs to check — a soundness
 // boundary reject (seen-map callback param, story 55) is a check
-// failure (exit 1).
+// failure (exit 1). Story 72 pipeline change: kernel Error diagnostics
+// fail the check before lowering runs — a lowering reject must not
+// shadow source-level diagnostics, so this source (whose undefined
+// goCall/use carry ANUY2001) now surfaces the kernel error, and the
+// seen-map reject stays the surface for import-resolved foreign
+// callbacks on kernel-clean sources.
 func TestCheckLoweringRejectExitsOne(t *testing.T) {
 	path := writeTemp(t, "type User struct {\nid int\nlink *User\n}\nfunc run() {\ngoCall(func(u User) {\nuse(u)\n})\n}\n")
 	code, stdout, _ := runCLI([]string{"check", path})
 	if code != 1 {
-		t.Fatalf("code = %d, want 1 (lowering validation failure)", code)
+		t.Fatalf("code = %d, want 1 (diagnostic failure)", code)
 	}
-	if !strings.Contains(stdout, "seen-map wrapper slice") {
-		t.Fatalf("output misses the wrapper reject reason:\n%s", stdout)
+	if !strings.Contains(stdout, "ANUY2001") {
+		t.Fatalf("output misses the kernel error:\n%s", stdout)
 	}
 }
 
@@ -879,6 +884,42 @@ func TestCheckVariadicNonFinalExitOne(t *testing.T) {
 	path := writeTemp(t, "func Bad(values ...int, other int) int {\nreturn 0\n}\n")
 	code, stdout, _ := runCLI([]string{"check", path})
 	if code != 1 {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// --- Story 72 (RFC-019 §6.20-6.21 v5) ---
+
+// A method value runs end to end as a callback: the bound receiver is
+// Go-native, the kernel checks the argument signature.
+func TestRunMethodValueCallback(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\ntype Counter struct {\nn int\n}\nfunc (c Counter) Value() int {\nreturn c.n\n}\nfunc Apply(transform func() int) int {\nreturn transform()\n}\nvar c = Counter{n: 21}\nvar v = Apply(c.Value)\nv\n")
+	code, _, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
+
+// A method value with the wrong shape rejects at the source level.
+func TestCheckMethodValueMismatchExitOne(t *testing.T) {
+	path := writeTemp(t, "type Counter struct {\nn int\n}\nfunc (c Counter) Text(s string) int {\nreturn 1\n}\nfunc Apply(transform func(int) int) int {\nreturn transform(0)\n}\nvar c = Counter{n: 0}\nApply(c.Text)\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY7008") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// A safe-segment method value rejects (§6.20 v5) - safe segments guard
+// calls, they do not form values.
+func TestCheckSafeSegmentMethodValueExitOne(t *testing.T) {
+	path := writeTemp(t, "type Counter struct {\nn int\n}\nfunc (c Counter) Value() int {\nreturn c.n\n}\nfunc Find() Counter? {\nreturn Counter{n: 0}\n}\nvar c Counter? = Find()\nvar f = c?.Value\nf\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY4012") {
 		t.Fatalf("code = %d, stdout = %q", code, stdout)
 	}
 }

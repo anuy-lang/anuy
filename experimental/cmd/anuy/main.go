@@ -125,6 +125,14 @@ func checkStages(path string) checkOutcome {
 		return out
 	}
 	out.result = result
+	out.hasErrorDiag = hasErrorSeverity(result.Diagnostics)
+
+	// Story 72: kernel Error diagnostics fail the check before lowering
+	// runs - a lowering reject must not shadow source-level diagnostics
+	// (the parse-error early return above follows the same principle).
+	if out.hasErrorDiag {
+		return out
+	}
 
 	// Lowering validation belongs to check (§6.4.8/§6.4.9): a
 	// soundness-boundary reject is a user-facing check failure.
@@ -134,7 +142,6 @@ func checkStages(path string) checkOutcome {
 		return out
 	}
 	out.generated = text
-	out.hasErrorDiag = hasErrorSeverity(result.Diagnostics)
 	return out
 }
 
