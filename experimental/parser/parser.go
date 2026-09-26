@@ -19,7 +19,20 @@ const (
 	PointerType
 	SliceType
 	MapType
+	// FuncType is a function type `func(Params) Results` (story 69,
+	// RFC-019 §6.2): legal in every type position; a body never follows -
+	// in an expression position the same spelling with a body is a
+	// function literal (§6.9).
+	FuncType
 )
+
+// FuncParam is one parameter of a function type (RFC-019 §6.2 v2): an
+// optional documentation name plus a structural type. The name never
+// participates in function type identity.
+type FuncParam struct {
+	Name string
+	Type *TypeExpr
+}
 
 // TypeExpr is the restricted structural type grammar used by the experimental
 // parser. Parentheses affect parsing but are not a semantic node.
@@ -29,6 +42,8 @@ type TypeExpr struct {
 	Elem     *TypeExpr
 	Key      *TypeExpr
 	Value    *TypeExpr
+	Params   []FuncParam
+	Results  []*TypeExpr
 	Nullable bool
 	Span     Span
 }
@@ -53,11 +68,16 @@ func formatType(t *TypeExpr, nested bool) string {
 		text = "[]" + formatType(t.Elem, true)
 	case MapType:
 		text = "map[" + formatType(t.Key, true) + "]" + formatType(t.Value, true)
+	case FuncType:
+		text = formatFuncType(t)
 	}
 	if !t.Nullable {
 		return text
 	}
-	if t.Kind == MapType {
+	if t.Kind == MapType || t.Kind == FuncType {
+		// The nullable whole-function spelling parenthesizes (RFC-019
+		// §6.3 v2); a trailing `?` after a single result belongs to the
+		// result, so the type itself needs the explicit wrapper.
 		text = "(" + text + ")?"
 	} else {
 		text += "?"
@@ -66,6 +86,38 @@ func formatType(t *TypeExpr, nested bool) string {
 		return "(" + text + ")"
 	}
 	return text
+}
+
+// formatFuncType renders the canonical spelling of a function type:
+// parameter names are documentation and stay out of the canonical form
+// (RFC-019 §6.2), so two spellings that differ only in names format
+// identically.
+func formatFuncType(t *TypeExpr) string {
+	var b strings.Builder
+	b.WriteString("func(")
+	for i, p := range t.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(formatType(p.Type, true))
+	}
+	b.WriteString(")")
+	switch len(t.Results) {
+	case 0:
+	case 1:
+		b.WriteString(" ")
+		b.WriteString(formatType(t.Results[0], true))
+	default:
+		b.WriteString(" (")
+		for i, r := range t.Results {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(formatType(r, true))
+		}
+		b.WriteString(")")
+	}
+	return b.String()
 }
 
 // NavigationSegment is one ordinary or safe selector in a parsed navigation
@@ -1958,6 +2010,8 @@ func (p *typeParser) parseOperand() (*TypeExpr, *Error) {
 	}
 	t := p.tokens[p.pos]
 	switch {
+	case t.kind == tokenIdent && t.text == "func" && p.peek("("):
+		return p.parseFuncType()
 	case t.kind == tokenIdent && t.text == "map" && p.peek("["):
 		p.pos++
 		p.pos++
@@ -2026,6 +2080,185 @@ func (p *typeParser) take(text string) bool {
 	}
 	p.pos++
 	return true
+}
+
+// parseFuncType parses `func(Params) [Results]` in type position
+// (story 69, RFC-019 §6.2 v2): parameter names are documentation and do
+// not affect type identity; the result is a single type or a
+// parenthesized list without result names. The type slice never carries
+// a body - the type ends where the tokens end.
+func (p *typeParser) parseFuncType() (*TypeExpr, *Error) {
+	start := p.tokens[p.pos].start
+	p.pos += 2 // `func` and the opening parenthesis
+	params, err := p.parseFuncParams()
+	if err != nil {
+		return nil, err
+	}
+	ft := &TypeExpr{Kind: FuncType, Params: params}
+	if p.pos >= len(p.tokens) {
+		ft.Span = Span{Start: start, End: p.tokens[p.pos-1].end}
+		return ft, nil
+	}
+	if t := p.tokens[p.pos]; t.kind == tokenPunct && t.text == "(" {
+		results, rerr := p.parseFuncResultList()
+		if rerr != nil {
+			return nil, rerr
+		}
+		ft.Results = results
+		if p.pos < len(p.tokens) {
+			// §6.3 v2: `?` directly after a result list is ambiguous and
+			// rejects; the whole-function spelling is `(func ...)?`.
+			if p.tokens[p.pos].kind == tokenPunct && p.tokens[p.pos].text == "?" {
+				return nil, p.errorAtCurrent("ambiguous ? after a result list; parenthesize the whole type: (func ...)?")
+			}
+			return nil, p.errorAtCurrent("unexpected token after a function type result list")
+		}
+		ft.Span = Span{Start: start, End: p.tokens[p.pos-1].end}
+		return ft, nil
+	}
+	// A single result type takes the rest of the slice; a trailing `?`
+	// binds to the result (§6.3 v2), so parseType consumes it.
+	result, terr := p.parseType()
+	if terr != nil {
+		return nil, terr
+	}
+	ft.Results = []*TypeExpr{result}
+	ft.Span = Span{Start: start, End: p.tokens[p.pos-1].end}
+	return ft, nil
+}
+
+// parseFuncParams parses the parameter list of a function type: a
+// comma-separated list of `[name] Type` groups. Mixing named and unnamed
+// groups rejects, matching Go; grouped spellings `a, b int` resolve per
+// name group there and stay outside this slice (story 69 non-goal).
+func (p *typeParser) parseFuncParams() ([]FuncParam, *Error) {
+	var params []FuncParam
+	if p.take(")") {
+		return params, nil
+	}
+	namedFirst := false
+	for i := 0; ; i++ {
+		param, err := p.parseFuncParam()
+		if err != nil {
+			return nil, err
+		}
+		if i == 0 {
+			namedFirst = param.Name != ""
+		} else if (param.Name != "") != namedFirst {
+			return nil, p.errorAtCurrent("mixed named and unnamed parameters in a function type")
+		}
+		params = append(params, param)
+		if p.take(",") {
+			continue
+		}
+		if p.take(")") {
+			return params, nil
+		}
+		return nil, p.errorAtCurrent("function type parameter list requires , or )")
+	}
+}
+
+// parseFuncParam parses one `[name] Type` group: a leading identifier
+// that is followed by something type-shaped names the parameter; the
+// identifier alone is an unnamed type (§6.2 - names are documentation).
+func (p *typeParser) parseFuncParam() (FuncParam, *Error) {
+	if p.pos >= len(p.tokens) {
+		return FuncParam{}, p.errorAtCurrent("expected a function type parameter")
+	}
+	t := p.tokens[p.pos]
+	if t.kind == tokenIdent && !reservedWords[t.text] && p.startsParamType(p.pos+1) {
+		p.pos++
+		typ, err := p.parseType()
+		if err != nil {
+			return FuncParam{}, err
+		}
+		return FuncParam{Name: t.text, Type: typ}, nil
+	}
+	typ, err := p.parseType()
+	if err != nil {
+		return FuncParam{}, err
+	}
+	return FuncParam{Type: typ}, nil
+}
+
+// startsParamType reports whether a type can start at index i: inside a
+// parameter list only `,` and `)` may follow a documentation name.
+func (p *typeParser) startsParamType(i int) bool {
+	if i >= len(p.tokens) {
+		return false
+	}
+	t := p.tokens[i]
+	if t.kind == tokenPunct && (t.text == "," || t.text == ")") {
+		return false
+	}
+	return true
+}
+
+// parseFuncResultList parses a parenthesized function type result list
+// (§6.2): types separated by commas, without result names - a named
+// result rejects (the signature-wide named-result rule, RFC-019 §8.1).
+func (p *typeParser) parseFuncResultList() ([]*TypeExpr, *Error) {
+	p.pos++ // the opening parenthesis
+	if p.take(")") {
+		return nil, nil
+	}
+	var results []*TypeExpr
+	for {
+		groupEnd := p.pos
+		depth := 0
+		for groupEnd < len(p.tokens) {
+			t := p.tokens[groupEnd]
+			if t.kind == tokenPunct {
+				if t.text == "(" || t.text == "[" {
+					depth++
+				} else if t.text == ")" || t.text == "]" {
+					if depth == 0 {
+						break
+					}
+					depth--
+				} else if t.text == "," && depth == 0 {
+					break
+				}
+			}
+			groupEnd++
+		}
+		group := p.tokens[p.pos:groupEnd]
+		if namedResultGroup(group) {
+			return nil, newError(UnsupportedSyntax, group[0].start, "function type results take no names")
+		}
+		typ, terr := parseType(group)
+		if terr != nil {
+			return nil, terr
+		}
+		results = append(results, typ)
+		if groupEnd < len(p.tokens) && p.tokens[groupEnd].kind == tokenPunct && p.tokens[groupEnd].text == "," {
+			p.pos = groupEnd + 1
+			continue
+		}
+		if groupEnd < len(p.tokens) && p.tokens[groupEnd].kind == tokenPunct && p.tokens[groupEnd].text == ")" {
+			p.pos = groupEnd + 1
+			return results, nil
+		}
+		return nil, p.errorAtCurrent("function type result list requires , or )")
+	}
+}
+
+// namedResultGroup reports whether a result-list group spells a named
+// result (`v int`): a plain identifier that is neither a composite type
+// keyword nor reserved, followed by a type consuming the rest of the
+// group. Composite spellings (`map[string]int`, `func() int`) are types,
+// not names - exactly the resolution Go's parser applies.
+func namedResultGroup(group []token) bool {
+	if len(group) < 2 {
+		return false
+	}
+	first := group[0]
+	if first.kind != tokenIdent || reservedWords[first.text] || first.text == "map" || first.text == "func" {
+		return false
+	}
+	sub := typeParser{tokens: group[1:]}
+	typ, err := sub.parseType()
+	return err == nil && typ != nil && sub.pos == len(sub.tokens)
 }
 
 func (p *typeParser) peek(text string) bool {
