@@ -1008,13 +1008,9 @@ func (l *lowerer) wrapCallback(value parser.Value) (string, error) {
 		if i > 0 {
 			params.WriteString(", ")
 		}
-		typeText := p.Type
-		if p.TypeExpr != nil {
-			text, err := l.goType(p.TypeExpr)
-			if err != nil {
-				return "", err
-			}
-			typeText = text
+		typeText, terr := l.paramTypeText(p)
+		if terr != nil {
+			return "", terr
 		}
 		params.WriteString(p.Name + " " + typeText)
 		names = append(names, p.Name)
@@ -1226,13 +1222,9 @@ func (l *lowerer) funcSignature(statement *parser.Statement, name string, forceR
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		typeText := p.Type
-		if p.TypeExpr != nil {
-			text, err := l.goType(p.TypeExpr)
-			if err != nil {
-				return "", err
-			}
-			typeText = text
+		typeText, terr := l.paramTypeText(p)
+		if terr != nil {
+			return "", terr
 		}
 		b.WriteString(p.Name + " " + typeText)
 	}
@@ -1905,13 +1897,9 @@ func (l *lowerer) interfaceDecl(decls *strings.Builder, statement *parser.Statem
 	for _, method := range decl.Methods {
 		parts := make([]string, 0, len(method.Params))
 		for _, p := range method.Params {
-			typeText := p.Type
-			if p.TypeExpr != nil {
-				text, err := l.goType(p.TypeExpr)
-				if err != nil {
-					return err
-				}
-				typeText = text
+			typeText, terr := l.paramTypeText(p)
+			if terr != nil {
+				return terr
 			}
 			parts = append(parts, p.Name+" "+typeText)
 		}
@@ -1977,6 +1965,26 @@ func (l *lowerer) enumDecl(decls *strings.Builder, statement *parser.Statement) 
 	b.WriteString(")\n")
 	decls.WriteString(b.String() + "\n")
 	return nil
+}
+
+// paramTypeText renders one parameter's Go type (story 71, §6.14): the
+// ellipsis belongs to the parameter spelling, so a variadic prefixes the
+// element type - `values ...int`, not `values []int`.
+func (l *lowerer) paramTypeText(p parser.Param) (string, error) {
+	if p.TypeExpr != nil {
+		text, err := l.goType(p.TypeExpr)
+		if err != nil {
+			return "", err
+		}
+		if p.Variadic {
+			return "..." + text, nil
+		}
+		return text, nil
+	}
+	if p.Variadic {
+		return "..." + p.Type, nil
+	}
+	return p.Type, nil
 }
 
 // goType renders the canonical Go representation of a restricted type
@@ -2216,13 +2224,9 @@ func (l *lowerer) value(value parser.Value) (string, error) {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		typeText := p.Type
-		if p.TypeExpr != nil {
-			text, err := l.goType(p.TypeExpr)
-			if err != nil {
-				return "", err
-			}
-			typeText = text
+		typeText, terr := l.paramTypeText(p)
+		if terr != nil {
+			return "", terr
 		}
 		b.WriteString(p.Name + " " + typeText)
 	}

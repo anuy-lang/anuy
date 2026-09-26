@@ -846,3 +846,39 @@ func TestCheckNullableFunctionCallNarrowedExitZero(t *testing.T) {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
 	}
 }
+
+// --- Story 71 (RFC-019 §6.14 v4) ---
+
+// Variadic functions run end to end: individual arguments and the spread
+// form both reach the native Go variadic.
+func TestRunVariadicSum(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nfunc Sum(values ...int) int {\nvar total = 0\nfor v in values {\ntotal = total + v\n}\nreturn total\n}\nfunc Make() []int {\nreturn nil\n}\nvar a = Sum(1, 2)\nvar b = Sum(a, 3)\nvar c = Sum(b)\nvar d = Sum(Make()...)\nvar total = c + d\ntotal\n")
+	code, _, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
+
+// The variadic function type is distinct from the slice spelling: a
+// closure with the wrong shape rejects at the source level.
+func TestCheckVariadicIdentityExitOne(t *testing.T) {
+	path := writeTemp(t, "var cb func(...int) int = func(v []int) int {\nreturn 1\n}\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY7008") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// A non-final variadic parameter is a grammar reject.
+func TestCheckVariadicNonFinalExitOne(t *testing.T) {
+	path := writeTemp(t, "func Bad(values ...int, other int) int {\nreturn 0\n}\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
