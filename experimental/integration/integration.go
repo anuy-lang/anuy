@@ -411,6 +411,10 @@ type builder struct {
 	// funcVariadic records, per function name, that the final parameter is
 	// the §6.14 variadic - per-argument checks fan out over its element.
 	funcVariadic map[string]bool
+	// methodSigs carries the canonical signature of a declared method
+	// minus its receiver (story 72, RFC-019 §6.20-6.21): the method value
+	// renders it as-is, the method expression prepends the receiver.
+	methodSigs map[string]methodSignature
 	// interfaces carries the declared interface table (story 39, RFC-004
 	// §6.1.1): name -> ordered method signatures.
 	interfaces map[string]*ifaceInfo
@@ -453,6 +457,7 @@ func newBuilder() *builder {
 		funcSigs:       map[semantic.BindingID]string{},
 		funcParamTypes: map[string][]*parser.TypeExpr{},
 		funcVariadic:   map[string]bool{},
+		methodSigs:     map[string]methodSignature{},
 		structs:        map[string]*structInfo{},
 		enums:          map[string][]string{},
 		bindingTypes:   map[semantic.BindingID]string{},
@@ -827,10 +832,77 @@ func (b *builder) checkFuncTypeAssign(target semantic.BindingID, value *parser.V
 	}
 }
 
+// navigationFuncSignature renders the canonical signature of a method
+// value `x.M` or a method expression `T.M` / `(*T).M` (story 72,
+// RFC-019 §6.20-6.21): the value drops the receiver, the expression
+// prepends it. Anything that is not a single resolved method selector
+// renders empty - tolerance, not identity.
+func (b *builder) navigationFuncSignature(nav *parser.NavigationExpr, scope *semantic.Scope) string {
+	if nav == nil || len(nav.Segments) != 1 || nav.Segments[0].Call || nav.Segments[0].Safe {
+		return ""
+	}
+	name := nav.Segments[0].Name
+	if strings.HasPrefix(nav.Receiver, "(*") && strings.HasSuffix(nav.Receiver, ")") {
+		return b.methodExpressionSignature(nav.Receiver[2:len(nav.Receiver)-1], name, true)
+	}
+	if id := scope.Resolve(nav.Receiver); id != 0 {
+		return b.methodValueSignature(b.bindingTypes[id], name)
+	}
+	if b.declaredTypeName(nav.Receiver) {
+		return b.methodExpressionSignature(nav.Receiver, name, false)
+	}
+	return ""
+}
+
+// methodValueSignature renders the bound-receiver signature of a method
+// value over typeName; promoted methods resolve through the
+// single-suffix scan (the story 29 promotion shape), ambiguous or
+// unknown selectors render empty.
+func (b *builder) methodValueSignature(typeName, name string) string {
+	if typeName == "" {
+		return ""
+	}
+	if sig, ok := b.methodSigs[methodKey(typeName, name)]; ok {
+		return sig.value()
+	}
+	var match methodSignature
+	count := 0
+	for key, sig := range b.methodSigs {
+		if strings.HasSuffix(key, "."+name) {
+			count++
+			match = sig
+		}
+	}
+	if count == 1 {
+		return match.value()
+	}
+	return ""
+}
+
+// methodExpressionSignature renders the receiver-first signature of a
+// method expression over typeName.
+func (b *builder) methodExpressionSignature(typeName, name string, pointerHead bool) string {
+	sig, ok := b.methodSigs[methodKey(typeName, name)]
+	if !ok {
+		return ""
+	}
+	return sig.expression(pointerHead)
+}
+
+// declaredTypeName reports whether the identifier names a declared
+// struct, enum or interface - the receiver root of a method expression.
+func (b *builder) declaredTypeName(name string) bool {
+	if _, ok := b.enums[name]; ok {
+		return true
+	}
+	return b.structs[name] != nil || b.interfaces[name] != nil
+}
+
 // valueFuncSignature renders the canonical signature of a value known to
 // be a function (story 70, RFC-019 §6.2): a closure literal spells it
 // from its declared parameters and results; a function reference carries
-// it from its declaration. Unknown shapes render empty - tolerance, not
+// it from its declaration; a method value or expression from the method
+// table (story 72). Unknown shapes render empty - tolerance, not
 // identity.
 func (b *builder) valueFuncSignature(value *parser.Value, scope *semantic.Scope) string {
 	if value == nil {
@@ -839,10 +911,33 @@ func (b *builder) valueFuncSignature(value *parser.Value, scope *semantic.Scope)
 	if value.Closure != nil {
 		return closureFuncSignature(value.Closure)
 	}
+	if value.Navigation != nil {
+		return b.navigationFuncSignature(value.Navigation, scope)
+	}
 	if len(value.Idents) == 1 && value.Text == value.Idents[0] {
 		return b.funcSigs[scope.Resolve(value.Idents[0])]
 	}
 	return ""
+}
+
+// checkSafeSegmentMethodValue rejects the §6.20 v5 hole: a safe segment
+// guards a CALL, it does not form a method value - `c?.M` as a value has
+// no non-nil-guarded reading (ANUY4012). Safe field reads keep their
+// conditional-presence machinery.
+func (b *builder) checkSafeSegmentMethodValue(value *parser.Value, scope *semantic.Scope, span parser.Span) {
+	nav := value.Navigation
+	if nav == nil || len(nav.Segments) == 0 {
+		return
+	}
+	last := nav.Segments[len(nav.Segments)-1]
+	if !last.Safe || last.Call {
+		return
+	}
+	if id := scope.Resolve(nav.Receiver); id != 0 {
+		if _, _, ok := b.resolveMethod(last.Name, id); ok {
+			b.report(semantic.SafeSegmentMethodValue, span)
+		}
+	}
 }
 
 // establishAssignments pairs assignment targets with their RHS values by
@@ -863,6 +958,7 @@ func (b *builder) establishAssignments(statement *parser.Statement, scope *seman
 		if id := scope.Resolve(name); id != 0 {
 			b.establish(id, &statement.Values[i], scope, statement.Span)
 			b.checkFuncTypeAssign(id, &statement.Values[i], scope, statement.Span)
+			b.checkSafeSegmentMethodValue(&statement.Values[i], scope, statement.Span)
 		}
 	}
 }
@@ -2607,6 +2703,34 @@ func strictResults(statement *parser.Statement) (bool, []semantic.Nullability) {
 	return fallible, nil
 }
 
+// methodSignature is the canonical signature of a declared method minus
+// its receiver (story 72, RFC-019 §6.20-6.21): the method value renders
+// it as-is, the method expression prepends the receiver type.
+type methodSignature struct {
+	receiver string
+	pointer  bool
+	params   []string
+	results  []string
+}
+
+// value renders the method value's function type: the receiver is bound,
+// the signature is the method's own.
+func (m methodSignature) value() string {
+	return signatureString(m.params, m.results)
+}
+
+// expression renders the method expression's function type: the receiver
+// is the explicit first parameter (§6.21), spelled per the expression's
+// head form - `T.M` takes `T`, `(*T).M` takes `*T`. Method-set precision
+// (a pointer-receiver method is not in T's set) stays with the go-stage.
+func (m methodSignature) expression(pointerHead bool) string {
+	first := m.receiver
+	if pointerHead {
+		first = "*" + first
+	}
+	return signatureString(append([]string{first}, m.params...), m.results)
+}
+
 // signatureString renders the canonical signature of a function shape
 // from ordered parameter and result canonicals (RFC-019 §6.2): parameter
 // names are documentation and never enter the string.
@@ -2656,17 +2780,15 @@ func funcParamCanonical(p parser.FuncParam) string {
 	return p.Type.Canonical()
 }
 
-// closureFuncSignature renders the canonical signature of a closure
-// literal from its declared parameters and results (§6.2); an untyped
-// parameter renders empty - the signature is unknown, not mismatched.
-func closureFuncSignature(cl *parser.Closure) string {
-	if cl == nil {
-		return ""
-	}
+// funcPartsOf collects the canonical parameter and result strings of a
+// declared function or method shape (story 72); ok is false when any
+// parameter lacks a structural type - the signature is unknown, not
+// mismatched.
+func funcPartsOf(cl *parser.Closure) ([]string, []string, bool) {
 	params := make([]string, 0, len(cl.Params))
 	for _, p := range cl.Params {
 		if p.TypeExpr == nil {
-			return ""
+			return nil, nil, false
 		}
 		if p.Variadic {
 			params = append(params, "..."+p.TypeExpr.Canonical())
@@ -2683,6 +2805,20 @@ func closureFuncSignature(cl *parser.Closure) string {
 		} else if cl.ResultTypeExpr != nil {
 			results = append(results, cl.ResultTypeExpr.Canonical())
 		}
+	}
+	return params, results, true
+}
+
+// closureFuncSignature renders the canonical signature of a closure
+// literal from its declared parameters and results (§6.2); an untyped
+// parameter renders empty - the signature is unknown, not mismatched.
+func closureFuncSignature(cl *parser.Closure) string {
+	if cl == nil {
+		return ""
+	}
+	params, results, ok := funcPartsOf(cl)
+	if !ok {
+		return ""
 	}
 	return signatureString(params, results)
 }
@@ -2821,6 +2957,17 @@ func (b *builder) emitMethod(statement *parser.Statement, scope *semantic.Scope)
 		successClasses: successClasses,
 		receiver:       statement.Method,
 		pointer:        statement.MethodPointer,
+	}
+	// Story 72 (RFC-019 §6.20-6.21): the method's canonical signature
+	// minus the receiver - the function type of the method value and, with
+	// the receiver prepended, of the method expression.
+	if params, results, ok := funcPartsOf(statement.Closure); ok {
+		b.methodSigs[key] = methodSignature{
+			receiver: statement.Method,
+			pointer:  statement.MethodPointer,
+			params:   params,
+			results:  results,
+		}
 	}
 	// Registered before the body: a self-recursive call resolves like a
 	// function's self-recursion (story 07 precedent; the mutator set the
