@@ -161,10 +161,13 @@ func TestNullableFuncTypeParamParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	param := program.Statements[0].Closure.Params[0]
-	typ := param.TypeExpr
-	if typ == nil || typ.Kind != FuncType || !typ.Nullable {
-		t.Fatalf("param type = %+v, want a nullable function type", typ)
+	typ := program.Statements[0].TypeExpr
+	if typ == nil || typ.Kind != FuncType || len(typ.Params) != 1 {
+		t.Fatalf("type = %+v, want a function type with one parameter", typ)
+	}
+	inner := typ.Params[0].Type
+	if inner == nil || inner.Kind != FuncType || !inner.Nullable {
+		t.Fatalf("param type = %+v, want a nullable function type", inner)
 	}
 }
 
