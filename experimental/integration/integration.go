@@ -1004,10 +1004,18 @@ func (b *builder) registerEnum(ed *parser.EnumDecl) {
 }
 
 // classOfTypeExpr classifies a restricted type expression (story 22):
-// named types carry their `?`; composite shapes stay Unknown (ADR-0002).
+// named types carry their `?`; composite shapes stay Unknown (ADR-0002) -
+// function fields are the exception, non-null by default and nullable in
+// the whole-function spelling (story 69, RFC-019 §6.3, RFC-002 §6.8.8).
 func classOfTypeExpr(t *parser.TypeExpr) semantic.Nullability {
 	if t == nil {
 		return semantic.NullabilityUnknown
+	}
+	if t.Kind == parser.FuncType {
+		if t.Nullable {
+			return semantic.NullabilityNullable
+		}
+		return semantic.NullabilityNonNull
 	}
 	if t.Kind == parser.NamedType {
 		if t.Nullable {
@@ -1395,6 +1403,18 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 					// RFC-002 §6.2.3) and field paths keep the tolerance -
 					// rootStruct matches the struct table by bare name.
 					b.bindingTypes[id] = "*" + statement.TypeExpr.Elem.Name
+				} else if statement.TypeExpr.Kind == parser.FuncType {
+					// Story 69 (RFC-019 §6.3): a function type is non-null
+					// by default, nullable in the `(func ...)?` spelling -
+					// the native-nil representation (RFC-002 §6.8.8) keeps
+					// the plain `== nil` dispatch, tracked by the lowering
+					// (RFC-009 §6.7.12). Function types have no fields, so
+					// no field-path root is registered.
+					if statement.TypeExpr.Nullable {
+						b.classes[id] = semantic.NullabilityNullable
+					} else {
+						b.classes[id] = semantic.NullabilityNonNull
+					}
 				}
 			} else {
 				b.classes[id] = inferred
@@ -2483,9 +2503,20 @@ func strictResults(statement *parser.Statement) (bool, []semantic.Nullability) {
 
 // nullabilityOfTypeExpr classifies a structural type expression by the G1
 // declared-class rule (story 08): a named type is non-null or nullable by
-// its `?`, every composite spelling stays unknown.
+// its `?`, every composite spelling stays unknown - except function
+// types, which are non-null by default and nullable in the whole-function
+// spelling (story 69, RFC-019 §6.3, RFC-002 §6.8.8).
 func nullabilityOfTypeExpr(t *parser.TypeExpr) semantic.Nullability {
-	if t == nil || t.Kind != parser.NamedType {
+	if t == nil {
+		return semantic.NullabilityUnknown
+	}
+	if t.Kind == parser.FuncType {
+		if t.Nullable {
+			return semantic.NullabilityNullable
+		}
+		return semantic.NullabilityNonNull
+	}
+	if t.Kind != parser.NamedType {
 		return semantic.NullabilityUnknown
 	}
 	if t.Nullable {
@@ -3060,11 +3091,17 @@ func (b *builder) report(category semantic.DiagnosticCategory, span parser.Span)
 
 // nullabilityOfParam classifies a declared parameter type (story 08): a
 // named type is non-null or nullable by its `?`; composite spellings stay
-// unknown - their nullability binding is outside the slice.
+// unknown - their nullability binding is outside the slice. Function
+// types classify like named types (story 69, RFC-019 §6.3).
 func nullabilityOfParam(p parser.Param) semantic.Nullability {
 	if p.TypeExpr != nil {
 		switch p.TypeExpr.Kind {
 		case parser.NamedType:
+			if p.TypeExpr.Nullable {
+				return semantic.NullabilityNullable
+			}
+			return semantic.NullabilityNonNull
+		case parser.FuncType:
 			if p.TypeExpr.Nullable {
 				return semantic.NullabilityNullable
 			}

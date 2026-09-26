@@ -783,3 +783,37 @@ func TestAnuyTestFailing(t *testing.T) {
 		t.Fatalf("stdout misses the test failure:\n%s", stdout)
 	}
 }
+
+// --- Story 69 (RFC-019 §6.2 v2; F-68-4) ---
+
+// A callback-taking closure - the func-typed parameter parses (§6.2 v2),
+// lowers verbatim with its documentation name, and the go type-check
+// stage validates the call through the parameter binding.
+func TestRunFuncTypeCallback(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nvar apply = func(value int, transform func(input int) int) int {\nreturn transform(value)\n}\nvar double = func(v int) int {\nreturn v * 2\n}\nvar total = apply(2, double)\ntotal\n")
+	code, _, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
+
+// A nullable whole-function binding narrows through the ordinary `!= nil`
+// predicate - the native-nil representation keeps the plain comparison
+// (RFC-002 §6.8.8, RFC-009 §6.7.12).
+func TestRunNullableFuncTypeNarrows(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nvar cb (func(int) int)? = nil\nif cb != nil {\ncb(1)\n}\nvar done = 0\ndone\n")
+	code, _, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}

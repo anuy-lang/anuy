@@ -1,0 +1,13 @@
+var cb func(c Color) int
+var hs []func(Event)
+var handler func(string, int) (string, error?)
+var onDone func()
+var nested func(cb func(int) int) func() int
+var nullable (func(int) int)?
+var nullableResult func() int?
+type Server struct {
+	onLoad func(Event)
+}
+func OnRequest(cb func(c Color) int) int {
+	return cb(Color.Red)
+}
