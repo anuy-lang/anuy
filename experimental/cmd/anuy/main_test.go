@@ -943,3 +943,38 @@ func TestCheckValuePositionNarrowedExitZero(t *testing.T) {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
 	}
 }
+
+// --- Story 74 (RFC-019 §6.5 v6) ---
+
+// The §6.5 Split example runs end to end: a plain non-fallible
+// multi-result declares, forwards, and lowers verbatim.
+func TestRunPlainMultiResult(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nfunc Split(v string) (string, string) {\nreturn v, v\n}\nfunc Pair() (string, string) {\nreturn Split(\"ab\")\n}\nvar marker = 0\nmarker\n")
+	code, _, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
+
+// The nullable whole-function result declares with its required
+// parenthesized spelling.
+func TestCheckNullableFuncResultExitZero(t *testing.T) {
+	path := writeTemp(t, "func Make() (func() int)? {\nreturn nil\n}\n")
+	if code, _, stderr := runCLI([]string{"check", path}); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
+
+// The return-count mismatch over a plain multi-result rejects.
+func TestCheckPlainMultiArityExitOne(t *testing.T) {
+	path := writeTemp(t, "func Split(v string) (string, string) {\nreturn v\n}\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY1006") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
