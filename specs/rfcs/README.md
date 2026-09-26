@@ -68,3 +68,4 @@ experimental narrow slice; no RFC is fully implemented yet.
 | 006 | Enums and Exhaustive Matching          | Accepted | 6       | 2026-09-24 |
 | 007 | Unsafe and Foreign Contracts           | Accepted | 4       | 2026-09-24 |
 | 009 | Lowering and Generated Go Contract     | Accepted | 6       | 2026-09-25 |
+| 019 | Functions, Closures and Calls          | Accepted | 7       | 2026-09-27 |
