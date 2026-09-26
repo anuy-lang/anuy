@@ -539,22 +539,56 @@ func runTest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "anuy test:", dir, "has no production .anuy files")
 		return exitUsage
 	}
+	// Story 75 (§6.1.10): test files classify by package clause - the
+	// internal variant continues the package, the external variant is its
+	// own `<pkg>_test` package; anything else is a package mismatch
+	// (ANUY9002).
+	prodPkg, err := packageClause(prodPaths[0])
+	if err != nil {
+		fmt.Fprintln(stderr, "anuy test:", err)
+		return exitUsage
+	}
+	var internalPaths, externalPaths []string
+	for _, p := range testPaths {
+		clause, cerr := packageClause(p)
+		if cerr != nil {
+			fmt.Fprintln(stderr, "anuy test:", cerr)
+			return exitUsage
+		}
+		switch clause {
+		case prodPkg:
+			internalPaths = append(internalPaths, p)
+		case prodPkg + "_test":
+			externalPaths = append(externalPaths, p)
+		default:
+			fmt.Fprintf(stdout, "%s: error[ANUY9002]: package clause %q matches neither the package (%q) nor its external test package (%q)\n", p, clause, prodPkg, prodPkg+"_test")
+			return exitDiag
+		}
+	}
 	prod, err := readSources(prodPaths)
 	if err != nil {
 		fmt.Fprintln(stderr, "anuy test:", err)
 		return exitUsage
 	}
-	tests, err := readSources(testPaths)
+	internal, err := readSources(internalPaths)
 	if err != nil {
 		fmt.Fprintln(stderr, "anuy test:", err)
 		return exitUsage
 	}
-	all := append(append([]integration.SourceFile{}, prod...), tests...)
-	result, err := integration.AnalyzeFiles(all)
+	external, err := readSources(externalPaths)
+	if err != nil {
+		fmt.Fprintln(stderr, "anuy test:", err)
+		return exitUsage
+	}
+	// The variants analyze as the two packages they are (§6.1.10): mixing
+	// them into one analysis would report the legitimate external clause
+	// as a package mismatch.
+	prodInternal := append(append([]integration.SourceFile{}, prod...), internal...)
+	result, err := integration.AnalyzeFiles(prodInternal)
 	if err != nil {
 		var fe *integration.FileError
 		if errors.As(err, &fe) {
-			source := fileSource(all, fe.Path)
+			source := fileSource(prodInternal, fe.Path)
 			line, col := lineCol(source, fe.Err.Offset)
 			fmt.Fprintf(stdout, "%s:%d:%d: %s[%s]: %s\n", fe.Path, line, col,
 				strings.ToLower(string(fe.Err.Severity)), fe.Err.Code, fe.Err.Message)
@@ -563,8 +597,31 @@ func runTest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "anuy test:", err)
 		return exitUsage
 	}
-	if hasErrorSeverity(result.Diagnostics) {
-		printPackageDiagnostics(stdout, all, result.Diagnostics)
+	diagFailed := hasErrorSeverity(result.Diagnostics)
+	externalAnalyzed := false
+	var externalResult integration.Result
+	if len(external) > 0 {
+		externalResult, err = integration.AnalyzeFiles(external)
+		externalAnalyzed = true
+		if err != nil {
+			var fe *integration.FileError
+			if errors.As(err, &fe) {
+				source := fileSource(external, fe.Path)
+				line, col := lineCol(source, fe.Err.Offset)
+				fmt.Fprintf(stdout, "%s:%d:%d: %s[%s]: %s\n", fe.Path, line, col,
+					strings.ToLower(string(fe.Err.Severity)), fe.Err.Code, fe.Err.Message)
+				return exitDiag
+			}
+			fmt.Fprintln(stderr, "anuy test:", err)
+			return exitUsage
+		}
+		diagFailed = diagFailed || hasErrorSeverity(externalResult.Diagnostics)
+	}
+	if diagFailed {
+		printPackageDiagnostics(stdout, prodInternal, result.Diagnostics)
+		if externalAnalyzed {
+			printPackageDiagnostics(stdout, external, externalResult.Diagnostics)
+		}
 		return exitDiag
 	}
 
@@ -573,7 +630,7 @@ func runTest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
 		return exitDiag
 	}
-	testText, err := lowerTestFiles(tests)
+	testText, err := lowerTestFiles(internal)
 	if err != nil {
 		fmt.Fprintf(stdout, "%s: error: %v\n", dir, err)
 		return exitDiag
@@ -588,6 +645,23 @@ func runTest(args []string, stdout, stderr io.Writer) int {
 	if err := os.WriteFile(testTarget, []byte(testText), 0o644); err != nil {
 		fmt.Fprintln(stderr, "anuy test:", err)
 		return exitUsage
+	}
+	externalTarget := ""
+	if len(external) > 0 {
+		// Story 75 (§6.1.10): the external test variant materializes as
+		// its own Go test package next to the parent - `go test` compiles
+		// both variants natively.
+		externalText, extErr := lowerTestFiles(external)
+		if extErr != nil {
+			fmt.Fprintf(stdout, "%s: error: %v\n", dir, extErr)
+			return exitDiag
+		}
+		externalTarget = filepath.Join(dir, pkg+"_external.anuy_test.go")
+		if err := os.WriteFile(externalTarget, []byte(externalText), 0o644); err != nil {
+			fmt.Fprintln(stderr, "anuy test:", err)
+			return exitUsage
+		}
+		defer os.Remove(externalTarget)
 	}
 	defer func() {
 		os.Remove(prodTarget)
@@ -783,6 +857,23 @@ func reportPackageFailure(failure *packageFailure, cmd string, stdout, stderr io
 		fmt.Fprintf(stderr, "anuy %s: %s\n", cmd, failure.msg)
 	}
 	return failure.code
+}
+
+// packageClause reads the file's package clause name (§6.1.1): the first
+// `package <name>` line; empty when the file declares none - the parser
+// default applies.
+func packageClause(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "package ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "package ")), nil
+		}
+	}
+	return "", nil
 }
 
 // lowerPackageFiles lowers one package directory into the merged

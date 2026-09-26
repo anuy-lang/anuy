@@ -978,3 +978,68 @@ func TestCheckPlainMultiArityExitOne(t *testing.T) {
 		t.Fatalf("code = %d, stdout = %q", code, stdout)
 	}
 }
+
+// --- Story 75 (RFC-010 §6.1.10 v6) ---
+
+// writeExternalTestPackage writes a package with production, internal
+// test and external test files (§6.1.10).
+func writeExternalTestPackage(t *testing.T, internalSource, externalSource string) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeModule(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "server.anuy"), []byte("package server\nfunc Add(a int, b int) int {\nreturn a + b\n}\nAdd(1, 2)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "server_test.anuy"), []byte(internalSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "server_ext_test.anuy"), []byte(externalSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// §6.1.10: the external test package `server_test` materializes as its
+// own Go test package; both variants run under one `go test`. The parent
+// API is reached through the ordinary module import (§6.4.9).
+func TestRunExternalTestPackage(t *testing.T) {
+	dir := writeExternalTestPackage(t,
+		"package server\nimport \"testing\"\nfunc TestAddInternal(t *testing.T) {\n}\n",
+		"package server_test\nimport \"testing\"\nimport \"fixture\"\nfunc TestAddExternal(t *testing.T) {\nif server.Add(1, 2) != 3 {\nt.Fatal(\"bad add\")\n}\n}\n")
+	code, stdout, stderr := runCLI([]string{"test", dir})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "ok") {
+		t.Fatalf("stdout misses the go test summary:\n%s", stdout)
+	}
+}
+
+// A failing external test fails the command.
+func TestRunExternalTestFailingExitOne(t *testing.T) {
+	dir := writeExternalTestPackage(t,
+		"package server\nimport \"testing\"\nfunc TestAddInternal(t *testing.T) {\n}\n",
+		"package server_test\nimport \"testing\"\nfunc TestBrokenExternal(t *testing.T) {\nt.Fatal(\"boom external\")\n}\n")
+	code, stdout, _ := runCLI([]string{"test", dir})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (failing external test)", code)
+	}
+	if !strings.Contains(stdout, "boom external") {
+		t.Fatalf("stdout misses the failure:\n%s", stdout)
+	}
+}
+
+// An external test file whose package clause matches neither the package
+// nor its external test package rejects with the package mismatch code.
+func TestRunExternalTestMismatchRejects(t *testing.T) {
+	dir := writeExternalTestPackage(t,
+		"package server\nimport \"testing\"\nfunc TestAddInternal(t *testing.T) {\n}\n",
+		"package other\nimport \"testing\"\nfunc TestStray(t *testing.T) {\n}\n")
+	code, stdout, _ := runCLI([]string{"test", dir})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (package mismatch)", code)
+	}
+	if !strings.Contains(stdout, "ANUY9002") {
+		t.Fatalf("stdout misses ANUY9002:\n%s", stdout)
+	}
+}
