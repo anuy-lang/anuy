@@ -1398,12 +1398,11 @@ func (lp *lineParser) parseReturn(tokens []token, line sourceLine) (Statement, e
 		return Statement{}, verr
 	}
 	if frame.results > 1 {
-		// Story 74 (§6.6): a single call-shaped return forwards the
-		// callee's whole result list - count and types verify downstream
-		// (the go type-check stage, §6.4.8 RFC-010). Non-fallible frames
-		// only: fallible forwarding carries the RFC-005 correlation
-		// rules and stays outside this slice.
-		if len(values) == 1 && !frame.fallible && strings.Contains(values[0].Text, "(") {
+		// Story 74 (§6.6) + story 76 (§6.7.1 RFC-005): a single
+		// call-shaped return forwards the callee's whole result list -
+		// fallible and non-fallible frames alike; the full result
+		// protocol verifies in the kernel and the go type-check stage.
+		if len(values) == 1 && strings.Contains(values[0].Text, "(") {
 			lp.pos++
 			return Statement{
 				Kind:   Return,

@@ -415,6 +415,13 @@ type builder struct {
 	// minus its receiver (story 72, RFC-019 §6.20-6.21): the method value
 	// renders it as-is, the method expression prepends the receiver.
 	methodSigs map[string]methodSignature
+	// enclosingResults carries the declared result types of the function
+	// body being analyzed (story 76, RFC-005 §6.7.1): the forwarding
+	// protocol of a single call-shaped return verifies against it.
+	enclosingResults []*parser.TypeExpr
+	// funcResultExprs carries the declared result type expressions per
+	// function name (story 76): the forwarding protocol check reads them.
+	funcResultExprs map[string][]*parser.TypeExpr
 	// interfaces carries the declared interface table (story 39, RFC-004
 	// §6.1.1): name -> ordered method signatures.
 	interfaces map[string]*ifaceInfo
@@ -433,37 +440,38 @@ type builder struct {
 
 func newBuilder() *builder {
 	return &builder{
-		blocks:         []semantic.Block{{ID: 1}},
-		facts:          []map[semantic.BindingID]bool{{}},
-		nonNil:         []map[semantic.BindingID]bool{{}},
-		pathNN:         []map[string]bool{{}},
-		terminated:     []bool{false},
-		nextBlockID:    1,
-		correlated:     map[semantic.BindingID]semantic.BindingID{},
-		nilable:        map[semantic.BindingID]bool{},
-		classes:        map[semantic.BindingID]semantic.Nullability{},
-		flowNullable:   map[semantic.BindingID]bool{},
-		closureMutates: map[semantic.BindingID][]semantic.BindingID{},
-		declared:       map[semantic.BindingID]bool{},
-		assigned:       map[semantic.BindingID]bool{},
-		errSpans:       map[semantic.BindingID]parser.Span{},
-		errFiles:       map[semantic.BindingID]string{},
-		reads:          map[semantic.BindingID]bool{},
-		pure:           map[semantic.BindingID]bool{},
-		methods:        map[string]methodInfo{},
-		methodMutates:  map[string][]semantic.BindingID{},
-		funcResults:    map[string]declResult{},
-		funcParams:     map[string][]semantic.Nullability{},
-		funcSigs:       map[semantic.BindingID]string{},
-		funcParamTypes: map[string][]*parser.TypeExpr{},
-		funcVariadic:   map[string]bool{},
-		methodSigs:     map[string]methodSignature{},
-		structs:        map[string]*structInfo{},
-		enums:          map[string][]string{},
-		bindingTypes:   map[semantic.BindingID]string{},
-		interfaces:     map[string]*ifaceInfo{},
-		impls:          map[string]map[string]bool{},
-		unsafeFuncs:    map[string]bool{},
+		blocks:          []semantic.Block{{ID: 1}},
+		facts:           []map[semantic.BindingID]bool{{}},
+		nonNil:          []map[semantic.BindingID]bool{{}},
+		pathNN:          []map[string]bool{{}},
+		terminated:      []bool{false},
+		nextBlockID:     1,
+		correlated:      map[semantic.BindingID]semantic.BindingID{},
+		nilable:         map[semantic.BindingID]bool{},
+		classes:         map[semantic.BindingID]semantic.Nullability{},
+		flowNullable:    map[semantic.BindingID]bool{},
+		closureMutates:  map[semantic.BindingID][]semantic.BindingID{},
+		declared:        map[semantic.BindingID]bool{},
+		assigned:        map[semantic.BindingID]bool{},
+		errSpans:        map[semantic.BindingID]parser.Span{},
+		errFiles:        map[semantic.BindingID]string{},
+		reads:           map[semantic.BindingID]bool{},
+		pure:            map[semantic.BindingID]bool{},
+		methods:         map[string]methodInfo{},
+		methodMutates:   map[string][]semantic.BindingID{},
+		funcResults:     map[string]declResult{},
+		funcParams:      map[string][]semantic.Nullability{},
+		funcSigs:        map[semantic.BindingID]string{},
+		funcParamTypes:  map[string][]*parser.TypeExpr{},
+		funcVariadic:    map[string]bool{},
+		methodSigs:      map[string]methodSignature{},
+		funcResultExprs: map[string][]*parser.TypeExpr{},
+		structs:         map[string]*structInfo{},
+		enums:           map[string][]string{},
+		bindingTypes:    map[semantic.BindingID]string{},
+		interfaces:      map[string]*ifaceInfo{},
+		impls:           map[string]map[string]bool{},
+		unsafeFuncs:     map[string]bool{},
 	}
 }
 
@@ -2396,10 +2404,14 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		// the D-3 fan-out resolve function values declared before the
 		// enclosing one inside function bodies as well; bodies register
 		// nothing in them (nested declarations are rejected).
-		funcSigs:       b.funcSigs,
-		funcParamTypes: b.funcParamTypes,
-		funcVariadic:   b.funcVariadic,
-		methodSigs:     b.methodSigs,
+		funcSigs:        b.funcSigs,
+		funcParamTypes:  b.funcParamTypes,
+		funcVariadic:    b.funcVariadic,
+		methodSigs:      b.methodSigs,
+		funcResultExprs: b.funcResultExprs,
+		// Story 76 (RFC-005 §6.7.1): the body's own declared results are
+		// the forwarding protocol target for its returns.
+		enclosingResults: closureResultExprs(cl),
 		// Story 37: the method table is shared too - D-1/D-3 and purity
 		// for method calls inside a function body resolve the methods
 		// declared before the enclosing one (same rationale as
@@ -2747,6 +2759,22 @@ func strictResults(statement *parser.Statement) (bool, []semantic.Nullability) {
 	return fallible, nil
 }
 
+// closureResultExprs normalizes a declared result shape into the ordered
+// result type expressions (story 76): the list form wins, the single
+// form wraps.
+func closureResultExprs(cl *parser.Closure) []*parser.TypeExpr {
+	if cl == nil {
+		return nil
+	}
+	if len(cl.ResultList) > 0 {
+		return cl.ResultList
+	}
+	if cl.ResultTypeExpr != nil {
+		return []*parser.TypeExpr{cl.ResultTypeExpr}
+	}
+	return nil
+}
+
 // methodSignature is the canonical signature of a declared method minus
 // its receiver (story 72, RFC-019 §6.20-6.21): the method value renders
 // it as-is, the method expression prepends the receiver type.
@@ -2931,6 +2959,9 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	// Story 71 (RFC-019 §6.14): a variadic final parameter fans the
 	// per-argument checks out over its element.
 	b.funcVariadic[name] = len(paramTypes) > 0 && statement.Closure.Params[len(statement.Closure.Params)-1].Variadic
+	// Story 76 (RFC-005 §6.7.1): the declared results carry their type
+	// expressions - the forwarding protocol check reads them.
+	b.funcResultExprs[name] = closureResultExprs(statement.Closure)
 	// Story 39 (RFC-004 §6.1.5/§6.1.6): functions and methods live in
 	// separate namespaces - a bare call resolves the function, a receiver
 	// call the per-type method set; the flat Q1-A collision is gone.
@@ -3127,6 +3158,23 @@ func (b *builder) checkStrictReturn(statement *parser.Statement, scope *semantic
 	}
 }
 
+// checkForwardingProtocol verifies §6.7.1 "the full result protocol": the
+// forwarded callee's results must match the enclosing declaration
+// count-for-count and position-for-position (canonical); a mismatch
+// reports ANUY1006 - the result-count precedent (story 36).
+func (b *builder) checkForwardingProtocol(calleeResults []*parser.TypeExpr, span parser.Span) {
+	if len(calleeResults) != len(b.enclosingResults) {
+		b.report(semantic.DiagnosticCategory("ArityMismatch"), span)
+		return
+	}
+	for i, calleeType := range calleeResults {
+		if calleeType.Canonical() != b.enclosingResults[i].Canonical() {
+			b.report(semantic.DiagnosticCategory("ArityMismatch"), span)
+			return
+		}
+	}
+}
+
 // callCalleePrefix extracts the callee prefix (`Load`, `obj.method`) of a
 // raw call value text; empty when the value is not a call shape.
 func callCalleePrefix(text string) string {
@@ -3281,7 +3329,23 @@ func (b *builder) emitReturn(statement *parser.Statement, scope *semantic.Scope)
 	}
 	// Story 35 (RFC-005 §6.4.5/§8.1.7, D-7): a strict fallible success
 	// return must terminate in the literal `nil` error slot.
-	if b.successCount > 0 && !statement.ErrorReturn {
+	// Story 76 (RFC-005 §6.7.1): a single call-shaped return forwards the
+	// callee's whole result - the full result protocol verifies against
+	// the enclosing declaration for declared callees; either way the D-7
+	// literal-nil contract does not apply to a forwarded call (§6.7.1:
+	// "not an error ignore"). Unknown callees stay tolerant - the go
+	// type-check stage verifies (story 64).
+	forwarded := false
+	if !statement.ErrorReturn && len(statement.Values) == 1 && len(b.enclosingResults) > 0 &&
+		strings.Contains(statement.Values[0].Text, "(") {
+		forwarded = true
+		if callee := callCalleePrefix(statement.Values[0].Text); callee != "" && !strings.ContainsAny(callee, ".(") {
+			if resTypes, ok := b.funcResultExprs[callee]; ok {
+				b.checkForwardingProtocol(resTypes, statement.Span)
+			}
+		}
+	}
+	if b.successCount > 0 && !statement.ErrorReturn && !forwarded {
 		b.checkStrictReturn(statement, scope)
 	}
 	if len(statement.Values) > 0 {
