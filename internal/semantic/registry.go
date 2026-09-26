@@ -88,6 +88,7 @@ var (
 	UnavailableSuccessResultDescriptor   = register(UnavailableSuccessResult, "ANUY6005", SeverityError)   // RFC-005 §8.1.4 (D-4)
 	IgnoredErrorDescriptor               = register(IgnoredError, "ANUY6006", SeverityError)               // RFC-005 §8.1.1 (D-1)
 	NilArmOnNonNullEnumDescriptor        = register(NilArmOnNonNullEnum, "ANUY4010", SeverityError)        // RFC-006 §6.5.3
+	NullableFunctionCallDescriptor       = register(NullableFunctionCall, "ANUY4011", SeverityError)       // RFC-019 §6.7/§8.6
 
 	// Interfaces/impl block (7xxx).
 	InterfaceMethodMissingDescriptor     = register(InterfaceMethodMissing, "ANUY7001", SeverityError)     // RFC-004 §6.1.3
@@ -97,6 +98,7 @@ var (
 	UndefinedInterfaceMemberDescriptor   = register(UndefinedInterfaceMember, "ANUY7005", SeverityError)   // RFC-004 §8.1.5 (D-5)
 	MissingExplicitConformanceDescriptor = register(MissingExplicitConformance, "ANUY7006", SeverityError) // RFC-004 §8.1.4 (D-4)
 	InterfaceConflictDescriptor          = register(InterfaceConflict, "ANUY7007", SeverityError)          // RFC-004 §6.3.2
+	FunctionTypeMismatchDescriptor       = register(FunctionTypeMismatch, "ANUY7008", SeverityError)       // RFC-019 §6.16/§8.11
 
 	// Unsafe block (8xxx).
 	UnsafeOperationOutsideDescriptor   = register(UnsafeOperationOutside, "ANUY8001", SeverityError)   // RFC-007 §8.2.1 (D-1)
@@ -139,6 +141,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		DuplicateMatchArmDescriptor,
 		UnknownMatchVariantDescriptor,
 		NilArmOnNonNullEnumDescriptor,
+		NullableFunctionCallDescriptor,
 		PropagationOutsideFallibleDescriptor,
 		InvalidFailureReturnDescriptor,
 		InvalidTryDescriptor,
@@ -152,6 +155,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		UndefinedInterfaceMemberDescriptor,
 		MissingExplicitConformanceDescriptor,
 		InterfaceConflictDescriptor,
+		FunctionTypeMismatchDescriptor,
 		UnsafeOperationOutsideDescriptor,
 		UnsafeCallOutsideContextDescriptor,
 		GoReservedIdentifierDescriptor,
@@ -211,6 +215,7 @@ var catalog = map[Code]string{
 	"ANUY4008": "duplicate switch arm: the variant is already handled",
 	"ANUY4009": "switch case is not a variant of the scrutinee's enum",
 	"ANUY4010": "nil arm on a non-null enum scrutinee is unreachable",
+	"ANUY4011": "nullable function may be nil; narrow it before calling",
 	"ANUY6001": "propagation outside a fallible function",
 	"ANUY6002": "failure return requires a non-null error",
 	"ANUY6003": "try requires a call with a trailing error? result",
@@ -224,6 +229,7 @@ var catalog = map[Code]string{
 	"ANUY7005": "interface does not declare the called method",
 	"ANUY7006": "value cannot be used as the interface without an explicit impl",
 	"ANUY7007": "embedded interfaces declare the same method with different signatures",
+	"ANUY7008": "function value does not match the target signature exactly; Anuy applies no implicit function variance",
 	"ANUY5001": "error value is not checked",
 	"ANUY8001": "unsafe operation requires an unsafe context",
 	"ANUY8002": "call to an unsafe function requires an unsafe context",

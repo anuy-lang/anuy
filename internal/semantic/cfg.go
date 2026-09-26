@@ -124,6 +124,14 @@ const (
 	// NilArmOnNonNullEnum is the RFC-006 §6.5.3 category (story 33): a
 	// `case nil:` arm on a switch over a non-null enum - unreachable.
 	NilArmOnNonNullEnum DiagnosticCategory = "NilArmOnNonNullEnum"
+	// NullableFunctionCall is the RFC-019 §6.7/§8.6 category (story 70):
+	// a nullable function value is invoked without a live non-nil
+	// narrowing fact - the call analogue of UnsafeMemberAccess.
+	NullableFunctionCall DiagnosticCategory = "NullableFunctionCall"
+	// FunctionTypeMismatch is the RFC-019 §6.16/§8.11 category (story
+	// 70): a function value does not carry the exact signature of the
+	// target function type - Anuy applies no implicit function variance.
+	FunctionTypeMismatch DiagnosticCategory = "FunctionTypeMismatch"
 	// PropagationOutsideFallible is the RFC-005 §6.5.4/§6.4.2 category
 	// (story 34): `try` or `return error` outside a fallible function
 	// (working code; the final one belongs to RFC-011).

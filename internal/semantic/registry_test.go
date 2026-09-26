@@ -37,6 +37,8 @@ var approvedScheme = []struct {
 	{"DuplicateMatchArm", "ANUY4008", SeverityError},
 	{"UnknownMatchVariant", "ANUY4009", SeverityError},
 	{"NilArmOnNonNullEnum", "ANUY4010", SeverityError},
+	// Story 70 (RFC-019 §6.7/§8.6): the nullable-call narrowing gate.
+	{"NullableFunctionCall", "ANUY4011", SeverityError},
 	{"PropagationOutsideFallible", "ANUY6001", SeverityError},
 	// Story 35 (RFC-005 §8.1): the strict fallible diagnostics block.
 	{"InvalidFailureReturn", "ANUY6002", SeverityError},
@@ -56,6 +58,8 @@ var approvedScheme = []struct {
 	{"MissingExplicitConformance", "ANUY7006", SeverityError},
 	// Story 53 (RFC-004 §6.3.2): embedded-interface signature conflict.
 	{"InterfaceConflict", "ANUY7007", SeverityError},
+	// Story 70 (RFC-019 §6.16/§8.11): exact function-type assignability.
+	{"FunctionTypeMismatch", "ANUY7008", SeverityError},
 	// Story 41 (RFC-007 §8.2): unsafe core.
 	{"UnsafeOperationOutside", "ANUY8001", SeverityError},
 	{"UnsafeCallOutsideContext", "ANUY8002", SeverityError},
