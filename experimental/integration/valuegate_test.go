@@ -34,7 +34,10 @@ func TestValuePositionReturnGateReports(t *testing.T) {
 }
 
 func TestValuePositionArgumentGateReports(t *testing.T) {
-	result, err := AnalyzeSource("var cb (func() int)? = nil\nfunc Apply(f func() int) int {\nreturn f()\n}\nvar x = Apply(cb())\nx\n")
+	// The statement-call argument is a value position (§6.7). A nested
+	// call inside an initializer (`var x = Apply(cb())`) stays with the
+	// outermost-callee boundary (story 73 non-goal).
+	result, err := AnalyzeSource("var cb (func() int)? = nil\nfunc Apply(f func() int) int {\nreturn f()\n}\nApply(cb())\n")
 	if err != nil {
 		t.Fatal(err)
 	}

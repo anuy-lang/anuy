@@ -940,6 +940,35 @@ func (b *builder) checkSafeSegmentMethodValue(value *parser.Value, scope *semant
 	}
 }
 
+// checkValueCallGate rejects the invocation of a nullable function value
+// in value position (story 73, RFC-019 §6.7, F-70-3): the narrowing rule
+// covers every invocation, not only the statement form (ANUY4011, story
+// 70). Only the outermost callee of a bare call shape is judged - nested
+// callees stay with the raw-Text boundary; dotted callees are the
+// method-call world (the receiver carries the deref gate).
+func (b *builder) checkValueCallGate(value *parser.Value, scope *semantic.Scope, span parser.Span) {
+	if value == nil || value.Closure != nil || value.Navigation != nil || value.Keyed != nil || value.Switch != nil {
+		return
+	}
+	if strings.HasSuffix(value.Text, "...") {
+		return
+	}
+	callee := callCalleePrefix(value.Text)
+	if callee == "" || strings.ContainsAny(callee, ".(") {
+		return
+	}
+	id := scope.Resolve(callee)
+	if id == 0 {
+		return
+	}
+	if _, callable := b.funcSigs[id]; !callable {
+		return
+	}
+	if b.staticallyNullable(id) && !b.isNonNil(id) {
+		b.report(semantic.NullableFunctionCall, span)
+	}
+}
+
 // establishAssignments pairs assignment targets with their RHS values by
 // index and applies §26 (story 08). A name/value count mismatch leaves the
 // extra targets unestablished - the tuple evaluation order is not modeled.
@@ -959,6 +988,7 @@ func (b *builder) establishAssignments(statement *parser.Statement, scope *seman
 			b.establish(id, &statement.Values[i], scope, statement.Span)
 			b.checkFuncTypeAssign(id, &statement.Values[i], scope, statement.Span)
 			b.checkSafeSegmentMethodValue(&statement.Values[i], scope, statement.Span)
+			b.checkValueCallGate(&statement.Values[i], scope, statement.Span)
 		}
 	}
 }
@@ -2359,6 +2389,15 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		bindingTypes: map[semantic.BindingID]string{},
 		funcParams:   b.funcParams,
 		funcResults:  b.funcResults,
+		// Story 73 (RFC-019 §6.7, F-70-3): the func-type maps are shared
+		// too - the nullable-call gate, the ANUY7008 signature checks and
+		// the D-3 fan-out resolve function values declared before the
+		// enclosing one inside function bodies as well; bodies register
+		// nothing in them (nested declarations are rejected).
+		funcSigs:       b.funcSigs,
+		funcParamTypes: b.funcParamTypes,
+		funcVariadic:   b.funcVariadic,
+		methodSigs:     b.methodSigs,
 		// Story 37: the method table is shared too - D-1/D-3 and purity
 		// for method calls inside a function body resolve the methods
 		// declared before the enclosing one (same rationale as
@@ -2591,6 +2630,9 @@ func (b *builder) checkArgumentTypes(statement *parser.Statement, scope *semanti
 		}
 	}
 	for i := range statement.Values {
+		// Story 73 (§6.7, F-70-3): call arguments are value positions -
+		// the nullable-call gate covers them like the statement form.
+		b.checkValueCallGate(&statement.Values[i], scope, statement.Span)
 		pi := i
 		if pi >= len(params) {
 			if !variadicLast {
@@ -3238,6 +3280,12 @@ func (b *builder) emitReturn(statement *parser.Statement, scope *semantic.Scope)
 	}
 	if len(statement.Values) > 0 {
 		b.readIdents(statement, scope)
+		// Story 73 (§6.7, F-70-3): the return operands are value
+		// positions - a nullable function invocation gates like the
+		// statement form.
+		for i := range statement.Values {
+			b.checkValueCallGate(&statement.Values[i], scope, statement.Span)
+		}
 		b.analyzeClosures(statement, scope, nil)
 		b.add(semantic.Return(), statement.Span)
 	}
