@@ -2099,6 +2099,17 @@ func (p *typeParser) parseFuncType() (*TypeExpr, *Error) {
 		ft.Span = Span{Start: start, End: p.tokens[p.pos-1].end}
 		return ft, nil
 	}
+	// No result when the next token cannot start one - an enclosing
+	// parenthesis or the end of the type slice (story 70, F-70-1). A bare
+	// `?` here is the unparenthesized nullable whole-function spelling,
+	// which §6.3 v2 rejects: the whole-function form is `(func ...)?`.
+	if !p.startsTypeAt(p.pos) {
+		if p.tokens[p.pos].kind == tokenPunct && p.tokens[p.pos].text == "?" {
+			return nil, p.errorAtCurrent("nullable whole-function type parenthesizes: (func ...)?")
+		}
+		ft.Span = Span{Start: start, End: p.tokens[p.pos-1].end}
+		return ft, nil
+	}
 	if t := p.tokens[p.pos]; t.kind == tokenPunct && t.text == "(" {
 		results, rerr := p.parseFuncResultList()
 		if rerr != nil {
@@ -2179,6 +2190,19 @@ func (p *typeParser) parseFuncParam() (FuncParam, *Error) {
 		return FuncParam{}, err
 	}
 	return FuncParam{Type: typ}, nil
+}
+
+// startsTypeAt reports whether a type operand can start at index i: an
+// identifier or one of the composite openers (RFC-019 §6.2 v2).
+func (p *typeParser) startsTypeAt(i int) bool {
+	if i >= len(p.tokens) {
+		return false
+	}
+	t := p.tokens[i]
+	if t.kind == tokenIdent {
+		return true
+	}
+	return t.kind == tokenPunct && (t.text == "(" || t.text == "[" || t.text == "*")
 }
 
 // startsParamType reports whether a type can start at index i: inside a
