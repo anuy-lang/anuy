@@ -2899,6 +2899,13 @@ func parseClosureParamGroups(tokens []token, start int, line sourceLine) (int, [
 		if typeStart >= len(g) {
 			return 0, nil, newError(UnsupportedSyntax, g[1].start, "variadic parameter requires an element type")
 		}
+		// Story 77 (§8.15 RFC-019): parameter defaults are not part of the
+		// language - a targeted reject instead of the generic type error.
+		for _, dt := range g[typeStart:] {
+			if dt.kind == tokenPunct && dt.text == "=" {
+				return 0, nil, newError(UnsupportedSyntax, dt.start, "parameter defaults are not supported")
+			}
+		}
 		typeExpr, typeErr := parseType(g[typeStart:])
 		if typeErr != nil {
 			return 0, nil, typeErr
