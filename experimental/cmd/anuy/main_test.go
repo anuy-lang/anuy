@@ -817,3 +817,32 @@ func TestRunNullableFuncTypeNarrows(t *testing.T) {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
 	}
 }
+
+// --- Story 70 (RFC-019 §6.16/§6.7 v3) ---
+
+// Func-type assignability is a source-level check: a closure literal that
+// does not spell the target signature rejects before any lowering.
+func TestCheckFuncTypeMismatchExitOne(t *testing.T) {
+	path := writeTemp(t, "var cb func(int) int = func(s string) int {\nreturn 1\n}\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY7008") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// A nullable function value invoked without narrowing rejects.
+func TestCheckNullableFunctionCallExitOne(t *testing.T) {
+	path := writeTemp(t, "var cb (func() int)? = findHandler()\ncb()\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY4011") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// The narrowed call is valid end to end.
+func TestCheckNullableFunctionCallNarrowedExitZero(t *testing.T) {
+	path := writeTemp(t, "var cb (func(int) int)? = nil\nif cb != nil {\ncb(1)\n}\nvar done = 0\ndone\n")
+	if code, _, stderr := runCLI([]string{"check", path}); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
