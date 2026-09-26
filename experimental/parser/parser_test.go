@@ -1673,13 +1673,14 @@ func TestParseResultList(t *testing.T) {
 }
 
 func TestParseResultListRequiresTrailingError(t *testing.T) {
-	// §6.2.4 slice gate: only the fallible shape parses - non-fallible
-	// lists and unusual shapes `(error?, int)` reject at the parse layer.
-	if _, err := Parse("func F() (A, B) {\nreturn a, b\n}\n"); err == nil {
-		t.Fatal("non-fallible result list accepted")
+	// Story 74 (RFC-019 §6.5 v6): the story 35 slice gate is lifted -
+	// non-fallible and unusual shapes parse; the return arity mismatch
+	// still rejects through the frame counter (ANUY1006).
+	if _, err := Parse("func F() (A, B) {\nreturn a, b\n}\n"); err != nil {
+		t.Fatalf("non-fallible result list rejected: %v", err)
 	}
-	if _, err := Parse("func F() (error?, int) {\nreturn e, 1\n}\n"); err == nil {
-		t.Fatal("unusual result shape accepted")
+	if _, err := Parse("func F() (error?, int) {\nreturn e, 1\n}\n"); err != nil {
+		t.Fatalf("unusual result shape rejected: %v", err)
 	}
 	if _, err := Parse("func F() (Data, error?) {\nreturn d\n}\n"); err == nil {
 		t.Fatal("return arity mismatch accepted")

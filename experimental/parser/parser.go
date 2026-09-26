@@ -1610,13 +1610,26 @@ func (lp *lineParser) parseMultilineCallArguments(tokens []token, callOpen int, 
 			if listErr != nil {
 				return Statement{}, listErr
 			}
+			// Story 74 (§6.5 v6): `(T)?` canonicalization; `?` after a
+			// multi-result list rejects (a list is not a type).
+			if listClose < len(tokens)-1 && isPunct(tokens[listClose], "?") {
+				if len(list) != 1 {
+					return Statement{}, newError(UnsupportedSyntax, tokens[listClose].start, "a result list is not a type; spell per-result nullability inside the list")
+				}
+				list[0].Nullable = true
+				listClose++
+			}
 			if listClose != len(tokens)-1 {
 				return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "closure requires a block")
 			}
 			last := list[len(list)-1]
-			cl.HasResult, cl.ResultNullable, cl.ResultTypeExpr, cl.ResultList = true, last.Nullable, last, list
+			if len(list) > 1 {
+				cl.HasResult, cl.ResultNullable, cl.ResultTypeExpr, cl.ResultList = true, last.Nullable, last, list
+			} else {
+				cl.HasResult, cl.ResultNullable, cl.ResultTypeExpr = true, last.Nullable, list[0]
+			}
 			resultCount = len(list)
-			frameFallible = last.Nullable && last.Name == "error"
+			frameFallible = last.Kind == NamedType && last.Name == "error" && last.Nullable
 		} else {
 			typeExpr, typeErr := parseType(mid)
 			if typeErr != nil {
@@ -2584,12 +2597,29 @@ func (lp *lineParser) parseClosure(tokens []token, start int, line sourceLine, a
 			if listErr != nil {
 				return Closure{}, listErr
 			}
+			// Story 74 (§6.5 v6): `(T)?` makes the single result nullable -
+			// the spelling is required for composite result types; `?`
+			// after a multi-result list rejects (a list is not a type).
+			if closeIdx < len(tokens) && isPunct(tokens[closeIdx], "?") {
+				if len(list) != 1 {
+					return Closure{}, newError(UnsupportedSyntax, tokens[closeIdx].start, "a result list is not a type; spell per-result nullability inside the list")
+				}
+				list[0].Nullable = true
+				closeIdx++
+			}
 			last := list[len(list)-1]
 			hasResult, resultNullable = true, last.Nullable
-			resultTypeExpr = last
-			resultList = list
-			resultCount = len(list)
-			frameFallible = true
+			// §6.5 v6: fallibility stays keyed to the trailing `error?` - a
+			// list without it is an ordinary non-fallible multi-result.
+			frameFallible = last.Kind == NamedType && last.Name == "error" && last.Nullable
+			if len(list) > 1 {
+				resultTypeExpr = last
+				resultList = list
+				resultCount = len(list)
+			} else {
+				resultTypeExpr = list[0]
+				resultCount = 1
+			}
 			i = closeIdx
 		} else {
 			j := i
@@ -2680,9 +2710,9 @@ func parseResultList(tokens []token, open int) ([]*TypeExpr, int, *Error) {
 	if len(cur) > 0 {
 		groups = append(groups, cur)
 	}
-	if len(groups) < 2 {
-		return nil, 0, newError(UnsupportedSyntax, tokens[open].start, "result list requires at least two results in this slice")
-	}
+	// Story 74 (§6.5 v6): one to many results - the fallibility of the
+	// shape is decided by the trailing `error?` at the call site, not by
+	// the list length here.
 	var list []*TypeExpr
 	for _, g := range groups {
 		typeExpr, typeErr := parseType(g)
@@ -2690,10 +2720,6 @@ func parseResultList(tokens []token, open int) ([]*TypeExpr, int, *Error) {
 			return nil, 0, typeErr
 		}
 		list = append(list, typeExpr)
-	}
-	last := list[len(list)-1]
-	if last.Kind != NamedType || last.Name != "error" || !last.Nullable {
-		return nil, 0, newError(UnsupportedSyntax, last.Span.Start, "result list requires a trailing error? in this slice")
 	}
 	return list, closeIdx + 1, nil
 }
