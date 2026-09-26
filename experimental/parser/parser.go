@@ -28,10 +28,11 @@ const (
 
 // FuncParam is one parameter of a function type (RFC-019 §6.2 v2): an
 // optional documentation name plus a structural type. The name never
-// participates in function type identity.
+// participates in function type identity; variadicness does (§6.14).
 type FuncParam struct {
-	Name string
-	Type *TypeExpr
+	Name     string
+	Type     *TypeExpr
+	Variadic bool
 }
 
 // TypeExpr is the restricted structural type grammar used by the experimental
@@ -95,12 +96,7 @@ func formatType(t *TypeExpr, nested bool) string {
 func formatFuncType(t *TypeExpr) string {
 	var b strings.Builder
 	b.WriteString("func(")
-	for i, p := range t.Params {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(formatType(p.Type, true))
-	}
+	formatFuncParams(t, &b)
 	b.WriteString(")")
 	switch len(t.Results) {
 	case 0:
@@ -118,6 +114,21 @@ func formatFuncType(t *TypeExpr) string {
 		b.WriteString(")")
 	}
 	return b.String()
+}
+
+func formatFuncParams(t *TypeExpr, b *strings.Builder) {
+	for i, p := range t.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if p.Variadic {
+			// Variadicness is part of type identity (§6.14): the
+			// canonical form spells the ellipsis, so `func(...int)` and
+			// `func([]int)` format differently.
+			b.WriteString("...")
+		}
+		b.WriteString(formatType(p.Type, true))
+	}
 }
 
 // NavigationSegment is one ordinary or safe selector in a parsed navigation
@@ -350,12 +361,15 @@ type Closure struct {
 	ResultList []*TypeExpr
 }
 
-// Param is a closure parameter. Type preserves source spelling; TypeExpr is
-// its restricted structural representation.
+// Param is a closure parameter. Type preserves source spelling of the
+// element type; TypeExpr is its restricted structural representation.
+// Variadic marks the §6.14 final `name ...T` parameter - the element type
+// is what Type/TypeExpr carry, the ellipsis is the flag.
 type Param struct {
 	Name     string
 	Type     string
 	TypeExpr *TypeExpr
+	Variadic bool
 }
 
 type Statement struct {
@@ -1441,6 +1455,12 @@ func (lp *lineParser) parseCallStatement(tokens []token, line sourceLine) (State
 	if aerr != nil {
 		return Statement{}, aerr
 	}
+	// Story 71 (§6.14/§8.10 semantics): the spread argument ends the list.
+	for i := range args {
+		if strings.HasSuffix(args[i].Text, "...") && i != len(args)-1 {
+			return Statement{}, newError(UnsupportedSyntax, args[i].Span.Start, "spread argument must be the final argument")
+		}
+	}
 	if isPunct(tokens[1], "(") && IntrinsicNames[tokens[0].text] && len(args) != 1 {
 		// Story 41 (RFC-007 §6.6.5): the assertion shape takes exactly
 		// one operand.
@@ -1920,7 +1940,19 @@ func tokenize(line string, base int) ([]token, *Error) {
 				continue
 			}
 			return nil, newError(UnsupportedSyntax, base+i, "force unwrap is not part of the language")
-		case strings.ContainsRune("=,.?()[]*+-{}", rune(c)):
+		case c == '.':
+			// Story 71 (§6.14): the variadic ellipsis is one token
+			// (maximal munch, the Go tokenizer practice); a lone `.` is
+			// the navigation separator, `..` falls through to the grammar
+			// rejects.
+			if strings.HasPrefix(line[i:], "...") {
+				tokens = append(tokens, token{kind: tokenPunct, text: "...", start: base + i, end: base + i + 3})
+				i += 3
+				continue
+			}
+			tokens = append(tokens, token{kind: tokenPunct, text: ".", start: base + i, end: base + i + 1})
+			i++
+		case strings.ContainsRune("=,?()[]*+-{}", rune(c)):
 			if c == '=' && i+1 < len(line) && line[i+1] == '=' {
 				tokens = append(tokens, token{kind: tokenPunct, text: "==", start: base + i, end: base + i + 2})
 				i += 2
@@ -2159,6 +2191,13 @@ func (p *typeParser) parseFuncParams() ([]FuncParam, *Error) {
 			return nil, p.errorAtCurrent("mixed named and unnamed parameters in a function type")
 		}
 		params = append(params, param)
+		if param.Variadic {
+			// §6.14/§8.9 semantics: the variadic parameter ends the list.
+			if !p.take(")") {
+				return nil, p.errorAtCurrent("variadic parameter must be the final parameter")
+			}
+			return params, nil
+		}
 		if p.take(",") {
 			continue
 		}
@@ -2172,6 +2211,8 @@ func (p *typeParser) parseFuncParams() ([]FuncParam, *Error) {
 // parseFuncParam parses one `[name] Type` group: a leading identifier
 // that is followed by something type-shaped names the parameter; the
 // identifier alone is an unnamed type (§6.2 - names are documentation).
+// A leading `...` - bare or after the name - makes the parameter
+// variadic with an element type (§6.14).
 func (p *typeParser) parseFuncParam() (FuncParam, *Error) {
 	if p.pos >= len(p.tokens) {
 		return FuncParam{}, p.errorAtCurrent("expected a function type parameter")
@@ -2179,11 +2220,19 @@ func (p *typeParser) parseFuncParam() (FuncParam, *Error) {
 	t := p.tokens[p.pos]
 	if t.kind == tokenIdent && !reservedWords[t.text] && p.startsParamType(p.pos+1) {
 		p.pos++
+		variadic := p.take("...")
 		typ, err := p.parseType()
 		if err != nil {
 			return FuncParam{}, err
 		}
-		return FuncParam{Name: t.text, Type: typ}, nil
+		return FuncParam{Name: t.text, Type: typ, Variadic: variadic}, nil
+	}
+	if p.take("...") {
+		elem, err := p.parseType()
+		if err != nil {
+			return FuncParam{}, err
+		}
+		return FuncParam{Type: elem, Variadic: true}, nil
 	}
 	typ, err := p.parseType()
 	if err != nil {
@@ -2801,15 +2850,34 @@ func parseClosureParamGroups(tokens []token, start int, line sourceLine) (int, [
 		if len(g) < 2 {
 			return 0, nil, newError(UnsupportedSyntax, g[0].start, "closure parameter requires a type")
 		}
-		typeExpr, typeErr := parseType(g[1:])
+		// Story 71 (§6.14): the final `name ...T` parameter - Type/TypeExpr
+		// carry the element type, the ellipsis is the flag.
+		variadic := false
+		typeStart := 1
+		if g[1].kind == tokenPunct && g[1].text == "..." {
+			variadic = true
+			typeStart = 2
+		}
+		if typeStart >= len(g) {
+			return 0, nil, newError(UnsupportedSyntax, g[1].start, "variadic parameter requires an element type")
+		}
+		typeExpr, typeErr := parseType(g[typeStart:])
 		if typeErr != nil {
 			return 0, nil, typeErr
 		}
 		params = append(params, Param{
 			Name:     g[0].text,
-			Type:     line.raw[g[1].start-line.offset : g[len(g)-1].end-line.offset],
+			Type:     line.raw[g[typeStart].start-line.offset : g[len(g)-1].end-line.offset],
 			TypeExpr: typeExpr,
+			Variadic: variadic,
 		})
+	}
+	// §6.14/§8.9 semantics: the variadic parameter is the final parameter -
+	// at most one, and nothing after it.
+	for j, p := range params {
+		if p.Variadic && j != len(params)-1 {
+			return 0, nil, newError(UnsupportedSyntax, p.TypeExpr.Span.Start, "variadic parameter must be the final parameter")
+		}
 	}
 	return i, params, nil
 }
