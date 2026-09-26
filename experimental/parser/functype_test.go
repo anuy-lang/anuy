@@ -143,6 +143,41 @@ func TestNullableFuncTypeParses(t *testing.T) {
 	}
 }
 
+func TestNullableZeroParamFuncTypeParses(t *testing.T) {
+	// Story 70 (F-70-1): a zero-param function type followed by enclosing
+	// tokens - the result scan must stop where no type can start.
+	program, err := Parse("package p\nvar cb (func())? = nil\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typ := program.Statements[0].TypeExpr
+	if typ == nil || typ.Kind != FuncType || !typ.Nullable || len(typ.Results) != 0 {
+		t.Fatalf("type = %+v, want a nullable result-less function type", typ)
+	}
+}
+
+func TestNullableFuncTypeParamParses(t *testing.T) {
+	program, err := Parse("package p\nvar h func(cb (func())?) int\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	param := program.Statements[0].Closure.Params[0]
+	typ := param.TypeExpr
+	if typ == nil || typ.Kind != FuncType || !typ.Nullable {
+		t.Fatalf("param type = %+v, want a nullable function type", typ)
+	}
+}
+
+func TestUnparenthesizedNullableWholeFuncTypeRejects(t *testing.T) {
+	// §6.3 v2: the nullable whole-function spelling parenthesizes;
+	// `func()?` leaves the `?` without a result to bind to.
+	_, err := Parse("package p\nvar bad func()?\n")
+	var perr *Error
+	if !errors.As(err, &perr) || perr.Code != "ANUY1001" {
+		t.Fatalf("err = %v, want ANUY1001 for the unparenthesized whole-function ?", err)
+	}
+}
+
 func TestNullableResultFuncTypeParses(t *testing.T) {
 	program, err := Parse("package p\nvar f func() int?\n")
 	if err != nil {
