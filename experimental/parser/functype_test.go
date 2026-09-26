@@ -99,6 +99,17 @@ func containsFuncType(t *TypeExpr) bool {
 	return false
 }
 
+func TestFuncTypeStructFieldParses(t *testing.T) {
+	program, err := Parse("package p\ntype Server struct {\nonLoad func(Event)\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := program.Statements[0].Struct.Fields[0]
+	if field.TypeExpr == nil || field.TypeExpr.Kind != FuncType {
+		t.Fatalf("field type = %+v, want a function type", field.TypeExpr)
+	}
+}
+
 func TestFuncTypeMixedParamsReject(t *testing.T) {
 	// Grouped spellings `a, b int` resolve per name group in Go; the
 	// per-parameter reading of this slice would misbind them, so the

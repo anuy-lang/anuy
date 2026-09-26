@@ -2014,6 +2014,12 @@ func (l *lowerer) goType(t *parser.TypeExpr) (string, error) {
 			return "", err
 		}
 		text = "map[" + key + "]" + value
+	case parser.FuncType:
+		funcText, err := l.goFuncType(t)
+		if err != nil {
+			return "", err
+		}
+		text = funcText
 	default:
 		return "", fmt.Errorf("experimental lowering: unsupported type kind %d", t.Kind)
 	}
@@ -2022,28 +2028,79 @@ func (l *lowerer) goType(t *parser.TypeExpr) (string, error) {
 	}
 	// Native-nil shapes keep the plain Go type with nil as semantic nil
 	// (§6.2.3, §6.2.7): `error`, pointer, map and - since story 40 -
-	// declared interfaces (`Reader?` lowers to `Reader`).
+	// declared interfaces (`Reader?` lowers to `Reader`); function values
+	// join them in story 69 - the native Go nil function representation
+	// (RFC-002 §6.8.8).
 	if (t.Kind == parser.NamedType && (t.Name == "error" || l.interfaces[t.Name])) ||
-		t.Kind == parser.PointerType || t.Kind == parser.MapType {
+		t.Kind == parser.PointerType || t.Kind == parser.MapType || t.Kind == parser.FuncType {
 		return text, nil
 	}
 	l.taggedUsed = true
 	return "anuyabi.Nullable[" + text + "]", nil
 }
 
+// goFuncType renders a function type (story 69, RFC-019 §6.2): parameter
+// names pass through as documentation; nullability of the whole type is
+// handled by the caller - function values are native-nil in Go
+// (RFC-002 §6.8.8).
+func (l *lowerer) goFuncType(t *parser.TypeExpr) (string, error) {
+	var b strings.Builder
+	b.WriteString("func(")
+	for i, p := range t.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if p.Name != "" {
+			b.WriteString(p.Name)
+			b.WriteString(" ")
+		}
+		paramType, err := l.goType(p.Type)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(paramType)
+	}
+	b.WriteString(")")
+	switch len(t.Results) {
+	case 0:
+	case 1:
+		result, err := l.goType(t.Results[0])
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(" ")
+		b.WriteString(result)
+	default:
+		b.WriteString(" (")
+		for i, r := range t.Results {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			result, err := l.goType(r)
+			if err != nil {
+				return "", err
+			}
+			b.WriteString(result)
+		}
+		b.WriteString(")")
+	}
+	return b.String(), nil
+}
+
 // carrier reports the tagged-carrier element type of a declared type: the
 // outermost nullability decides the whole-value representation, so a
 // composite spelling with inner nullables (`[](User?)`) passes values
 // through unchanged. Native-nil shapes skip the carrier (§6.2.3, §6.2.7):
-// `error`, pointer, map and channel-function shapes the grammar cannot
-// spell, and - since story 40 - declared interfaces whose `I?` lowers to
+// `error`, pointer, map and - since story 69 spells them (RFC-019 §6.2) -
+// function values with the native Go nil representation, and - since
+// story 40 - declared interfaces whose `I?` lowers to
 // the plain Go interface with nil as semantic nil.
 func (l *lowerer) carrier(t *parser.TypeExpr) (string, bool) {
 	if t == nil || !t.Nullable {
 		return "", false
 	}
 	if (t.Kind == parser.NamedType && (t.Name == "error" || l.interfaces[t.Name])) ||
-		t.Kind == parser.PointerType || t.Kind == parser.MapType {
+		t.Kind == parser.PointerType || t.Kind == parser.MapType || t.Kind == parser.FuncType {
 		return "", false
 	}
 	text, err := l.goType(t)
