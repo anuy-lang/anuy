@@ -398,6 +398,16 @@ type builder struct {
 	// funcResults records declared function result types (story 08 Q4-A)
 	// for the RHS call-shape classification (§26 establishment).
 	funcResults map[string]declResult
+	// funcSigs carries the canonical signature string of a callable
+	// binding (story 70, RFC-019 §6.2): func-typed bindings spell it from
+	// their declared type, declared functions from their parameters and
+	// results. Parameter names are documentation and never enter the
+	// string, so spellings that differ only in names compare equal.
+	funcSigs map[semantic.BindingID]string
+	// funcParamTypes carries the declared parameter type expressions per
+	// function name (story 70): a func-typed parameter checks its
+	// argument's exact signature (§6.16).
+	funcParamTypes map[string][]*parser.TypeExpr
 	// interfaces carries the declared interface table (story 39, RFC-004
 	// §6.1.1): name -> ordered method signatures.
 	interfaces map[string]*ifaceInfo
@@ -437,6 +447,8 @@ func newBuilder() *builder {
 		methodMutates:  map[string][]semantic.BindingID{},
 		funcResults:    map[string]declResult{},
 		funcParams:     map[string][]semantic.Nullability{},
+		funcSigs:       map[semantic.BindingID]string{},
+		funcParamTypes: map[string][]*parser.TypeExpr{},
 		structs:        map[string]*structInfo{},
 		enums:          map[string][]string{},
 		bindingTypes:   map[semantic.BindingID]string{},
@@ -797,6 +809,38 @@ func (b *builder) establish(id semantic.BindingID, value *parser.Value, scope *s
 	}
 }
 
+// checkFuncTypeAssign verifies one RHS value against a func-typed target
+// binding (story 70, RFC-019 §6.16): exact signature identity, no
+// implicit variance. A closure literal must spell the target signature;
+// a function reference carries it from its declaration.
+func (b *builder) checkFuncTypeAssign(target semantic.BindingID, value *parser.Value, scope *semantic.Scope, span parser.Span) {
+	want := b.funcSigs[target]
+	if want == "" {
+		return
+	}
+	if got := b.valueFuncSignature(value, scope); got != "" && got != want {
+		b.report(semantic.FunctionTypeMismatch, span)
+	}
+}
+
+// valueFuncSignature renders the canonical signature of a value known to
+// be a function (story 70, RFC-019 §6.2): a closure literal spells it
+// from its declared parameters and results; a function reference carries
+// it from its declaration. Unknown shapes render empty - tolerance, not
+// identity.
+func (b *builder) valueFuncSignature(value *parser.Value, scope *semantic.Scope) string {
+	if value == nil {
+		return ""
+	}
+	if value.Closure != nil {
+		return closureFuncSignature(value.Closure)
+	}
+	if len(value.Idents) == 1 && value.Text == value.Idents[0] {
+		return b.funcSigs[scope.Resolve(value.Idents[0])]
+	}
+	return ""
+}
+
 // establishAssignments pairs assignment targets with their RHS values by
 // index and applies §26 (story 08). A name/value count mismatch leaves the
 // extra targets unestablished - the tuple evaluation order is not modeled.
@@ -814,6 +858,7 @@ func (b *builder) establishAssignments(statement *parser.Statement, scope *seman
 		b.killPathFacts(name)
 		if id := scope.Resolve(name); id != 0 {
 			b.establish(id, &statement.Values[i], scope, statement.Span)
+			b.checkFuncTypeAssign(id, &statement.Values[i], scope, statement.Span)
 		}
 	}
 }
@@ -1414,6 +1459,14 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 						b.classes[id] = semantic.NullabilityNullable
 					} else {
 						b.classes[id] = semantic.NullabilityNonNull
+					}
+					// Story 70 (§6.16): the declared signature is the
+					// target contract; initializers and later assignments
+					// must spell it exactly (widening applies, variance
+					// does not) - establishAssignments pairs the check
+					// with the initializer below.
+					if sig := typeFuncSignature(statement.TypeExpr); sig != "" {
+						b.funcSigs[id] = sig
 					}
 				}
 			} else {
@@ -2334,6 +2387,14 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 		}
 		return
 	}
+	// Story 70 (RFC-019 §6.7, §8.6 semantics): invoking a nullable
+	// function value requires a live non-nil narrowing fact - the call is
+	// the access analogue of the deref gate (ANUY4001). Navigation
+	// callees carry the receiver binding, not a callable one, so the gate
+	// never fires for them.
+	if _, callable := b.funcSigs[id]; callable && b.staticallyNullable(id) && !b.isNonNil(id) {
+		b.report(semantic.NullableFunctionCall, statement.Span)
+	}
 	b.add(semantic.Read(id), call.ReceiverSpan)
 	if len(call.Segments) > 0 {
 		if call.Segments[0].Safe {
@@ -2397,6 +2458,22 @@ func (b *builder) checkArgumentTypes(statement *parser.Statement, scope *semanti
 	}
 	if len(params) == 0 {
 		return
+	}
+	// Story 70 (RFC-019 §6.16): a func-typed parameter checks its
+	// argument's exact signature - closure literals spell it, function
+	// references carry it from their declaration.
+	paramTypes := b.funcParamTypes[call.Receiver]
+	if len(paramTypes) > 0 {
+		for i := range statement.Values {
+			if i >= len(paramTypes) || paramTypes[i] == nil || paramTypes[i].Kind != parser.FuncType {
+				continue
+			}
+			want := typeFuncSignature(paramTypes[i])
+			got := b.valueFuncSignature(&statement.Values[i], scope)
+			if got != "" && got != want {
+				b.report(semantic.FunctionTypeMismatch, statement.Span)
+			}
+		}
 	}
 	for i := range statement.Values {
 		if i >= len(params) || params[i] != semantic.NullabilityNonNull {
@@ -2501,6 +2578,72 @@ func strictResults(statement *parser.Statement) (bool, []semantic.Nullability) {
 	return fallible, nil
 }
 
+// signatureString renders the canonical signature of a function shape
+// from ordered parameter and result canonicals (RFC-019 §6.2): parameter
+// names are documentation and never enter the string.
+func signatureString(params, results []string) string {
+	var b strings.Builder
+	b.WriteString("func(")
+	b.WriteString(strings.Join(params, ", "))
+	b.WriteString(")")
+	switch len(results) {
+	case 0:
+	case 1:
+		b.WriteString(" ")
+		b.WriteString(results[0])
+	default:
+		b.WriteString(" (")
+		b.WriteString(strings.Join(results, ", "))
+		b.WriteString(")")
+	}
+	return b.String()
+}
+
+// typeFuncSignature renders the canonical signature of a declared
+// function type; the outer nullability stays out - the target's contract
+// is the inner signature (§6.16 v3).
+func typeFuncSignature(t *parser.TypeExpr) string {
+	if t == nil || t.Kind != parser.FuncType {
+		return ""
+	}
+	params := make([]string, 0, len(t.Params))
+	for _, p := range t.Params {
+		params = append(params, p.Type.Canonical())
+	}
+	results := make([]string, 0, len(t.Results))
+	for _, r := range t.Results {
+		results = append(results, r.Canonical())
+	}
+	return signatureString(params, results)
+}
+
+// closureFuncSignature renders the canonical signature of a closure
+// literal from its declared parameters and results (§6.2); an untyped
+// parameter renders empty - the signature is unknown, not mismatched.
+func closureFuncSignature(cl *parser.Closure) string {
+	if cl == nil {
+		return ""
+	}
+	params := make([]string, 0, len(cl.Params))
+	for _, p := range cl.Params {
+		if p.TypeExpr == nil {
+			return ""
+		}
+		params = append(params, p.TypeExpr.Canonical())
+	}
+	var results []string
+	if cl.HasResult {
+		if len(cl.ResultList) > 0 {
+			for _, r := range cl.ResultList {
+				results = append(results, r.Canonical())
+			}
+		} else if cl.ResultTypeExpr != nil {
+			results = append(results, cl.ResultTypeExpr.Canonical())
+		}
+	}
+	return signatureString(params, results)
+}
+
 // nullabilityOfTypeExpr classifies a structural type expression by the G1
 // declared-class rule (story 08): a named type is non-null or nullable by
 // its `?`, every composite spelling stays unknown - except function
@@ -2548,10 +2691,16 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 		b.unsafeFuncs[name] = true
 	}
 	var paramClasses []semantic.Nullability
+	var paramTypes []*parser.TypeExpr
 	for _, p := range statement.Closure.Params {
 		paramClasses = append(paramClasses, nullabilityOfParam(p))
+		paramTypes = append(paramTypes, p.TypeExpr)
 	}
 	b.funcParams[name] = paramClasses
+	// Story 70 (RFC-019 §6.16): the declared parameters carry their type
+	// expressions for the func-typed argument signature checks; the
+	// binding itself carries the canonical callable signature.
+	b.funcParamTypes[name] = paramTypes
 	// Story 39 (RFC-004 §6.1.5/§6.1.6): functions and methods live in
 	// separate namespaces - a bare call resolves the function, a receiver
 	// call the per-type method set; the flat Q1-A collision is gone.
@@ -2562,6 +2711,12 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	id := scope.Resolve(name)
 	b.declare(id, statement.Span)
 	b.initialize(id, statement.Span)
+	// Story 70 (RFC-019 §6.2): a function reference carries its
+	// declaration's canonical signature - the argument-side identity for
+	// the §6.16 checks.
+	if sig := closureFuncSignature(statement.Closure); sig != "" {
+		b.funcSigs[id] = sig
+	}
 	fallible, successClasses := strictResults(statement)
 	b.funcResults[name] = declResult{hasResult: statement.HasResult, resultNullable: statement.ResultNullable, fallible: fallible, successClasses: successClasses}
 	mutators, fallOff := b.analyzeClosure(statement.Closure, scope, fallible, nil)
