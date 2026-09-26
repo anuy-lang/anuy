@@ -2356,12 +2356,14 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		}
 	}
 	cb := &builder{
-		blocks:       []semantic.Block{{ID: 1, Operations: entry}},
-		facts:        []map[semantic.BindingID]bool{{}},
-		nonNil:       []map[semantic.BindingID]bool{{}},
-		pathNN:       []map[string]bool{{}},
-		fallible:     fallible,
-		successCount: successCount(cl),
+		blocks:   []semantic.Block{{ID: 1, Operations: entry}},
+		facts:    []map[semantic.BindingID]bool{{}},
+		nonNil:   []map[semantic.BindingID]bool{{}},
+		pathNN:   []map[string]bool{{}},
+		fallible: fallible,
+		// Story 74 (§6.5 v6): a plain multi-result is non-fallible - the
+		// strict D-7 contract counts nothing for it.
+		successCount: fallibleSuffixCount(fallible, cl),
 		nextBlockID:  1,
 		nilable:      b.nilable,
 		classes:      b.classes,
@@ -2889,11 +2891,15 @@ func nullabilityOfTypeExpr(t *parser.TypeExpr) semantic.Nullability {
 	return semantic.NullabilityNonNull
 }
 
-// successCount counts the strict fallible success results of a declaration
-// body (story 35, RFC-005 §6.2.3): 0 for error-only and non-fallible
-// shapes - the D-7 mixed-return gate applies only to strict functions.
-func successCount(cl *parser.Closure) int {
-	if cl == nil || len(cl.ResultList) < 2 {
+// successCount was superseded by fallibleSuffixCount (story 74): the
+// strict count is meaningful only for fallible shapes.
+
+// fallibleSuffixCount counts the strict fallible success results of a
+// declaration body (story 35, RFC-005 §6.2.3): 0 unless the shape is
+// fallible - a plain non-fallible multi-result (story 74, §6.5 v6)
+// carries no trailing error slot, so the D-7 contract counts nothing.
+func fallibleSuffixCount(fallible bool, cl *parser.Closure) int {
+	if !fallible || cl == nil || len(cl.ResultList) < 2 {
 		return 0
 	}
 	return len(cl.ResultList) - 1

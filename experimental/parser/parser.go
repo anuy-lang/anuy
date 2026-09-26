@@ -1398,9 +1398,22 @@ func (lp *lineParser) parseReturn(tokens []token, line sourceLine) (Statement, e
 		return Statement{}, verr
 	}
 	if frame.results > 1 {
-		// Story 35 (RFC-005 §6.4.1): `return v1, …, nil` - one value per
-		// declared result, the trailing one the error slot.
+		// Story 74 (§6.6): a single call-shaped return forwards the
+		// callee's whole result list - count and types verify downstream
+		// (the go type-check stage, §6.4.8 RFC-010). Non-fallible frames
+		// only: fallible forwarding carries the RFC-005 correlation
+		// rules and stays outside this slice.
+		if len(values) == 1 && !frame.fallible && strings.Contains(values[0].Text, "(") {
+			lp.pos++
+			return Statement{
+				Kind:   Return,
+				Values: values,
+				Span:   Span{Start: line.offset, End: line.offset + len(line.text)},
+			}, nil
+		}
 		if len(values) != frame.results {
+			// Story 35 (RFC-005 §6.4.1): `return v1, …, nil` - one value
+			// per declared result, the trailing one the error slot.
 			return Statement{}, newError(ArityMismatch, tokens[1].start, fmt.Sprintf("return takes %d values, got %d", frame.results, len(values)))
 		}
 	} else if len(values) != 1 {
