@@ -2950,11 +2950,19 @@ func navigationMetadata(tokens []token) (*NavigationExpr, []string, bool, *Error
 			return nil, nil, false, innerErr
 		}
 		if !innerRecognized {
-			if len(inner) != 1 || inner[0].kind != tokenIdent || reservedWords[inner[0].text] {
+			switch {
+			case len(inner) == 1 && inner[0].kind == tokenIdent && !reservedWords[inner[0].text]:
+				innerNavigation = &NavigationExpr{Receiver: inner[0].text, ReceiverSpan: Span{Start: inner[0].start, End: inner[0].end}}
+				innerIdents = []string{inner[0].text}
+			case len(inner) == 2 && isPunct(inner[0], "*") && inner[1].kind == tokenIdent && !reservedWords[inner[1].text]:
+				// Story 72 (§6.21): the pointer method expression head
+				// `(*T)` - a type spelling, not a runtime read, so the
+				// head contributes no read idents.
+				innerNavigation = &NavigationExpr{Receiver: "(*" + inner[1].text + ")", ReceiverSpan: Span{Start: tokens[0].start, End: tokens[next-1].end}}
+				innerIdents = nil
+			default:
 				return nil, nil, false, nil
 			}
-			innerNavigation = &NavigationExpr{Receiver: inner[0].text, ReceiverSpan: Span{Start: inner[0].start, End: inner[0].end}}
-			innerIdents = []string{inner[0].text}
 		}
 		return navigationSuffix(tokens, next, innerNavigation.Receiver, innerNavigation.ReceiverSpan, innerNavigation.Segments, innerIdents)
 	}

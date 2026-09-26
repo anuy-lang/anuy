@@ -89,6 +89,7 @@ var (
 	IgnoredErrorDescriptor               = register(IgnoredError, "ANUY6006", SeverityError)               // RFC-005 §8.1.1 (D-1)
 	NilArmOnNonNullEnumDescriptor        = register(NilArmOnNonNullEnum, "ANUY4010", SeverityError)        // RFC-006 §6.5.3
 	NullableFunctionCallDescriptor       = register(NullableFunctionCall, "ANUY4011", SeverityError)       // RFC-019 §6.7/§8.6
+	SafeSegmentMethodValueDescriptor     = register(SafeSegmentMethodValue, "ANUY4012", SeverityError)     // RFC-019 §6.20 v5
 
 	// Interfaces/impl block (7xxx).
 	InterfaceMethodMissingDescriptor     = register(InterfaceMethodMissing, "ANUY7001", SeverityError)     // RFC-004 §6.1.3
@@ -142,6 +143,7 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		UnknownMatchVariantDescriptor,
 		NilArmOnNonNullEnumDescriptor,
 		NullableFunctionCallDescriptor,
+		SafeSegmentMethodValueDescriptor,
 		PropagationOutsideFallibleDescriptor,
 		InvalidFailureReturnDescriptor,
 		InvalidTryDescriptor,
@@ -216,6 +218,7 @@ var catalog = map[Code]string{
 	"ANUY4009": "switch case is not a variant of the scrutinee's enum",
 	"ANUY4010": "nil arm on a non-null enum scrutinee is unreachable",
 	"ANUY4011": "nullable function may be nil; narrow it before calling",
+	"ANUY4012": "safe navigation forms calls, not method values; narrow the receiver for a method value",
 	"ANUY6001": "propagation outside a fallible function",
 	"ANUY6002": "failure return requires a non-null error",
 	"ANUY6003": "try requires a call with a trailing error? result",

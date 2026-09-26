@@ -39,6 +39,8 @@ var approvedScheme = []struct {
 	{"NilArmOnNonNullEnum", "ANUY4010", SeverityError},
 	// Story 70 (RFC-019 §6.7/§8.6): the nullable-call narrowing gate.
 	{"NullableFunctionCall", "ANUY4011", SeverityError},
+	// Story 72 (RFC-019 §6.20 v5): safe segments form calls, not values.
+	{"SafeSegmentMethodValue", "ANUY4012", SeverityError},
 	{"PropagationOutsideFallible", "ANUY6001", SeverityError},
 	// Story 35 (RFC-005 §8.1): the strict fallible diagnostics block.
 	{"InvalidFailureReturn", "ANUY6002", SeverityError},

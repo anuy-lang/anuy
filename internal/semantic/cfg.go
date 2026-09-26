@@ -132,6 +132,10 @@ const (
 	// 70): a function value does not carry the exact signature of the
 	// target function type - Anuy applies no implicit function variance.
 	FunctionTypeMismatch DiagnosticCategory = "FunctionTypeMismatch"
+	// SafeSegmentMethodValue is the RFC-019 §6.20 v5 category (story
+	// 72): a safe segment guards a CALL, it does not form a method
+	// value - `c?.M` as a value has no non-nil-guarded reading.
+	SafeSegmentMethodValue DiagnosticCategory = "SafeSegmentMethodValue"
 	// PropagationOutsideFallible is the RFC-005 §6.5.4/§6.4.2 category
 	// (story 34): `try` or `return error` outside a fallible function
 	// (working code; the final one belongs to RFC-011).
