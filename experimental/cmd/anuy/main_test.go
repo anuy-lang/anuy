@@ -1043,3 +1043,30 @@ func TestRunExternalTestMismatchRejects(t *testing.T) {
 		t.Fatalf("stdout misses ANUY9002:\n%s", stdout)
 	}
 }
+
+// --- Story 76 (RFC-005 §6.7.1, RFC-019 §6.6 v6) ---
+
+// Direct tail forwarding of the entire fallible result runs end to end
+// (§6.7.1): no `return try` is needed (§6.7.2).
+func TestRunFallibleForwarding(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nfunc ReadData() (int, error?) {\nreturn 21, nil\n}\nfunc Load() (int, error?) {\nreturn ReadData()\n}\nvar a, e = Load()\nif e == nil {\nvar out = a\nout\n}\n")
+	code, _, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
+
+// A forwarded call whose protocol does not match the enclosing
+// declaration rejects with the result-count code (§6.7.1).
+func TestCheckForwardingProtocolMismatchExitOne(t *testing.T) {
+	path := writeTemp(t, "func ReadText() (string, error?) {\nreturn \"\", nil\n}\nfunc Load() (int, error?) {\nreturn ReadText()\n}\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY1006") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
