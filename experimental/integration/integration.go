@@ -408,6 +408,9 @@ type builder struct {
 	// function name (story 70): a func-typed parameter checks its
 	// argument's exact signature (§6.16).
 	funcParamTypes map[string][]*parser.TypeExpr
+	// funcVariadic records, per function name, that the final parameter is
+	// the §6.14 variadic - per-argument checks fan out over its element.
+	funcVariadic map[string]bool
 	// interfaces carries the declared interface table (story 39, RFC-004
 	// §6.1.1): name -> ordered method signatures.
 	interfaces map[string]*ifaceInfo
@@ -449,6 +452,7 @@ func newBuilder() *builder {
 		funcParams:     map[string][]semantic.Nullability{},
 		funcSigs:       map[semantic.BindingID]string{},
 		funcParamTypes: map[string][]*parser.TypeExpr{},
+		funcVariadic:   map[string]bool{},
 		structs:        map[string]*structInfo{},
 		enums:          map[string][]string{},
 		bindingTypes:   map[semantic.BindingID]string{},
@@ -2461,22 +2465,47 @@ func (b *builder) checkArgumentTypes(statement *parser.Statement, scope *semanti
 	}
 	// Story 70 (RFC-019 §6.16): a func-typed parameter checks its
 	// argument's exact signature - closure literals spell it, function
-	// references carry it from their declaration.
+	// references carry it from their declaration. Story 71 (§6.14):
+	// individual arguments beyond the fixed prefix carry the variadic
+	// element's signature; a spread argument is the slice value and stays
+	// with the go-stage.
 	paramTypes := b.funcParamTypes[call.Receiver]
+	variadicLast := b.funcVariadic[call.Receiver]
 	if len(paramTypes) > 0 {
 		for i := range statement.Values {
-			if i >= len(paramTypes) || paramTypes[i] == nil || paramTypes[i].Kind != parser.FuncType {
+			pi := i
+			if pi >= len(paramTypes) {
+				if !variadicLast {
+					continue
+				}
+				pi = len(paramTypes) - 1
+			}
+			if paramTypes[pi] == nil || paramTypes[pi].Kind != parser.FuncType {
 				continue
 			}
-			want := typeFuncSignature(paramTypes[i])
-			got := b.valueFuncSignature(&statement.Values[i], scope)
+			value := &statement.Values[i]
+			if strings.HasSuffix(value.Text, "...") {
+				continue
+			}
+			want := typeFuncSignature(paramTypes[pi])
+			got := b.valueFuncSignature(value, scope)
 			if got != "" && got != want {
 				b.report(semantic.FunctionTypeMismatch, statement.Span)
 			}
 		}
 	}
 	for i := range statement.Values {
-		if i >= len(params) || params[i] != semantic.NullabilityNonNull {
+		pi := i
+		if pi >= len(params) {
+			if !variadicLast {
+				continue
+			}
+			pi = len(params) - 1
+		}
+		if params[pi] != semantic.NullabilityNonNull {
+			continue
+		}
+		if strings.HasSuffix(statement.Values[i].Text, "...") {
 			continue
 		}
 		if b.classifyValue(&statement.Values[i], scope) == semantic.NullabilityNullable {
@@ -2601,20 +2630,30 @@ func signatureString(params, results []string) string {
 
 // typeFuncSignature renders the canonical signature of a declared
 // function type; the outer nullability stays out - the target's contract
-// is the inner signature (§6.16 v3).
+// is the inner signature (§6.16 v3). Variadicness is spelled (§6.14):
+// `func(...int)` and `func([]int)` render differently.
 func typeFuncSignature(t *parser.TypeExpr) string {
 	if t == nil || t.Kind != parser.FuncType {
 		return ""
 	}
 	params := make([]string, 0, len(t.Params))
 	for _, p := range t.Params {
-		params = append(params, p.Type.Canonical())
+		params = append(params, funcParamCanonical(p))
 	}
 	results := make([]string, 0, len(t.Results))
 	for _, r := range t.Results {
 		results = append(results, r.Canonical())
 	}
 	return signatureString(params, results)
+}
+
+// funcParamCanonical renders one function-type parameter: the ellipsis
+// prefix for a variadic (§6.14), then the element canonical.
+func funcParamCanonical(p parser.FuncParam) string {
+	if p.Variadic {
+		return "..." + p.Type.Canonical()
+	}
+	return p.Type.Canonical()
 }
 
 // closureFuncSignature renders the canonical signature of a closure
@@ -2629,7 +2668,11 @@ func closureFuncSignature(cl *parser.Closure) string {
 		if p.TypeExpr == nil {
 			return ""
 		}
-		params = append(params, p.TypeExpr.Canonical())
+		if p.Variadic {
+			params = append(params, "..."+p.TypeExpr.Canonical())
+		} else {
+			params = append(params, p.TypeExpr.Canonical())
+		}
 	}
 	var results []string
 	if cl.HasResult {
@@ -2701,6 +2744,9 @@ func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scop
 	// expressions for the func-typed argument signature checks; the
 	// binding itself carries the canonical callable signature.
 	b.funcParamTypes[name] = paramTypes
+	// Story 71 (RFC-019 §6.14): a variadic final parameter fans the
+	// per-argument checks out over its element.
+	b.funcVariadic[name] = len(paramTypes) > 0 && statement.Closure.Params[len(statement.Closure.Params)-1].Variadic
 	// Story 39 (RFC-004 §6.1.5/§6.1.6): functions and methods live in
 	// separate namespaces - a bare call resolves the function, a receiver
 	// call the per-type method set; the flat Q1-A collision is gone.
