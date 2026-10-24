@@ -393,6 +393,14 @@ func (b *builder) preRegisterPackageVars(statements []parser.Statement, file str
 			b.methodBodies[st.Names[0]] = append(b.methodBodies[st.Names[0]], st)
 			continue
 		}
+		if st.Names[0] == "init" {
+			// Story 79 (RFC-024 §6.9/§6.22): the special init function is
+			// not callable - never a dependency expansion target. The flag
+			// arms the §8.6 reference hooks package-wide (declaration
+			// order is not observable, §6.10.2 RFC-010).
+			b.initDeclared = true
+			continue
+		}
 		b.funcBodies[st.Names[0]] = st
 	}
 }
@@ -1059,12 +1067,15 @@ type builder struct {
 	// expansion (§6.4, methods unioned by name); importQualifiers holds
 	// the story-63 qualifiers - qualified chains through them are the
 	// foreign trust boundary (RFC-008), not package references.
+	// initDeclared arms the §6.9/§8.6 hooks: the package declares the
+	// special init function (story 79).
 	pkgScope         *semantic.Scope
 	packageVars      map[semantic.BindingID]bool
 	pkgGroups        []packageVarGroup
 	funcBodies       map[string]*parser.Statement
 	methodBodies     map[string][]*parser.Statement
 	importQualifiers map[string]bool
+	initDeclared     bool
 
 	// unsafeDepth tracks the lexical unsafe context (story 41, RFC-007
 	// §6.6.1-6.6.2): privileged operations require depth > 0. unsafeFuncs
@@ -2839,6 +2850,8 @@ func (b *builder) readIdents(statement *parser.Statement, scope *semantic.Scope)
 					b.report(semantic.UnavailableSuccessResult, statement.Span)
 				}
 				b.add(semantic.Read(id), statement.Span)
+			} else {
+				b.checkInitReference(ident, scope, statement.Span)
 			}
 		}
 		// Story 22: keyed constructions check their completeness against
@@ -2892,6 +2905,8 @@ func (b *builder) readConditionIdents(statement *parser.Statement, scope *semant
 		if statement.Cond != ident {
 			if id := scope.Resolve(ident); id != 0 {
 				b.add(semantic.Read(id), statement.Span)
+			} else {
+				b.checkInitReference(ident, scope, statement.Span)
 			}
 			continue
 		}
@@ -2907,6 +2922,9 @@ func (b *builder) readConditionIdents(statement *parser.Statement, scope *semant
 // one statement; nil works for single-name sites.
 func (b *builder) readIdent(name string, scope *semantic.Scope, span parser.Span, reported map[string]bool) {
 	if serr := scope.Read(name); serr != nil {
+		if b.checkInitReference(name, scope, span) {
+			return
+		}
 		if !reported[name] {
 			if reported != nil {
 				reported[name] = true
@@ -3039,6 +3057,10 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		// per-body.
 		correlated: map[semantic.BindingID]semantic.BindingID{},
 		terminated: []bool{false},
+		// Story 79: closure literals assigned to body-local bindings
+		// register their mutators here (analyzeClosures); without the
+		// map the nested-literal shape panicked on a nil write.
+		closureMutates: map[semantic.BindingID][]semantic.BindingID{},
 	}
 	cb.emit(cl.Body, bodyScope)
 	// Closure bodies participate in the same lint and read accounting:
@@ -3046,6 +3068,12 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 	// declaration is linted with the rest (CONTRACTS §3).
 	for id := range cb.reads {
 		b.reads[id] = true
+	}
+	// Story 79: the body-local closure literals' mutator registrations
+	// stay live for calls within the body (binding ids are unique across
+	// the builder, so the merge is a sound union).
+	for id, muts := range cb.closureMutates {
+		b.closureMutates[id] = unionBindings(b.closureMutates[id], muts)
 	}
 	for id, span := range cb.errSpans {
 		b.errSpans[id] = span
@@ -3151,6 +3179,9 @@ func (b *builder) emitCall(statement *parser.Statement, scope *semantic.Scope) {
 	id := scope.Resolve(call.Receiver)
 	if id == 0 {
 		if len(call.Segments) == 0 {
+			if b.checkInitReference(call.Receiver, scope, statement.Span) {
+				return
+			}
 			b.report(semantic.UnknownRead, statement.Span)
 		}
 		return
@@ -3548,9 +3579,45 @@ func fallibleSuffixCount(fallible bool, cl *parser.Closure) int {
 	return len(cl.ResultList) - 1
 }
 
+// emitInitFunc analyzes the special package init function (story 79,
+// RFC-024 §6.9/§6.10): no package binding is created - a bare reference
+// resolves to nothing and the §8.6 hook rejects it - the signature
+// carries no parameters or results (§8.5), and the body runs after the
+// variable phase, so package variables are read initialized (the
+// story 78 entry seeding). Writes follow the ordinary RFC-001/003
+// dataflow.
+func (b *builder) emitInitFunc(statement *parser.Statement, scope *semantic.Scope) {
+	if len(statement.Closure.Params) > 0 || statement.HasResult {
+		b.report(semantic.InvalidInitSignature, statement.Span)
+		return
+	}
+	b.analyzeClosure(statement.Closure, scope, false, nil)
+}
+
+// checkInitReference reports the §6.9/§8.6 violation (story 79): the
+// special init function creates no binding, so a bare reference to it
+// resolves to nothing - a local binding shadows (ordinary), everything
+// else rejects while the package declares the special form. Returns
+// true when the violation was reported; the caller suppresses its own
+// verdict (the ordinary undefined-name diagnostic).
+func (b *builder) checkInitReference(name string, scope *semantic.Scope, span parser.Span) bool {
+	if !b.initDeclared || name != "init" || scope.Resolve(name) != 0 {
+		return false
+	}
+	b.report(semantic.InitNotOrdinary, span)
+	return true
+}
+
 func (b *builder) emitFunction(statement *parser.Statement, scope *semantic.Scope) {
 	if statement.Method != "" {
 		b.emitMethod(statement, scope)
+		return
+	}
+	if statement.Names[0] == "init" {
+		// Story 79 (RFC-024 §6.9/§6.10): the special package init
+		// function - no binding, no callable signature, the body runs
+		// after the variable phase.
+		b.emitInitFunc(statement, scope)
 		return
 	}
 	name := statement.Names[0]

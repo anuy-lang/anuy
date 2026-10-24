@@ -1122,3 +1122,42 @@ func TestCheckPackageVarCommaOkExitOne(t *testing.T) {
 		t.Fatalf("code = %d, stdout = %q, want ANUY3006 exit one", code, stdout)
 	}
 }
+
+// --- Story 79 (RFC-024 §6.9-6.10) ---
+
+// The init function runs before the program entry (Go package
+// initialization): the package variable it writes reaches the program
+// flow with the init value.
+func TestRunInitMutatesPackageVar(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nimport \"fmt\"\nvar Greeting = \"unset\"\nfunc init() {\nGreeting = \"hello from init\"\n}\nfunc main_work() {\nfmt.Println(Greeting)\n}\nmain_work()\n")
+	code, stdout, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "hello from init") {
+		t.Fatalf("stdout = %q, wants the init-established value", stdout)
+	}
+}
+
+// §8.5: an init signature with parameters or results fails check.
+func TestCheckInitSignatureExitOne(t *testing.T) {
+	path := writeTemp(t, "func init(x int) {\n}\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY3007") {
+		t.Fatalf("code = %d, stdout = %q, want ANUY3007 exit one", code, stdout)
+	}
+}
+
+// §8.6: an explicit init call fails check with the dedicated code.
+func TestCheckInitCallExitOne(t *testing.T) {
+	path := writeTemp(t, "func init() {\n}\ninit()\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY3008") {
+		t.Fatalf("code = %d, stdout = %q, want ANUY3008 exit one", code, stdout)
+	}
+}

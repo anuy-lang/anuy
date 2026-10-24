@@ -31,6 +31,9 @@ var approvedScheme = []struct {
 	{"InitializationCycle", "ANUY3004", SeverityError},
 	{"UnprovableInitializationDependency", "ANUY3005", SeverityError},
 	{"PackageVarUnavailableAssignment", "ANUY3006", SeverityError},
+	// Story 79 (RFC-024 §6.9/§8): the init-function block.
+	{"InvalidInitSignature", "ANUY3007", SeverityError},
+	{"InitNotOrdinary", "ANUY3008", SeverityError},
 	{"UnsafeMemberAccess", "ANUY4001", SeverityError},
 	{"RedundantSafeNavigation", "ANUY4002", SeverityWarning},
 	{"NullableArgument", "ANUY4003", SeverityError},

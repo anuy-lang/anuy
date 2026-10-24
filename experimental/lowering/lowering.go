@@ -250,6 +250,11 @@ func (l *lowerer) plan(plan *filePlan) error {
 		if statement.Closure == nil {
 			continue
 		}
+		if statement.Names[0] == "init" {
+			// Story 79 (RFC-024 §6.9): the special init function is not
+			// callable - never an inferred-dispatch initializer target.
+			continue
+		}
 		var result *parser.TypeExpr
 		if len(statement.Closure.ResultList) > 0 {
 			result = statement.Closure.ResultList[0]
