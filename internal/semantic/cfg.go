@@ -111,6 +111,10 @@ const (
 	// reference to the special init function - it creates no package
 	// binding, so it cannot be called, read or passed as a value.
 	InitNotOrdinary DiagnosticCategory = "InitNotOrdinary"
+	// AssignmentToConstant is the RFC-018 §8.17 category (story 80): a
+	// value assignment targets a compile-time constant - the binding is
+	// immutable by declaration.
+	AssignmentToConstant DiagnosticCategory = "AssignmentToConstant"
 	// UnsafeMemberAccess is the experimental category for an ordinary member
 	// access on a binding whose non-nil narrowing is not proven (story 05);
 	// final naming and text belong to RFC-011.

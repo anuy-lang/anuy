@@ -193,9 +193,10 @@ func goCompatDiagnostics(path string, program parser.Program) []semantic.Diagnos
 		for i := range statements {
 			statement := &statements[i]
 			switch statement.Kind {
-			case parser.Var, parser.Function, parser.TypeDecl, parser.Interface:
+			case parser.Var, parser.Const, parser.Function, parser.TypeDecl, parser.Interface:
 				// Declaration names reach Go verbatim; assignment and
-				// call statements only reference declared bindings.
+				// call statements only reference declared bindings (the
+				// story 80 const names included).
 				for _, name := range statement.Names {
 					report(name, statement.Span)
 				}
@@ -354,6 +355,26 @@ func (b *builder) preparePackage(imports []parser.Import, scope *semantic.Scope)
 func (b *builder) preRegisterPackageVars(statements []parser.Statement, file string, scope *semantic.Scope) {
 	for i := range statements {
 		st := &statements[i]
+		if st.Kind == parser.Const {
+			// Story 80 (RFC-018 §6.29 v2): a package constant pre-registers
+			// into the namespace but is not a package variable - no
+			// initialization group, no dependency-graph participation
+			// (§6.2 RFC-024). The entry seeding models its reads.
+			for _, name := range st.Names {
+				if name == "_" {
+					continue
+				}
+				if serr := scope.Declare(name); serr != nil {
+					b.report(serr.Category, st.Span)
+					continue
+				}
+				id := scope.Resolve(name)
+				b.constants[id] = true
+				b.declared[id] = true
+				b.constIDs = append(b.constIDs, id)
+			}
+			continue
+		}
 		if st.Kind != parser.Var || st.TryCall != nil || len(st.Values) == 0 {
 			continue
 		}
@@ -410,10 +431,17 @@ func (b *builder) preRegisterPackageVars(statements []parser.Statement, file str
 // holds a valid value, so the program flow and every body read them
 // initialized regardless of declaration position.
 func (b *builder) seedPackageVars() {
-	if len(b.pkgGroups) == 0 {
+	if len(b.pkgGroups) == 0 && len(b.constIDs) == 0 {
 		return
 	}
-	entry := make([]semantic.Operation, 0, 2*len(b.pkgGroups))
+	entry := make([]semantic.Operation, 0, 2*(len(b.pkgGroups)+len(b.constIDs)))
+	// Constants first: compile-time state, no runtime initialization step
+	// (§6.2 RFC-024) - conceptually present before the variable phase.
+	for _, id := range b.constIDs {
+		entry = append(entry, semantic.Declare(id), semantic.Assign(id))
+		b.facts[0][id] = true
+		b.declared[id] = true
+	}
 	for _, group := range b.pkgGroups {
 		for _, id := range group.ids {
 			entry = append(entry, semantic.Declare(id), semantic.Assign(id))
@@ -1069,9 +1097,15 @@ type builder struct {
 	// foreign trust boundary (RFC-008), not package references.
 	// initDeclared arms the §6.9/§8.6 hooks: the package declares the
 	// special init function (story 79).
-	pkgScope         *semantic.Scope
-	packageVars      map[semantic.BindingID]bool
-	pkgGroups        []packageVarGroup
+	pkgScope    *semantic.Scope
+	packageVars map[semantic.BindingID]bool
+	pkgGroups   []packageVarGroup
+	// constants marks the package-constant bindings (story 80, RFC-018
+	// §6.29 v2): compile-time, immutable, outside the initialization
+	// graph; constIDs keeps the canonical declaration order for the
+	// entry seeding.
+	constants        map[semantic.BindingID]bool
+	constIDs         []semantic.BindingID
 	funcBodies       map[string]*parser.Statement
 	methodBodies     map[string][]*parser.Statement
 	importQualifiers map[string]bool
@@ -1120,6 +1154,7 @@ func newBuilder() *builder {
 		impls:            map[string]map[string]bool{},
 		unsafeFuncs:      map[string]bool{},
 		packageVars:      map[semantic.BindingID]bool{},
+		constants:        map[semantic.BindingID]bool{},
 		funcBodies:       map[string]*parser.Statement{},
 		methodBodies:     map[string][]*parser.Statement{},
 		importQualifiers: map[string]bool{},
@@ -2161,6 +2196,11 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 			b.report(semantic.InvalidTry, statement.Span)
 		}
 		b.emitCall(statement, scope)
+	case parser.Const:
+		// Story 80 (RFC-018 §6.29 v2): a compile-time declaration - the
+		// binding is entry-seeded (seedPackageVars), the initializer is
+		// never executed and the statement carries no flow effect
+		// (§6.2 RFC-024: no runtime initialization step).
 	case parser.Var:
 		if statement.TryCall == nil && len(statement.Values) > 0 && b.isPackageVarStatement(statement, scope) {
 			// Story 78 (RFC-024 §6.22 v2): a pre-registered package
@@ -2265,6 +2305,16 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		}
 		b.readIdents(statement, scope)
 		b.checkUnsafeCallValues(statement.Values, statement.Span)
+		// Story 80 (RFC-018 §6.5/§8.17): a constant is immutable - the
+		// assignment rejects before any shape classification (the
+		// conditional-form verdict of story 78 presupposes an assignable
+		// target). A local shadowing takes the ordinary path.
+		for _, name := range statement.Names {
+			if name != "_" && b.constants[scope.Resolve(name)] {
+				b.report(semantic.AssignmentToConstant, statement.Span)
+				return
+			}
+		}
 		// Story 78 (RFC-024 §6.3/§8.4): a conditional assignment - fewer
 		// values than targets, the comma-ok family - cannot directly
 		// target a package variable; extract into a local conditional
@@ -3008,6 +3058,9 @@ func (b *builder) analyzeClosure(cl *parser.Closure, scope *semantic.Scope, fall
 		nextBlockID:  1,
 		nilable:      b.nilable,
 		classes:      b.classes,
+		// Story 80: the constant table is shared - the immutability
+		// check runs in function bodies too.
+		constants:    b.constants,
 		flowNullable: b.flowNullable,
 		declared:     map[semantic.BindingID]bool{},
 		assigned:     map[semantic.BindingID]bool{},
