@@ -29,7 +29,7 @@ func TestLowerMultipleAssignmentToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar x int = 1\n//line source.anuy:2\n\tvar y int = 2\n//line source.anuy:3\n\tx, y = y, x\n\t_ = y\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nvar x int = 1\n//line source.anuy:2\nvar y int = 2\nfunc Run() {\n//line source.anuy:3\n\tx, y = y, x\n\t_ = y\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -75,6 +75,8 @@ func TestLowerNullableInitializerWrapsSome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Story 78: the package vars render at package level - the markers
+	// lost their Run-body indentation.
 	for _, marker := range []string{"var x anuyabi.Nullable[int] = anuyabi.Some(42)", "var s anuyabi.Nullable[string] = anuyabi.Some(\"a\")"} {
 		if !strings.Contains(got, marker) {
 			t.Fatalf("Lower() = %q, misses %q", got, marker)
@@ -99,7 +101,7 @@ func TestLowerNullableCopyPassesThrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "\tvar b anuyabi.Nullable[int] = a\n") {
+	if !strings.Contains(got, "var b anuyabi.Nullable[int] = a\n") {
 		t.Fatalf("Lower() = %q, wants raw carrier copy", got)
 	}
 }
@@ -109,7 +111,7 @@ func TestLowerNullableClosureParamToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tf := func(x anuyabi.Nullable[int]) {\n}\n\t_ = f\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\n//line source.anuy:1\nvar f = func(x anuyabi.Nullable[int]) {\n}\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -131,7 +133,7 @@ func TestLowerClosureLiteralToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar x int = 1\n//line source.anuy:2\n\tincrement := func() {\n//line source.anuy:3\n\tx = x + 1\n}\n\t_ = increment\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nvar x int = 1\n//line source.anuy:2\nvar increment = func() {\n//line source.anuy:3\n\tx = x + 1\n}\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -142,7 +144,7 @@ func TestLowerConditionLoopToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar ready bool = true\n//line source.anuy:2\n\tvar x int\n//line source.anuy:3\n\tfor ready {\n//line source.anuy:4\n\tx = 1\n\t}\n//line source.anuy:6\n\tx = 2\n\t_ = x\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nvar ready bool = true\nfunc Run() {\n//line source.anuy:2\n\tvar x int\n//line source.anuy:3\n\tfor ready {\n//line source.anuy:4\n\tx = 1\n\t}\n//line source.anuy:6\n\tx = 2\n\t_ = x\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -175,7 +177,7 @@ func TestLowerBreakContinuePassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar i int = 0\n//line source.anuy:2\n\tfor {\n//line source.anuy:3\n\ti = i + 1\n//line source.anuy:4\n\tif i == 3 {\n//line source.anuy:5\n\tbreak\n\t}\n//line source.anuy:7\n\tif i == 2 {\n//line source.anuy:8\n\tcontinue\n\t}\n\t}\n\t_ = i\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nvar i int = 0\nfunc Run() {\n//line source.anuy:2\n\tfor {\n//line source.anuy:3\n\ti = i + 1\n//line source.anuy:4\n\tif i == 3 {\n//line source.anuy:5\n\tbreak\n\t}\n//line source.anuy:7\n\tif i == 2 {\n//line source.anuy:8\n\tcontinue\n\t}\n\t}\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -196,7 +198,7 @@ func TestLowerBlockToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar x int = 1\n//line source.anuy:2\n\t{\n//line source.anuy:3\n\tx = 2\n\t}\n\t_ = x\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nvar x int = 1\nfunc Run() {\n//line source.anuy:2\n\t{\n//line source.anuy:3\n\tx = 2\n\t}\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -207,7 +209,7 @@ func TestLowerBlankDiscardToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvalue, _ := f()\n//line source.anuy:2\n\t_, y = 1, 2\n\t_ = y\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nvar value, _ = f()\nfunc Run() {\n//line source.anuy:2\n\t_, y = 1, 2\n\t_ = y\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -221,7 +223,7 @@ func TestLowerCallStatementsToGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n//line source.anuy:1\n\tvar user User = getUser()\n//line source.anuy:2\n\tclear()\n//line source.anuy:3\n\tuser.save()\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nvar user User = getUser()\nfunc Run() {\n//line source.anuy:2\n\tclear()\n//line source.anuy:3\n\tuser.save()\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -517,11 +519,13 @@ func TestLowerSafeValueCarrierReceiverCarrierTarget(t *testing.T) {
 	// Story 14 (RFC-002 §6.4.5, §6.10.2): a safe-tail value with a declared
 	// nullable target lowers to the synthetic guard branch - Some(member)
 	// in the non-nil branch, None in the nil branch.
-	got, err := Lower("var a User?\nvar c int? = a?.count\n")
+	// Story 78: the safe-tail guard is a body construct - the fixture
+	// lives in a function (a package variable rejects it, RFC-024 6.22 v2).
+	got, err := Lower("func probe() {\nvar a User?\nvar c int? = a?.count\nc\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar a anuyabi.Nullable[User]\n//line source.anuy:2\n\tvar c anuyabi.Nullable[int]\n\tif !a.IsNil() {\n\tc = anuyabi.Some(a.Value.count)\n\t} else {\n\tc = anuyabi.None[int]()\n\t}\n\t_ = c\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\n//line source.anuy:1\nfunc probe() {\n//line source.anuy:2\n\tvar a anuyabi.Nullable[User]\n//line source.anuy:3\n\tvar c anuyabi.Nullable[int]\n\tif !a.IsNil() {\n\tc = anuyabi.Some(a.Value.count)\n\t} else {\n\tc = anuyabi.None[int]()\n\t}\n//line source.anuy:4\n\t_ = c\n}\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -530,11 +534,11 @@ func TestLowerSafeValueCarrierReceiverCarrierTarget(t *testing.T) {
 func TestLowerSafeValueNativeNilReceiverCarrierTarget(t *testing.T) {
 	// A native-nil receiver guards with the plain Go comparison and reads
 	// the member off the value itself.
-	got, err := Lower("var err error?\nvar s string? = err?.Error()\n")
+	got, err := Lower("func probe() {\nvar err error?\nvar s string? = err?.Error()\ns\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar err error\n//line source.anuy:2\n\tvar s anuyabi.Nullable[string]\n\tif err != nil {\n\ts = anuyabi.Some(err.Error())\n\t} else {\n\ts = anuyabi.None[string]()\n\t}\n\t_ = s\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\n//line source.anuy:1\nfunc probe() {\n//line source.anuy:2\n\tvar err error\n//line source.anuy:3\n\tvar s anuyabi.Nullable[string]\n\tif err != nil {\n\ts = anuyabi.Some(err.Error())\n\t} else {\n\ts = anuyabi.None[string]()\n\t}\n//line source.anuy:4\n\t_ = s\n}\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -543,11 +547,11 @@ func TestLowerSafeValueNativeNilReceiverCarrierTarget(t *testing.T) {
 func TestLowerSafeValueCarrierReceiverNativeNilTarget(t *testing.T) {
 	// A native-nil target takes the raw member in the non-nil branch and
 	// Go nil as semantic nil in the nil branch (§6.8.1).
-	got, err := Lower("var a User?\nvar p *User? = a?.profile\n")
+	got, err := Lower("func probe() {\nvar a User?\nvar p *User? = a?.profile\np\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar a anuyabi.Nullable[User]\n//line source.anuy:2\n\tvar p *User\n\tif !a.IsNil() {\n\tp = a.Value.profile\n\t} else {\n\tp = nil\n\t}\n\t_ = p\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\n//line source.anuy:1\nfunc probe() {\n//line source.anuy:2\n\tvar a anuyabi.Nullable[User]\n//line source.anuy:3\n\tvar p *User\n\tif !a.IsNil() {\n\tp = a.Value.profile\n\t} else {\n\tp = nil\n\t}\n//line source.anuy:4\n\t_ = p\n}\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -569,11 +573,11 @@ func TestLowerSafeValueCallMemberDispatch(t *testing.T) {
 	// A safe method value dispatches identically; the call evaluates only
 	// in the non-nil branch (§6.10.4 analogue). The receiver is a binding,
 	// so §6.10.3 single evaluation stays structural - no temporary.
-	got, err := Lower("var n int?\nvar b bool? = n?.IsNil()\n")
+	got, err := Lower("func probe() {\nvar n int?\nvar b bool? = n?.IsNil()\nb\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\nfunc Run() {\n//line source.anuy:1\n\tvar n anuyabi.Nullable[int]\n//line source.anuy:2\n\tvar b anuyabi.Nullable[bool]\n\tif !n.IsNil() {\n\tb = anuyabi.Some(n.Value.IsNil())\n\t} else {\n\tb = anuyabi.None[bool]()\n\t}\n\t_ = b\n}\n"
+	want := "package fixture\n\nimport \"github.com/anuy-lang/anuy/anuyabi\"\n\n//line source.anuy:1\nfunc probe() {\n//line source.anuy:2\n\tvar n anuyabi.Nullable[int]\n//line source.anuy:3\n\tvar b anuyabi.Nullable[bool]\n\tif !n.IsNil() {\n\tb = anuyabi.Some(n.Value.IsNil())\n\t} else {\n\tb = anuyabi.None[bool]()\n\t}\n//line source.anuy:4\n\t_ = b\n}\n\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("Lower() = %q, want %q", got, want)
 	}
@@ -583,9 +587,9 @@ func TestLowerSafeValueRejectsUndeclaredTarget(t *testing.T) {
 	// Without a declared nullable target the None[elem] branch cannot be
 	// spelled: inferred and non-null-typed targets reject.
 	for _, source := range []string{
-		"var a User?\nvar c = a?.count\n",
-		"var a User?\nvar c int = a?.count\n",
-		"var a User?\nvar c = 1\nc = a?.count\n",
+		"func probe() {\nvar a User?\nvar c = a?.count\n}",
+		"func probe() {\nvar a User?\nvar c int = a?.count\n}",
+		"func probe() {\nvar a User?\nvar c = 1\nc = a?.count\n}",
 	} {
 		if _, err := Lower(source); err == nil || !strings.Contains(err.Error(), "not a declared nullable") {
 			t.Fatalf("Lower(%q) err = %v, want declared nullable target reject", source, err)
@@ -597,8 +601,8 @@ func TestLowerSafeValueRejectsUntrackedReceiver(t *testing.T) {
 	// An untracked binding and a root-call receiver (its call is invisible
 	// in NavigationExpr) carry no representation information.
 	for _, source := range []string{
-		"var a User = getUser()\nvar c int? = a?.count\n",
-		"var c int? = findUser()?.id\n",
+		"func probe() {\nvar a User = getUser()\nvar c int? = a?.count\n}",
+		"func probe() {\nvar c int? = findUser()?.id\n}",
 	} {
 		if _, err := Lower(source); err == nil || !strings.Contains(err.Error(), "not a tracked nullable") {
 			t.Fatalf("Lower(%q) err = %v, want untracked receiver reject", source, err)
@@ -610,8 +614,8 @@ func TestLowerSafeValueRejectsChainsBeyondReceiver(t *testing.T) {
 	// Safe segments beyond the receiver have no representation model
 	// (mixed chains, multi-safe chains) - reject, not verbatim.
 	for _, source := range []string{
-		"var a User?\nvar c int? = a.addr?.code\n",
-		"var a User?\nvar c int? = a?.x?.y\n",
+		"func probe() {\nvar a User?\nvar c int? = a.addr?.code\n}",
+		"func probe() {\nvar a User?\nvar c int? = a?.x?.y\n}",
 	} {
 		if _, err := Lower(source); err == nil || !strings.Contains(err.Error(), "beyond the receiver") {
 			t.Fatalf("Lower(%q) err = %v, want chain reject", source, err)
@@ -622,7 +626,7 @@ func TestLowerSafeValueRejectsChainsBeyondReceiver(t *testing.T) {
 func TestLowerSafeValueRejectsUnpairedTuple(t *testing.T) {
 	// The single-value multi-target form has no pairing, so no tracked
 	// target exists for the dispatch.
-	if _, err := Lower("var c, d = 1, 2\nc, d = a?.b\n"); err == nil || !strings.Contains(err.Error(), "unpaired") {
+	if _, err := Lower("func probe() {\nvar c, d = 1, 2\nc, d = a?.b\n}"); err == nil || !strings.Contains(err.Error(), "unpaired") {
 		t.Fatalf("err = %v, want unpaired safe-value reject", err)
 	}
 }
@@ -655,7 +659,7 @@ func TestLowerGeneratedNativeNilReceiverSafeValueTypeChecks(t *testing.T) {
 	// receiver form has no builtin shape to type-check (builtin value types
 	// have no members - Nullable.IsNil is the carrier API, not an Anuy
 	// member of T) and stays pinned by exact text.
-	typeCheckGenerated(t, "var err error?\nvar s string? = err?.Error()\n")
+	typeCheckGenerated(t, "func probe() {\nvar err error?\nvar s string? = err?.Error()\ns\n}")
 }
 
 func TestLowerGeneratedCarrierNilConditionTypeChecks(t *testing.T) {
@@ -668,7 +672,7 @@ func TestLowerSafeValueRejectsCallArguments(t *testing.T) {
 	// Mid-chain call arguments are invisible in NavigationExpr; a call
 	// with arguments cannot dispatch (only the zero-argument member call
 	// is part of the slice).
-	if _, err := Lower("var a User?\nvar c int? = a?.sum(1)\n"); err == nil || !strings.Contains(err.Error(), "call arguments") {
+	if _, err := Lower("func probe() {\nvar a User?\nvar c int? = a?.sum(1)\n}"); err == nil || !strings.Contains(err.Error(), "call arguments") {
 		t.Fatalf("err = %v, want safe-value call arguments reject", err)
 	}
 }
@@ -924,7 +928,9 @@ func TestLowerValueSwitchToGo(t *testing.T) {
 	// Story 32 (RFC-006 §6.4.4, RFC-009 §6.4): the value switch lowers to
 	// the declared result plus an ordinary Go switch assigning the arm
 	// values - Go has no switch expressions.
-	got, err := Lower("type Color enum {\nRed\nGreen\n}\nvar c = Color.Red\nvar text string = switch c {\ncase Color.Red:\n\"red\"\ncase Color.Green:\n\"green\"\n}\n")
+	// Story 78: the switch-assignments form is a body construct - the
+	// fixture lives in a function (a package variable rejects it).
+	got, err := Lower("type Color enum {\nRed\nGreen\n}\nfunc probe() {\nvar c = Color.Red\nvar text string = switch c {\ncase Color.Red:\n\"red\"\ncase Color.Green:\n\"green\"\n}\ntext\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -936,7 +942,7 @@ func TestLowerValueSwitchToGo(t *testing.T) {
 func TestLowerValueSwitchInferredRejected(t *testing.T) {
 	// §6.4.3 inference needs type identity the layer does not track - the
 	// §6.4.4 declared form is the v1 lowering.
-	if _, err := Lower("type Color enum {\nRed\n}\nvar c = Color.Red\nvar text = switch c {\ncase Color.Red:\n\"red\"\n}\n"); err == nil || !strings.Contains(err.Error(), "declared result type") {
+	if _, err := Lower("type Color enum {\nRed\n}\nfunc probe() {\nvar c = Color.Red\nvar text = switch c {\ncase Color.Red:\n\"red\"\n}\nreturn\n}"); err == nil || !strings.Contains(err.Error(), "declared result type") {
 		t.Fatalf("err = %v, want the declared-result-type reject", err)
 	}
 }
@@ -1016,7 +1022,7 @@ func TestLowerMultilineConstructionVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "\tpair := Pair{\nright: nextRight(),\nleft: nextLeft(),\n}\n") {
+	if !strings.Contains(got, "var pair = Pair{\nright: nextRight(),\nleft: nextLeft(),\n}\n") {
 		t.Fatalf("Lower() = %q, wants the verbatim multiline construction", got)
 	}
 }
@@ -1141,7 +1147,7 @@ func TestLowerInterfaceDispatchAndNullable(t *testing.T) {
 	}
 	for _, want := range []string{
 		"var r Reader = f",
-		"out := r.Read(d)",
+		"var out = r.Read(d)",
 		"var opt Reader = nil",
 		"if opt != nil {",
 	} {
@@ -1166,7 +1172,7 @@ func TestLowerUnsafeCore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"d := u", "_ = u", "fromRaw(u)", "sure := m"} {
+	for _, want := range []string{"d := u", "_ = u", "fromRaw(u)", "var sure = m"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Lower() = %q, wants %q", got, want)
 		}
@@ -1190,7 +1196,7 @@ func TestLowerInferredNullableCanonicalValidationForm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"user := Lookup()", "if user == nil {", "__anuy_Use(user)"} {
+	for _, want := range []string{"var user = Lookup()", "if user == nil {", "__anuy_Use(user)"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Lower() = %q, wants %q", got, want)
 		}

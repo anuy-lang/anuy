@@ -17,7 +17,7 @@ func TestLowerFileAnchorsStatementsToSourceLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\nfunc Run() {\n//line prog.anuy:1\n\tvar x int = 1\n//line prog.anuy:2\n\tx = 2\n\t_ = x\n}\n"
+	want := "package fixture\n\n//line prog.anuy:1\nvar x int = 1\nfunc Run() {\n//line prog.anuy:2\n\tx = 2\n\t_ = x\n}\n"
 	if got != want {
 		t.Fatalf("LowerFile() = %q, want %q", got, want)
 	}

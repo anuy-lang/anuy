@@ -16,7 +16,7 @@ func TestLoweredMethodValueVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(source, ":= c.Value") {
+	if !strings.Contains(source, "var f = c.Value") {
 		t.Fatalf("generated Go lost the method value:\n%s", source)
 	}
 }
@@ -26,7 +26,7 @@ func TestLoweredMethodExpressionsVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(source, ":= Counter.Value") || !strings.Contains(source, ":= (*Counter).Inc") {
+	if !strings.Contains(source, "var a = Counter.Value") || !strings.Contains(source, "var b = (*Counter).Inc") {
 		t.Fatalf("generated Go lost the method expressions:\n%s", source)
 	}
 }
