@@ -156,7 +156,7 @@ func TestFitToType(t *testing.T) {
 	if !FitToType(*ConstRatOf(big.NewRat(3, 2)), "float64") {
 		t.Fatal("floats round - magnitude fits")
 	}
-	if FitToType(*ConstIntOf(mustInt(t, "1" + strings.Repeat("0", 400))), "float64") {
+	if FitToType(*ConstIntOf(mustInt(t, "1"+strings.Repeat("0", 400))), "float64") {
 		t.Fatal("the magnitude overflows float64")
 	}
 	if FitToType(*ConstIntOf(mustInt(t, "5")), "string") {
