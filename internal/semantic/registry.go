@@ -74,6 +74,8 @@ var (
 	InitializationCycleDescriptor                = register(InitializationCycle, "ANUY3004", SeverityError)                // RFC-024 §8.2
 	UnprovableInitializationDependencyDescriptor = register(UnprovableInitializationDependency, "ANUY3005", SeverityError) // RFC-024 §8.3
 	PackageVarUnavailableAssignmentDescriptor    = register(PackageVarUnavailableAssignment, "ANUY3006", SeverityError)    // RFC-024 §8.4
+	InvalidInitSignatureDescriptor               = register(InvalidInitSignature, "ANUY3007", SeverityError)               // RFC-024 §8.5
+	InitNotOrdinaryDescriptor                    = register(InitNotOrdinary, "ANUY3008", SeverityError)                    // RFC-024 §8.6
 
 	// Nullability/narrowing block (4xxx).
 	UnsafeMemberAccessDescriptor         = register(UnsafeMemberAccess, "ANUY4001", SeverityError)         // R2
@@ -139,6 +141,8 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		InitializationCycleDescriptor,
 		UnprovableInitializationDependencyDescriptor,
 		PackageVarUnavailableAssignmentDescriptor,
+		InvalidInitSignatureDescriptor,
+		InitNotOrdinaryDescriptor,
 		UnsafeMemberAccessDescriptor,
 		RedundantSafeNavigationDescriptor,
 		NullableArgumentDescriptor,
@@ -217,6 +221,8 @@ var catalog = map[Code]string{
 	"ANUY3004": "package initialization cycle",
 	"ANUY3005": "package variable initializer dependency cannot be proven",
 	"ANUY3006": "package variable cannot become unavailable",
+	"ANUY3007": "invalid init function signature",
+	"ANUY3008": "init is not an ordinary function",
 	"ANUY4001": "only safe (?.) or non-null asserted calls are allowed on a nullable receiver",
 	"ANUY4002": "redundant safe navigation: the receiver is known to be non-null",
 	"ANUY4003": "nullable argument where a non-null is required",
