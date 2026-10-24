@@ -34,6 +34,8 @@ var approvedScheme = []struct {
 	// Story 79 (RFC-024 §6.9/§8): the init-function block.
 	{"InvalidInitSignature", "ANUY3007", SeverityError},
 	{"InitNotOrdinary", "ANUY3008", SeverityError},
+	// Story 80 (RFC-018 §6.5/§8.17): the constant-immutability block.
+	{"AssignmentToConstant", "ANUY2004", SeverityError},
 	{"UnsafeMemberAccess", "ANUY4001", SeverityError},
 	{"RedundantSafeNavigation", "ANUY4002", SeverityWarning},
 	{"NullableArgument", "ANUY4003", SeverityError},

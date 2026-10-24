@@ -1161,3 +1161,42 @@ func TestCheckInitCallExitOne(t *testing.T) {
 		t.Fatalf("code = %d, stdout = %q, want ANUY3008 exit one", code, stdout)
 	}
 }
+
+// --- Story 80 (RFC-024 §6.23 v4, RFC-018 §6.29 v2) ---
+
+// A package constant flows end to end: the compile-time declaration
+// lowers to Go const, the program reads it.
+func TestRunPackageConstantPrints(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nimport \"fmt\"\nconst MaxRetries = 5\nfunc main_work() {\nfmt.Println(MaxRetries)\n}\nmain_work()\n")
+	code, stdout, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "5") {
+		t.Fatalf("stdout = %q, wants the constant value", stdout)
+	}
+}
+
+// §8.17 v2 RFC-018: an assignment to a constant fails check.
+func TestCheckAssignmentToConstantExitOne(t *testing.T) {
+	path := writeTemp(t, "const MaxRetries = 5\nMaxRetries = 10\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY2004") {
+		t.Fatalf("code = %d, stdout = %q, want ANUY2004 exit one", code, stdout)
+	}
+}
+
+// §6.29 v2: constant-expression validity is delegated to the go-stage -
+// an invalid expression is caught there with remapped coordinates.
+func TestCheckInvalidConstantExpressionExitOne(t *testing.T) {
+	path := writeTemp(t, "const S = \"a\" + 1\n")
+	code, stdout, stderr := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout+stderr, "test.anuy:1") {
+		t.Fatalf("code = %d, stdout = %q, want the go-stage constant error remapped to the source", code, stdout)
+	}
+}
