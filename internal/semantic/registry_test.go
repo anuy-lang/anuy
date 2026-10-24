@@ -27,6 +27,10 @@ var approvedScheme = []struct {
 	{"ReadBeforeInitialization", "ANUY3001", SeverityError},
 	{"PackageInitializerRequired", "ANUY3002", SeverityError},
 	{"MissingReturn", "ANUY3003", SeverityError},
+	// Story 78 (RFC-024 §8): the package-variable initialization block.
+	{"InitializationCycle", "ANUY3004", SeverityError},
+	{"UnprovableInitializationDependency", "ANUY3005", SeverityError},
+	{"PackageVarUnavailableAssignment", "ANUY3006", SeverityError},
 	{"UnsafeMemberAccess", "ANUY4001", SeverityError},
 	{"RedundantSafeNavigation", "ANUY4002", SeverityWarning},
 	{"NullableArgument", "ANUY4003", SeverityError},

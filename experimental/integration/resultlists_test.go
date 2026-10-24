@@ -34,7 +34,11 @@ func TestFallibleMultiResultStrictContractIntact(t *testing.T) {
 	// still requires the error to be handled (ANUY6006 for a discarded
 	// fallible result in a destructuring is story 36 machinery; here the
 	// unchecked error lint may fire - only validity codes are asserted).
-	result, err := AnalyzeSource("func Load() (int, error?) {\nreturn 0, nil\n}\nvar a, e = Load()\nif e != nil {\n}\na\ne\n")
+	// The destructuring lives in a function body: story 78 (RFC-024 6.3)
+	// rejects fallible destructuring of package variables, so the
+	// top-level form of the pre-package-var corpus moved into the
+	// RBInit-slice local model.
+	result, err := AnalyzeSource("func Load() (int, error?) {\nreturn 0, nil\n}\nfunc probe() {\nvar a, e = Load()\nif e != nil {\n}\na\ne\n}\n")
 	if err != nil {
 		t.Fatal(err)
 	}

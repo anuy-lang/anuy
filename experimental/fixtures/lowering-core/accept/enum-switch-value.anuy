@@ -2,10 +2,13 @@ type Color enum {
 Red
 Green
 }
+func probe() {
 var c = Color.Red
 var text string = switch c {
 case Color.Red:
 "red"
 case Color.Green:
 "green"
+}
+text
 }

@@ -1,2 +1,5 @@
+func probe() {
 var a User?
 var c int? = a?.count
+c
+}

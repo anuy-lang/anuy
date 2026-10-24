@@ -93,16 +93,26 @@ func AnalyzeFiles(files []SourceFile) (Result, error) {
 	pkg := semantic.NewScope()
 	for i := range files {
 		b.file = files[i].Path
+		b.preparePackage(programs[i].Imports, pkg)
 		for j := range programs[i].Statements {
 			if st := &programs[i].Statements[j]; st.Kind == parser.Interface {
 				b.registerInterface(st.Interface)
 			}
 		}
 	}
+	// Story 78 (RFC-024 §6.22 v2): package variables pre-register into the
+	// shared namespace before any body analyzes, and the entry seeding
+	// establishes them before the merged program flow.
+	for i := range files {
+		b.file = files[i].Path
+		b.preRegisterPackageVars(programs[i].Statements, files[i].Path, pkg)
+	}
+	b.seedPackageVars()
 	for i := range files {
 		b.file = files[i].Path
 		b.emit(withoutInterfaces(programs[i].Statements), pkg)
 	}
+	b.checkPackageInit()
 	result.Diagnostics = append(result.Diagnostics, b.diagnostics...)
 	result.Diagnostics = append(result.Diagnostics, b.analyze().Diagnostics...)
 	result.Diagnostics = append(result.Diagnostics, b.uncheckedErrors()...)
@@ -140,7 +150,16 @@ func withoutInterfaces(statements []parser.Statement) []parser.Statement {
 func analyzeSourceFile(path, source string, program parser.Program) (Result, error) {
 	b := newBuilder()
 	b.file = path
-	b.emit(program.Statements, semantic.NewScope())
+	pkg := semantic.NewScope()
+	// Story 78 (RFC-024 §6.22 v2): package variables pre-register before
+	// any body analyzes; the entry seeding establishes them before the
+	// program flow; the initialization pass runs after the statement
+	// tables settle.
+	b.preparePackage(program.Imports, pkg)
+	b.preRegisterPackageVars(program.Statements, path, pkg)
+	b.seedPackageVars()
+	b.emit(program.Statements, pkg)
+	b.checkPackageInit()
 	result := Result{}
 	result.Diagnostics = append(result.Diagnostics, b.diagnostics...)
 	result.Diagnostics = append(result.Diagnostics, b.analyze().Diagnostics...)
@@ -221,6 +240,60 @@ func goCompatDiagnostics(path string, program parser.Program) []semantic.Diagnos
 	return diags
 }
 
+// registerDeclaredType applies the declared-type registration of a
+// binding (story 08 G1, stories 22/40/69/70): the nullability class, the
+// named-type roots of the field-path classification, the R1 tracking of
+// `error?` and the canonical signature of func-typed bindings. Shared by
+// the ordinary declaration path and the package-variable
+// pre-registration, whose classes must exist before any body analyzes
+// (story 78, RFC-024 §6.22 v2).
+func (b *builder) registerDeclaredType(id semantic.BindingID, typeExpr *parser.TypeExpr, span parser.Span) {
+	if typeExpr.Nullable {
+		b.nilable[id] = true
+		if typeExpr.Name == "error" {
+			b.errSpans[id] = span
+			b.errFiles[id] = b.file
+		}
+	}
+	if typeExpr.Kind == parser.NamedType {
+		// Declared class (story 08, G1): a named type is non-null or
+		// nullable by its `?`; composite spellings stay unknown - their
+		// nullability binding is outside the slice.
+		if typeExpr.Nullable {
+			b.classes[id] = semantic.NullabilityNullable
+		} else {
+			b.classes[id] = semantic.NullabilityNonNull
+		}
+		// Story 22: the named type roots field-path classification.
+		b.bindingTypes[id] = typeExpr.Name
+	} else if typeExpr.Kind == parser.PointerType && typeExpr.Elem != nil && typeExpr.Elem.Kind == parser.NamedType {
+		// Story 40: the `*T` spelling names the binding's type for
+		// conversion checks and per-type method resolution. Classes stay
+		// untouched (bare `*T` remains nil-tolerant, RFC-002 §6.2.3) and
+		// field paths keep the tolerance - rootStruct matches the struct
+		// table by bare name.
+		b.bindingTypes[id] = "*" + typeExpr.Elem.Name
+	} else if typeExpr.Kind == parser.FuncType {
+		// Story 69 (RFC-019 §6.3): a function type is non-null by
+		// default, nullable in the `(func ...)?` spelling - the
+		// native-nil representation (RFC-002 §6.8.8) keeps the plain
+		// `== nil` dispatch, tracked by the lowering (RFC-009 §6.7.12).
+		// Function types have no fields, so no field-path root is
+		// registered.
+		if typeExpr.Nullable {
+			b.classes[id] = semantic.NullabilityNullable
+		} else {
+			b.classes[id] = semantic.NullabilityNonNull
+		}
+		// Story 70 (§6.16): the declared signature is the target
+		// contract; initializers and later assignments must spell it
+		// exactly (widening applies, variance does not).
+		if sig := typeFuncSignature(typeExpr); sig != "" {
+			b.funcSigs[id] = sig
+		}
+	}
+}
+
 // uncheckedErrors implements the R1 lint (CONTRACTS §3): a declared
 // `error?` binding read nowhere yields exactly one Warning at its
 // declaration span. Any read anywhere lifts it, assignments do not
@@ -244,6 +317,552 @@ func (b *builder) uncheckedErrors() []semantic.Diagnostic {
 }
 
 type edge struct{ from, to semantic.BlockID }
+
+// packageVarGroup is one initialization group (story 78, RFC-024 §6.6):
+// the pre-registered bindings of one top-level `var` statement, its
+// statement (for shape classification) and the diagnostic span.
+type packageVarGroup struct {
+	statement *parser.Statement
+	file      string
+	ids       []semantic.BindingID
+	span      parser.Span
+}
+
+// preparePackage records the package scope the package-variable machinery
+// shares and the import qualifiers of one file (story 63: the last path
+// segment is the qualifier).
+func (b *builder) preparePackage(imports []parser.Import, scope *semantic.Scope) {
+	b.pkgScope = scope
+	for _, imp := range imports {
+		qualifier := imp.Path
+		if i := strings.LastIndex(qualifier, "/"); i >= 0 {
+			qualifier = qualifier[i+1:]
+		}
+		b.importQualifiers[qualifier] = true
+	}
+}
+
+// preRegisterPackageVars seeds the package namespace with the top-level
+// `var` statements carrying an explicit initializer (story 78, RFC-024
+// §6.1/§6.22 v2): every name resolves before any body is analyzed, so
+// declaration order is not observable (§6.10.2 RFC-010, the story 62
+// interface precedent). Declared types register statically (the `T?`
+// classes of story 05 participate in narrowing for every body); the
+// uninitialized `var T` form keeps its transitional program-body
+// behavior until the RBInit corpus migration (§6.1 invalid, ANUY3002
+// stays a kernel-API verdict).
+func (b *builder) preRegisterPackageVars(statements []parser.Statement, file string, scope *semantic.Scope) {
+	for i := range statements {
+		st := &statements[i]
+		if st.Kind != parser.Var || st.TryCall != nil || len(st.Values) == 0 {
+			continue
+		}
+		group := packageVarGroup{statement: st, file: file, span: st.Span}
+		for _, name := range st.Names {
+			if name == "_" {
+				continue
+			}
+			if serr := scope.Declare(name); serr != nil {
+				b.report(serr.Category, st.Span)
+				continue
+			}
+			id := scope.Resolve(name)
+			b.packageVars[id] = true
+			b.declared[id] = true
+			group.ids = append(group.ids, id)
+		}
+		if st.TypeExpr != nil {
+			for _, id := range group.ids {
+				b.registerDeclaredType(id, st.TypeExpr, st.Span)
+			}
+		}
+		// A blank-only statement still forms an initialization group: its
+		// initializer executes at package init (§6.6), so its references
+		// join the dependency graph.
+		b.pkgGroups = append(b.pkgGroups, group)
+	}
+	// The declared same-package callees feed the transitive dependency
+	// expansion (§6.4); methods group by name - the conservative union
+	// over same-name methods covers unknown receivers (§6.4 MAY-branch).
+	for i := range statements {
+		st := &statements[i]
+		if st.Kind != parser.Function || st.Closure == nil || len(st.Names) == 0 {
+			continue
+		}
+		if st.Method != "" {
+			b.methodBodies[st.Names[0]] = append(b.methodBodies[st.Names[0]], st)
+			continue
+		}
+		b.funcBodies[st.Names[0]] = st
+	}
+}
+
+// seedPackageVars establishes every package variable in the entry block
+// (§6.10): after package initialization each native package variable
+// holds a valid value, so the program flow and every body read them
+// initialized regardless of declaration position.
+func (b *builder) seedPackageVars() {
+	if len(b.pkgGroups) == 0 {
+		return
+	}
+	entry := make([]semantic.Operation, 0, 2*len(b.pkgGroups))
+	for _, group := range b.pkgGroups {
+		for _, id := range group.ids {
+			entry = append(entry, semantic.Declare(id), semantic.Assign(id))
+			b.facts[0][id] = true
+			b.assigned[id] = true
+		}
+	}
+	b.blocks[0].Operations = append(entry, b.blocks[0].Operations...)
+}
+
+// isPackageVarStatement reports whether the var statement's bindings are
+// the pre-registered package variables. The check is pointer-free (it
+// survives the withoutInterfaces re-slicing of package mode) and the
+// scope identity gates it to the top level - a local shadowing a package
+// name takes the ordinary declaration path.
+func (b *builder) isPackageVarStatement(statement *parser.Statement, scope *semantic.Scope) bool {
+	if scope != b.pkgScope {
+		return false
+	}
+	for _, name := range statement.Names {
+		if name == "_" {
+			continue
+		}
+		if !b.packageVars[scope.Resolve(name)] {
+			return false
+		}
+	}
+	return true
+}
+
+// emitPackageVar analyzes a pre-registered package-variable statement in
+// the program flow (§6.22 v2): the storage and initialization live in
+// the package entry (seedPackageVars), so the statement position only
+// classifies the initializer - reads, narrowing establishment and
+// closure captures.
+func (b *builder) emitPackageVar(statement *parser.Statement, scope *semantic.Scope) {
+	b.readIdents(statement, scope)
+	b.checkUnsafeCallValues(statement.Values, statement.Span)
+	targets := make([]semantic.BindingID, 0, len(statement.Names))
+	for i, name := range statement.Names {
+		if name == "_" {
+			continue
+		}
+		id := scope.Resolve(name)
+		if id == 0 {
+			continue
+		}
+		targets = append(targets, id)
+		if statement.TypeExpr == nil && i < len(statement.Values) {
+			// The inferred class and the keyed/enum type pins of the
+			// generic declaration path (story 08/22/30).
+			b.classes[id] = b.classifyValue(&statement.Values[i], scope)
+			if nav := statement.Values[i].Navigation; nav != nil && len(nav.Segments) == 1 && !nav.Segments[0].Safe && !nav.Segments[0].Call {
+				if _, isEnum := b.enums[nav.Receiver]; isEnum {
+					b.bindingTypes[id] = nav.Receiver
+				}
+			}
+			if keyed := statement.Values[i].Keyed; keyed != nil {
+				b.bindingTypes[id] = keyed.Name
+			}
+		}
+	}
+	if statement.Values != nil {
+		b.establishAssignments(statement, scope)
+	}
+	if statement.TypeExpr != nil {
+		b.checkInterfaceConversions(statement, scope)
+	}
+	b.analyzeClosures(statement, scope, targets)
+}
+
+// checkPackageInit runs the §6.3/§6.4/§6.6 package-initialization pass
+// (story 78): per-group shape classification (§8.4), the transitive
+// dependency closure through same-package bodies (§6.4), and the cycle
+// verdict of the kernel graph (§8.2). Rejected groups (conditional
+// shape, provably dynamic dispatch) leave the graph.
+func (b *builder) checkPackageInit() {
+	if len(b.pkgGroups) == 0 {
+		return
+	}
+	graph := make([]semantic.PackageInitGroup, len(b.pkgGroups))
+	for i := range b.pkgGroups {
+		group := &b.pkgGroups[i]
+		if class, bad := b.classifyGroupShape(group); bad {
+			b.report(class, group.span)
+			continue
+		}
+		refs := b.groupRefs(group)
+		if refs.dynamic {
+			// §6.4: unknown dynamic same-package dispatch is never
+			// dependency-free (§8.3).
+			b.report(semantic.UnprovableInitializationDependency, group.span)
+			continue
+		}
+		graph[i] = semantic.PackageInitGroup{Bindings: group.ids, Deps: refs.deps}
+	}
+	g := semantic.NewPackageInitGraph(graph)
+	if _, ok := g.ReadyOrder(); ok {
+		return
+	}
+	// §8.2: the diagnostic shows the shortest found dependency cycle;
+	// the chain head's declaration carries the blame span.
+	if cycle := g.ShortestCycle(); len(cycle) > 0 {
+		b.report(semantic.InitializationCycle, b.pkgGroups[cycle[0]].span)
+	}
+}
+
+// classifyGroupShape verdicts the §6.3/§6.6 declaration shapes of a
+// multi-name group: the comma-ok family (any non-call single value -
+// indexed, assertion, receive) is conditional by construction and a
+// declared fallible callee destructures conditionally - both reject
+// (§8.4). Parallel values and unknown callees (F-64-1 tolerance,
+// §6.22 v2) accept.
+func (b *builder) classifyGroupShape(group *packageVarGroup) (semantic.DiagnosticCategory, bool) {
+	s := group.statement
+	if len(s.Names) <= 1 || len(s.Values) != 1 {
+		return "", false
+	}
+	value := &s.Values[0]
+	callee := callCalleePrefix(value.Text)
+	if value.Navigation == nil || len(value.Navigation.Segments) == 0 {
+		if callee == "" || strings.Contains(callee, ".") {
+			// A non-call single value into several bindings is the
+			// comma-ok family - conditional regardless of resolution.
+			return semantic.PackageVarUnavailableAssignment, true
+		}
+	}
+	if res, ok := b.calleeResultsForPrefix(callee); ok {
+		if res.fallible {
+			return semantic.PackageVarUnavailableAssignment, true
+		}
+	}
+	return "", false
+}
+
+// bodyRefs is the package-state reference set collected from one
+// initializer or body (§6.4): the package bindings referenced (reads and
+// writes both count, as in Go), the same-package callees whose bodies
+// expand the closure, and whether the code provably dispatches
+// dynamically - a call through a func-typed value or an interface
+// receiver cannot have its package-state dependencies enumerated.
+type bodyRefs struct {
+	deps    []semantic.BindingID
+	callees []string
+	methods []string
+	dynamic bool
+}
+
+// groupRefs collects one group's transitive dependency set (§6.4): the
+// initializer references plus the bodies of every reachable same-package
+// function/method. Expansion is worklist-driven and per-group, so
+// recursion and shared helpers contribute once without cross-group
+// contamination.
+func (b *builder) groupRefs(group *packageVarGroup) *bodyRefs {
+	refs := &bodyRefs{}
+	locals := map[string]bool{}
+	for vi := range group.statement.Values {
+		b.collectValueRefs(&group.statement.Values[vi], locals, refs)
+	}
+	expandedFuncs := map[string]bool{}
+	expandedMethods := map[string]bool{}
+	for len(refs.callees) > 0 || len(refs.methods) > 0 {
+		if len(refs.callees) > 0 {
+			name := refs.callees[0]
+			refs.callees = refs.callees[1:]
+			if expandedFuncs[name] {
+				continue
+			}
+			expandedFuncs[name] = true
+			if st := b.funcBodies[name]; st != nil {
+				b.collectFuncBody(st, refs)
+			}
+			continue
+		}
+		name := refs.methods[0]
+		refs.methods = refs.methods[1:]
+		if expandedMethods[name] {
+			continue
+		}
+		expandedMethods[name] = true
+		for _, st := range b.methodBodies[name] {
+			b.collectFuncBody(st, refs)
+		}
+	}
+	return refs
+}
+
+// collectFuncBody walks one declared function/method body with its
+// parameters (and receiver) as locals.
+func (b *builder) collectFuncBody(st *parser.Statement, refs *bodyRefs) {
+	if st.Closure == nil {
+		return
+	}
+	locals := map[string]bool{}
+	if st.ReceiverName != "" && st.ReceiverName != "_" {
+		locals[st.ReceiverName] = true
+	}
+	for _, param := range st.Closure.Params {
+		locals[param.Name] = true
+	}
+	b.collectBodyRefs(st.Closure.Body, locals, refs)
+}
+
+// collectBodyRefs walks statements collecting package-state references.
+// locals carry the names bound inside the walked body - they shadow the
+// package scope. Unresolved names stay in the F-64-1 tolerance class:
+// in the pure-.anuy layer unresolved = undefined, caught by the §6.4.8
+// go-stage (§6.22 v2).
+func (b *builder) collectBodyRefs(statements []parser.Statement, locals map[string]bool, refs *bodyRefs) {
+	for i := range statements {
+		s := &statements[i]
+		switch s.Kind {
+		case parser.Var:
+			for vi := range s.Values {
+				b.collectValueRefs(&s.Values[vi], locals, refs)
+			}
+			if s.TryCall != nil {
+				b.collectNavCallee(s.TryCall, locals, refs)
+			}
+			for _, name := range s.Names {
+				if name != "_" {
+					locals[name] = true
+				}
+			}
+		case parser.Assign:
+			if s.Target != nil {
+				// Field mutation reads the receiver root.
+				if id := b.packageDep(s.Target.Receiver, locals); id != 0 {
+					refs.deps = append(refs.deps, id)
+				}
+			} else {
+				// A write to a package variable counts as a reference
+				// (§6.4 - as in Go).
+				for _, name := range s.Names {
+					if id := b.packageDep(name, locals); id != 0 {
+						refs.deps = append(refs.deps, id)
+					}
+				}
+			}
+			for vi := range s.Values {
+				b.collectValueRefs(&s.Values[vi], locals, refs)
+			}
+		case parser.Read:
+			for _, name := range s.Names {
+				if id := b.packageDep(name, locals); id != 0 {
+					refs.deps = append(refs.deps, id)
+				}
+			}
+		case parser.Call, parser.Try:
+			if s.Call != nil {
+				b.collectNavCallee(s.Call, locals, refs)
+			}
+			for vi := range s.Values {
+				b.collectValueRefs(&s.Values[vi], locals, refs)
+			}
+		case parser.If, parser.Loop:
+			for _, ident := range s.CondIdents {
+				if id := b.packageDep(ident, locals); id != 0 {
+					refs.deps = append(refs.deps, id)
+				}
+			}
+			b.collectBodyRefs(s.Body, copyLocals(locals), refs)
+			b.collectBodyRefs(s.Else, copyLocals(locals), refs)
+		case parser.Switch:
+			if id := b.packageDep(s.Switch.Scrutinee, locals); id != 0 {
+				refs.deps = append(refs.deps, id)
+			}
+			for _, arm := range s.Switch.Arms {
+				b.collectBodyRefs(arm.Body, copyLocals(locals), refs)
+			}
+		default:
+			for vi := range s.Values {
+				b.collectValueRefs(&s.Values[vi], locals, refs)
+			}
+			if len(s.Body) > 0 {
+				b.collectBodyRefs(s.Body, copyLocals(locals), refs)
+			}
+			if len(s.Else) > 0 {
+				b.collectBodyRefs(s.Else, copyLocals(locals), refs)
+			}
+		}
+	}
+}
+
+// collectValueRefs collects the package-state references of one RHS
+// value: closure bodies walk with their parameter locals, navigations
+// read their receiver and expand method references, keyed literals and
+// raw text contribute their collected idents.
+func (b *builder) collectValueRefs(value *parser.Value, locals map[string]bool, refs *bodyRefs) {
+	if value == nil {
+		return
+	}
+	if value.Closure != nil {
+		// A closure-valued initializer creates a value; its body does not
+		// execute during initialization (§6.4: only code the initializer
+		// may execute needs an enumerable dependency set). The free
+		// references become the group's dependencies; dispatch inside the
+		// body runs at call time, outside the initialization ordering
+		// question - its dynamic verdict is intentionally dropped.
+		child := &bodyRefs{}
+		childLocals := copyLocals(locals)
+		for _, param := range value.Closure.Params {
+			childLocals[param.Name] = true
+		}
+		b.collectBodyRefs(value.Closure.Body, childLocals, child)
+		refs.deps = append(refs.deps, child.deps...)
+		refs.callees = append(refs.callees, child.callees...)
+		refs.methods = append(refs.methods, child.methods...)
+		return
+	}
+	if value.Switch != nil {
+		for _, arm := range value.Switch.Arms {
+			b.collectValueRefs(arm.Value, locals, refs)
+		}
+		return
+	}
+	if value.Navigation != nil {
+		nav := value.Navigation
+		if b.importQualifiers[nav.Receiver] {
+			// Foreign trust boundary (RFC-008, story 63): qualified
+			// chains carry no same-package references.
+			return
+		}
+		if id := b.packageDep(nav.Receiver, locals); id != 0 {
+			refs.deps = append(refs.deps, id)
+			if typeName := b.bindingTypes[id]; typeName != "" && b.interfaces[typeName] != nil {
+				// Interface dispatch: the possible targets are not
+				// enumerable in this slice (§6.4, §8.3).
+				refs.dynamic = true
+			}
+		}
+		for _, segment := range nav.Segments {
+			// A method reference (call or method value) expands the
+			// receiver's method union (§6.4); field names are not
+			// bindings and miss the table.
+			if _, ok := b.methodBodies[segment.Name]; ok {
+				refs.methods = append(refs.methods, segment.Name)
+			}
+		}
+		// The parser flattens call-argument idents after the receiver.
+		argIdents := value.Idents
+		if len(argIdents) > 0 {
+			argIdents = argIdents[1:]
+		}
+		for _, ident := range argIdents {
+			if id := b.packageDep(ident, locals); id != 0 {
+				refs.deps = append(refs.deps, id)
+			}
+		}
+		return
+	}
+	// Raw text and keyed literals: the collected idents are binding reads
+	// (keys and type names are not - parser contract). The intrinsic
+	// callee is not a read (story 41).
+	_, intrinsic := assumeNonNullOperand(value)
+	for j, ident := range value.Idents {
+		if intrinsic && j == 0 {
+			continue
+		}
+		if id := b.packageDep(ident, locals); id != 0 {
+			refs.deps = append(refs.deps, id)
+		}
+	}
+	// A bare call shape expands through the declared functions; a call
+	// through a resolvable binding (a func-typed value, a local) is
+	// provably dynamic (§8.3) - unless the callee is statically nullable,
+	// where the §6.7 call gate already invalidates the invocation and the
+	// dependency question never arises. Dotted callees resolve through
+	// the navigation branch above.
+	if callee := callCalleePrefix(value.Text); callee != "" && isIdentName(callee) {
+		switch {
+		case b.funcBodies[callee] != nil:
+			refs.callees = append(refs.callees, callee)
+		case locals[callee]:
+			refs.dynamic = true
+		default:
+			if id := b.pkgScope.Resolve(callee); id != 0 && b.funcSigs[id] != "" && !b.staticallyNullable(id) {
+				refs.dynamic = true
+			}
+		}
+	}
+}
+
+// collectNavCallee classifies a call statement's callee: a bare name
+// expands through the declared function table or rejects as provably
+// dynamic (§8.3); a navigation root reads the receiver and expands the
+// method union; import-qualified chains are the foreign trust boundary
+// (RFC-008).
+func (b *builder) collectNavCallee(nav *parser.NavigationExpr, locals map[string]bool, refs *bodyRefs) {
+	if nav == nil {
+		return
+	}
+	if len(nav.Segments) == 0 {
+		switch {
+		case locals[nav.Receiver]:
+			refs.dynamic = true
+		case b.funcBodies[nav.Receiver] != nil:
+			refs.callees = append(refs.callees, nav.Receiver)
+		default:
+			if id := b.packageDep(nav.Receiver, locals); id != 0 {
+				refs.deps = append(refs.deps, id)
+			}
+			if id := b.pkgScope.Resolve(nav.Receiver); id != 0 && b.funcSigs[id] != "" {
+				refs.dynamic = true
+			}
+		}
+		return
+	}
+	if id := b.packageDep(nav.Receiver, locals); id != 0 {
+		refs.deps = append(refs.deps, id)
+		if typeName := b.bindingTypes[id]; typeName != "" && b.interfaces[typeName] != nil {
+			refs.dynamic = true
+		}
+	}
+	for _, segment := range nav.Segments {
+		if segment.Call {
+			if _, ok := b.methodBodies[segment.Name]; ok {
+				refs.methods = append(refs.methods, segment.Name)
+			}
+		}
+	}
+}
+
+// packageDep resolves a name against the walked body's locals and the
+// package scope: non-zero only when the name is a pre-registered package
+// variable - the only package state the initialization graph tracks.
+func (b *builder) packageDep(name string, locals map[string]bool) semantic.BindingID {
+	if locals[name] {
+		return 0
+	}
+	id := b.pkgScope.Resolve(name)
+	if b.packageVars[id] {
+		return id
+	}
+	return 0
+}
+
+func copyLocals(locals map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(locals))
+	for name := range locals {
+		out[name] = true
+	}
+	return out
+}
+
+// isIdentName reports whether the text is a plain identifier - the callee
+// shapes the dependency expansion reasons about.
+func isIdentName(text string) bool {
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || (i > 0 && c >= '0' && c <= '9') {
+			continue
+		}
+		return false
+	}
+	return len(text) > 0
+}
 
 // loopContext tracks the innermost open loop for `break`/`continue` wiring.
 // exitFacts accumulates the intersection of facts on every edge entering the
@@ -430,6 +1049,23 @@ type builder struct {
 	// foundation of the slice-2 conversion checks.
 	impls map[string]map[string]bool
 
+	// Package-variable machinery (story 78, RFC-024 §6.22 v2). pkgScope
+	// is the shared package namespace the pre-registration seeds;
+	// packageVars marks the pre-registered package-variable bindings -
+	// top-level `var` statements with an explicit initializer (§6.1).
+	// pkgGroups records their initialization groups in canonical
+	// declaration order (§6.6); funcBodies/methodBodies map declared
+	// callees to their statements for the transitive dependency
+	// expansion (§6.4, methods unioned by name); importQualifiers holds
+	// the story-63 qualifiers - qualified chains through them are the
+	// foreign trust boundary (RFC-008), not package references.
+	pkgScope         *semantic.Scope
+	packageVars      map[semantic.BindingID]bool
+	pkgGroups        []packageVarGroup
+	funcBodies       map[string]*parser.Statement
+	methodBodies     map[string][]*parser.Statement
+	importQualifiers map[string]bool
+
 	// unsafeDepth tracks the lexical unsafe context (story 41, RFC-007
 	// §6.6.1-6.6.2): privileged operations require depth > 0. unsafeFuncs
 	// records `unsafe func` declarations (§6.7.1) whose calls require the
@@ -440,38 +1076,42 @@ type builder struct {
 
 func newBuilder() *builder {
 	return &builder{
-		blocks:          []semantic.Block{{ID: 1}},
-		facts:           []map[semantic.BindingID]bool{{}},
-		nonNil:          []map[semantic.BindingID]bool{{}},
-		pathNN:          []map[string]bool{{}},
-		terminated:      []bool{false},
-		nextBlockID:     1,
-		correlated:      map[semantic.BindingID]semantic.BindingID{},
-		nilable:         map[semantic.BindingID]bool{},
-		classes:         map[semantic.BindingID]semantic.Nullability{},
-		flowNullable:    map[semantic.BindingID]bool{},
-		closureMutates:  map[semantic.BindingID][]semantic.BindingID{},
-		declared:        map[semantic.BindingID]bool{},
-		assigned:        map[semantic.BindingID]bool{},
-		errSpans:        map[semantic.BindingID]parser.Span{},
-		errFiles:        map[semantic.BindingID]string{},
-		reads:           map[semantic.BindingID]bool{},
-		pure:            map[semantic.BindingID]bool{},
-		methods:         map[string]methodInfo{},
-		methodMutates:   map[string][]semantic.BindingID{},
-		funcResults:     map[string]declResult{},
-		funcParams:      map[string][]semantic.Nullability{},
-		funcSigs:        map[semantic.BindingID]string{},
-		funcParamTypes:  map[string][]*parser.TypeExpr{},
-		funcVariadic:    map[string]bool{},
-		methodSigs:      map[string]methodSignature{},
-		funcResultExprs: map[string][]*parser.TypeExpr{},
-		structs:         map[string]*structInfo{},
-		enums:           map[string][]string{},
-		bindingTypes:    map[semantic.BindingID]string{},
-		interfaces:      map[string]*ifaceInfo{},
-		impls:           map[string]map[string]bool{},
-		unsafeFuncs:     map[string]bool{},
+		blocks:           []semantic.Block{{ID: 1}},
+		facts:            []map[semantic.BindingID]bool{{}},
+		nonNil:           []map[semantic.BindingID]bool{{}},
+		pathNN:           []map[string]bool{{}},
+		terminated:       []bool{false},
+		nextBlockID:      1,
+		correlated:       map[semantic.BindingID]semantic.BindingID{},
+		nilable:          map[semantic.BindingID]bool{},
+		classes:          map[semantic.BindingID]semantic.Nullability{},
+		flowNullable:     map[semantic.BindingID]bool{},
+		closureMutates:   map[semantic.BindingID][]semantic.BindingID{},
+		declared:         map[semantic.BindingID]bool{},
+		assigned:         map[semantic.BindingID]bool{},
+		errSpans:         map[semantic.BindingID]parser.Span{},
+		errFiles:         map[semantic.BindingID]string{},
+		reads:            map[semantic.BindingID]bool{},
+		pure:             map[semantic.BindingID]bool{},
+		methods:          map[string]methodInfo{},
+		methodMutates:    map[string][]semantic.BindingID{},
+		funcResults:      map[string]declResult{},
+		funcParams:       map[string][]semantic.Nullability{},
+		funcSigs:         map[semantic.BindingID]string{},
+		funcParamTypes:   map[string][]*parser.TypeExpr{},
+		funcVariadic:     map[string]bool{},
+		methodSigs:       map[string]methodSignature{},
+		funcResultExprs:  map[string][]*parser.TypeExpr{},
+		structs:          map[string]*structInfo{},
+		enums:            map[string][]string{},
+		bindingTypes:     map[semantic.BindingID]string{},
+		interfaces:       map[string]*ifaceInfo{},
+		impls:            map[string]map[string]bool{},
+		unsafeFuncs:      map[string]bool{},
+		packageVars:      map[semantic.BindingID]bool{},
+		funcBodies:       map[string]*parser.Statement{},
+		methodBodies:     map[string][]*parser.Statement{},
+		importQualifiers: map[string]bool{},
 	}
 }
 
@@ -1511,6 +2151,13 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		}
 		b.emitCall(statement, scope)
 	case parser.Var:
+		if statement.TryCall == nil && len(statement.Values) > 0 && b.isPackageVarStatement(statement, scope) {
+			// Story 78 (RFC-024 §6.22 v2): a pre-registered package
+			// variable - the entry seeding owns storage and
+			// initialization, the statement classifies the initializer.
+			b.emitPackageVar(statement, scope)
+			return
+		}
 		if statement.TryCall != nil {
 			b.emitTryDecl(statement, scope)
 			return
@@ -1561,52 +2208,7 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 				b.bindingTypes[id] = enumName
 			}
 			if statement.TypeExpr != nil {
-				if statement.TypeExpr.Nullable {
-					b.nilable[id] = true
-					if statement.TypeExpr.Name == "error" {
-						b.errSpans[id] = statement.Span
-						b.errFiles[id] = b.file
-					}
-				}
-				// Declared class (story 08, G1): a named type is non-null or
-				// nullable by its `?`; composite spellings stay unknown -
-				// their nullability binding is outside the slice.
-				if statement.TypeExpr.Kind == parser.NamedType {
-					if statement.TypeExpr.Nullable {
-						b.classes[id] = semantic.NullabilityNullable
-					} else {
-						b.classes[id] = semantic.NullabilityNonNull
-					}
-					// Story 22: the named type roots field-path classification.
-					b.bindingTypes[id] = statement.TypeExpr.Name
-				} else if statement.TypeExpr.Kind == parser.PointerType && statement.TypeExpr.Elem != nil && statement.TypeExpr.Elem.Kind == parser.NamedType {
-					// Story 40: the `*T` spelling names the binding's type
-					// for conversion checks and per-type method resolution.
-					// Classes stay untouched (bare `*T` remains nil-tolerant,
-					// RFC-002 §6.2.3) and field paths keep the tolerance -
-					// rootStruct matches the struct table by bare name.
-					b.bindingTypes[id] = "*" + statement.TypeExpr.Elem.Name
-				} else if statement.TypeExpr.Kind == parser.FuncType {
-					// Story 69 (RFC-019 §6.3): a function type is non-null
-					// by default, nullable in the `(func ...)?` spelling -
-					// the native-nil representation (RFC-002 §6.8.8) keeps
-					// the plain `== nil` dispatch, tracked by the lowering
-					// (RFC-009 §6.7.12). Function types have no fields, so
-					// no field-path root is registered.
-					if statement.TypeExpr.Nullable {
-						b.classes[id] = semantic.NullabilityNullable
-					} else {
-						b.classes[id] = semantic.NullabilityNonNull
-					}
-					// Story 70 (§6.16): the declared signature is the
-					// target contract; initializers and later assignments
-					// must spell it exactly (widening applies, variance
-					// does not) - establishAssignments pairs the check
-					// with the initializer below.
-					if sig := typeFuncSignature(statement.TypeExpr); sig != "" {
-						b.funcSigs[id] = sig
-					}
-				}
+				b.registerDeclaredType(id, statement.TypeExpr, statement.Span)
 			} else {
 				b.classes[id] = inferred
 				// Story 22: a keyed construction names its type - the field
@@ -1652,6 +2254,19 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		}
 		b.readIdents(statement, scope)
 		b.checkUnsafeCallValues(statement.Values, statement.Span)
+		// Story 78 (RFC-024 §6.3/§8.4): a conditional assignment - fewer
+		// values than targets, the comma-ok family - cannot directly
+		// target a package variable; extract into a local conditional
+		// binding and assign on the successful path. Parallel values
+		// (equal counts) stay ordinary.
+		if len(statement.Values) < len(statement.Names) {
+			for _, name := range statement.Names {
+				if name != "_" && b.packageVars[scope.Resolve(name)] {
+					b.report(semantic.PackageVarUnavailableAssignment, statement.Span)
+					return
+				}
+			}
+		}
 		targets := make([]semantic.BindingID, 0, len(statement.Names))
 		for _, name := range statement.Names {
 			if name == "_" {

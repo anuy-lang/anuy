@@ -898,7 +898,10 @@ func TestRunMethodValueCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ANUY_REPLACE_ROOT", root)
-	path := writeTemp(t, "package demo\ntype Counter struct {\nn int\n}\nfunc (c Counter) Value() int {\nreturn c.n\n}\nfunc Apply(transform func() int) int {\nreturn transform()\n}\nvar c = Counter{n: 21}\nvar v = Apply(c.Value)\nv\n")
+	// The dynamic-dispatch call lives in the program flow: story 78
+	// (RFC-024 6.4/8.3) rejects initializers whose dependency set
+	// cannot be enumerated (Apply calls its func-typed parameter).
+	path := writeTemp(t, "package demo\ntype Counter struct {\nn int\n}\nfunc (c Counter) Value() int {\nreturn c.n\n}\nfunc Apply(transform func() int) int {\nreturn transform()\n}\nvar c = Counter{n: 21}\nfunc main_work() {\nvar v = Apply(c.Value)\nv\n}\nmain_work()\n")
 	code, _, stderr := runCLI([]string{"run", path})
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
@@ -1054,7 +1057,9 @@ func TestRunFallibleForwarding(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ANUY_REPLACE_ROOT", root)
-	path := writeTemp(t, "package demo\nfunc ReadData() (int, error?) {\nreturn 21, nil\n}\nfunc Load() (int, error?) {\nreturn ReadData()\n}\nvar a, e = Load()\nif e == nil {\nvar out = a\nout\n}\n")
+	// The destructuring lives in a called function: story 78 (RFC-024 6.3)
+	// rejects fallible destructuring of package variables.
+	path := writeTemp(t, "package demo\nfunc ReadData() (int, error?) {\nreturn 21, nil\n}\nfunc Load() (int, error?) {\nreturn ReadData()\n}\nfunc main_work() {\nvar a, e = Load()\nif e == nil {\nvar out = a\nout\n}\n}\nmain_work()\n")
 	code, _, stderr := runCLI([]string{"run", path})
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
@@ -1068,5 +1073,52 @@ func TestCheckForwardingProtocolMismatchExitOne(t *testing.T) {
 	code, stdout, _ := runCLI([]string{"check", path})
 	if code != 1 || !strings.Contains(stdout, "ANUY1006") {
 		t.Fatalf("code = %d, stdout = %q", code, stdout)
+	}
+}
+
+// --- Story 78 (RFC-024 §6.22 v2) ---
+
+// A package variable flows end to end: the function body reads the
+// package-level binding, the generated Go compiles and runs (§6.1).
+func TestRunPackageVariablePrints(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nimport \"fmt\"\nvar Greeting = \"hello package var\"\nfunc main_work() {\nfmt.Println(Greeting)\n}\nmain_work()\n")
+	code, stdout, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "hello package var") {
+		t.Fatalf("stdout = %q, wants the package var value", stdout)
+	}
+}
+
+// §8.2: an initialization cycle fails check with the cycle code.
+func TestCheckPackageVarCycleExitOne(t *testing.T) {
+	path := writeTemp(t, "var a = b\nvar b = a\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY3004") {
+		t.Fatalf("code = %d, stdout = %q, want ANUY3004 exit one", code, stdout)
+	}
+}
+
+// §8.3: a call through a func-typed value in an initializer fails check.
+func TestCheckPackageVarUnprovableExitOne(t *testing.T) {
+	path := writeTemp(t, "var cb func() = func() {\n}\nvar x = cb()\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY3005") {
+		t.Fatalf("code = %d, stdout = %q, want ANUY3005 exit one", code, stdout)
+	}
+}
+
+// §8.4: the comma-ok shape cannot declare or target a package variable.
+func TestCheckPackageVarCommaOkExitOne(t *testing.T) {
+	path := writeTemp(t, "var u, found = users[id]\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY3006") {
+		t.Fatalf("code = %d, stdout = %q, want ANUY3006 exit one", code, stdout)
 	}
 }

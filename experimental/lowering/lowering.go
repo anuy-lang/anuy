@@ -53,6 +53,7 @@ type filePlan struct {
 	file    File
 	program parser.Program
 	types   []parser.Statement
+	vars    []parser.Statement
 	funcs   []parser.Statement
 	body    []parser.Statement
 }
@@ -122,6 +123,14 @@ func lowerPackage(files []File, testVariant bool) (string, error) {
 		l.path, l.source = imp.owner.Path, imp.owner.Source
 		l.directive(&decls, imp.span)
 		fmt.Fprintf(&decls, "import %q\n", imp.path)
+	}
+	// Story 78 (RFC-024 §6.7): the package variables render after the
+	// imports in canonical declaration order - file order (deterministic
+	// upstream), source order within a file.
+	for i := range plans {
+		if err := l.renderVars(&decls, &plans[i]); err != nil {
+			return "", err
+		}
 	}
 	for i := range plans {
 		if err := l.renderDecls(&decls, &plans[i]); err != nil {
@@ -195,6 +204,17 @@ func (l *lowerer) plan(plan *filePlan) error {
 		case parser.Impl:
 			// Story 39 (RFC-004 §6.8.2): impl is semantic metadata -
 			// after checking it erases from the generated Go.
+		case parser.Var:
+			// Story 78 (RFC-024 §6.21-6.22): a top-level `var` with an
+			// explicit initializer lowers as a Go package-level variable -
+			// not a Run-body local. Try declarations reject in the
+			// renderer (§6.3); the uninitialized `var T` form keeps its
+			// program-body lowering (§6.22 v2 transitional model).
+			if statement.TryCall != nil || len(statement.Values) > 0 {
+				plan.vars = append(plan.vars, statement)
+			} else {
+				plan.body = append(plan.body, statement)
+			}
 		default:
 			plan.body = append(plan.body, statement)
 		}
@@ -241,7 +261,125 @@ func (l *lowerer) plan(plan *filePlan) error {
 	// Story 43 (RFC-009 §6.8.16): plan the per-type validators from the
 	// exported signatures - before any body renders, so wrapper and
 	// validator emission share one settled analysis.
+	// Story 78 (RFC-024 §6.21): register the package variables' dispatch
+	// representation at plan time - the Run bodies render before the
+	// declarations, so their assignments consult the tracking maps.
+	for i := range plan.vars {
+		if _, _, err := l.packageVarTarget(&plan.vars[i]); err != nil {
+			return err
+		}
+	}
 	return l.planValidators(funcs)
+}
+
+// renderVars renders the file's package variables with its //line
+// anchors (story 78, RFC-024 §6.7): canonical declaration order - the
+// files as given (the CLI sorts them), source order within a file.
+func (l *lowerer) renderVars(out *strings.Builder, plan *filePlan) error {
+	l.path, l.source = plan.file.Path, plan.file.Source
+	for i := range plan.vars {
+		l.directive(out, plan.vars[i].Span)
+		if err := l.packageVar(out, &plan.vars[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// packageVarTarget resolves a package variable's Go type and registers
+// its names' dispatch representation (story 78): the carrier element and
+// native-nil tracking of the body form, plus the inferred-call dispatch
+// registration (story 49). Called at plan time so body assignments
+// rendered before the declarations see the tracking.
+func (l *lowerer) packageVarTarget(statement *parser.Statement) (string, string, error) {
+	typeText := ""
+	var carrierElem string
+	if statement.TypeExpr != nil {
+		text, err := l.goType(statement.TypeExpr)
+		if err != nil {
+			return "", "", err
+		}
+		typeText = text
+		if elem, ok := l.carrier(statement.TypeExpr); ok {
+			carrierElem = elem
+			for _, name := range statement.Names {
+				if name != "_" {
+					l.carriers[name] = elem
+				}
+			}
+		} else if statement.TypeExpr.Nullable {
+			// Story 13: native-nil declarations enter the dispatch
+			// tracking with their verbatim Go comparison form.
+			for _, name := range statement.Names {
+				if name != "_" {
+					l.nativeNil[name] = true
+				}
+			}
+		}
+	}
+	// Story 49 (RFC-009 §6.7.13): an inferred declaration takes its
+	// dispatch representation from the initializer's declared first
+	// result - a single bare call to a known top-level function. Unknown
+	// callees stay untracked: the plain comparison stands where Go
+	// semantics do (§6.2.2), and guard-demanding forms keep rejecting
+	// (§6.7.5).
+	if typeText == "" && len(statement.Values) == 1 && len(statement.Names) == 1 && statement.Names[0] != "_" {
+		if callee, ok := plainCallCallee(statement.Values[0]); ok {
+			if result := l.funcResults[callee]; result != nil && result.Nullable {
+				if elem, ok := l.carrier(result); ok {
+					l.carriers[statement.Names[0]] = elem
+				} else {
+					l.nativeNil[statement.Names[0]] = true
+				}
+			}
+		}
+	}
+	return typeText, carrierElem, nil
+}
+
+// packageVar renders one package-level variable declaration (story 78,
+// RFC-024 §6.21): an ordinary Go package var with its explicit
+// initializer, //line-anchored by the caller in canonical declaration
+// order (§6.7). Try and safe-tail initializers are body constructs and
+// reject deterministically (§6.22 v2 boundary).
+func (l *lowerer) packageVar(out *strings.Builder, statement *parser.Statement) error {
+	if statement.TryCall != nil {
+		return fmt.Errorf("experimental lowering: try declaration is not a package variable initializer")
+	}
+	typeText, carrierElem, err := l.packageVarTarget(statement)
+	if err != nil {
+		return err
+	}
+	names := strings.Join(statement.Names, ", ")
+	switch {
+	case len(statement.Values) == 1 && statement.Values[0].Switch != nil:
+		// The value-switch lowering emits assignments - a body construct.
+		return fmt.Errorf("experimental lowering: value switch is not a package variable initializer")
+	case typeText != "" && len(statement.Values) == 1 && hasSafeTailValue(statement.Values[0]):
+		// Story 14: the synthetic guard branch is a body construct.
+		return fmt.Errorf("experimental lowering: safe-value target %q is not a package variable initializer", statement.Names[0])
+	case typeText != "":
+		converted := make([]string, 0, len(statement.Values))
+		for _, value := range statement.Values {
+			text, err := l.convert(value, carrierElem)
+			if err != nil {
+				return err
+			}
+			converted = append(converted, text)
+		}
+		fmt.Fprintf(out, "var %s %s = %s\n", names, typeText, strings.Join(converted, ", "))
+	default:
+		values := make([]string, 0, len(statement.Values))
+		for _, value := range statement.Values {
+			text, err := l.value(value)
+			if err != nil {
+				return err
+			}
+			values = append(values, text)
+		}
+		fmt.Fprintf(out, "var %s = %s\n", names, strings.Join(values, ", "))
+	}
+	return nil
 }
 
 // renderDecls renders the file's type declarations with its //line

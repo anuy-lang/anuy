@@ -88,6 +88,22 @@ type DiagnosticCategory string
 const (
 	ReadBeforeInitialization   DiagnosticCategory = "ReadBeforeInitialization"
 	PackageInitializerRequired DiagnosticCategory = "PackageInitializerRequired"
+	// InitializationCycle is the RFC-024 §8.2 category (story 78): the
+	// package-variable initialization graph has a dependency cycle - no
+	// ready group exists while uninitialized variables remain.
+	InitializationCycle DiagnosticCategory = "InitializationCycle"
+	// UnprovableInitializationDependency is the RFC-024 §8.3 category
+	// (story 78): a package-variable initializer executes provably
+	// dynamic same-package dispatch (a call through a func-typed value
+	// or an interface receiver), so its package-state dependency set
+	// cannot be conservatively enumerated.
+	UnprovableInitializationDependency DiagnosticCategory = "UnprovableInitializationDependency"
+	// PackageVarUnavailableAssignment is the RFC-024 §8.4 category
+	// (story 78, §6.3): a conditional operation (comma-ok shape or
+	// fallible destructuring) declares or directly targets a package
+	// variable, which would transition package state into an
+	// unavailable condition.
+	PackageVarUnavailableAssignment DiagnosticCategory = "PackageVarUnavailableAssignment"
 	// UnsafeMemberAccess is the experimental category for an ordinary member
 	// access on a binding whose non-nil narrowing is not proven (story 05);
 	// final naming and text belong to RFC-011.
