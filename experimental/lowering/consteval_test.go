@@ -13,7 +13,7 @@ func TestLowerConstantReferenceVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package fixture\n\n//line source.anuy:1\nconst A = 5\n//line source.anuy:2\nconst B = A + 1\n\nfunc Run() {\n}\n"
+	want := "package fixture\n\n//line source.anuy:1\nconst A = 5\n//line source.anuy:2\nconst B = A + 1\nfunc Run() {\n}\n"
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
