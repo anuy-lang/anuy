@@ -272,6 +272,7 @@ const (
 	Interface
 	Impl
 	UnsafeBlock
+	Const
 )
 
 // ErrorCategory classifies parse-level rejects. Categories are experimental
@@ -662,6 +663,10 @@ type lineParser struct {
 	// It resets to zero inside closure literals: a jump never crosses a
 	// function boundary.
 	loopDepth int
+	// blockDepth tracks statement-block nesting (story 80): the package
+	// constant form is package-level in this slice (§6.23 RFC-024), so a
+	// body-level `const` rejects.
+	blockDepth int
 	// funcStack tracks the declared results of the enclosing
 	// function/method bodies (story 08): `return expr` is valid only when
 	// the top frame carries a result. Closure-literal frames push a
@@ -708,6 +713,8 @@ func (lp *lineParser) parseStatements() ([]Statement, error) {
 // A `} else {` line also closes the block; the header is left for the if
 // statement that owns this block.
 func (lp *lineParser) parseBlock() ([]Statement, error) {
+	lp.blockDepth++
+	defer func() { lp.blockDepth-- }()
 	var out []Statement
 	for {
 		if lp.pos >= len(lp.lines) {
@@ -742,6 +749,8 @@ func (lp *lineParser) parseBlock() ([]Statement, error) {
 // the block closer line (story 07, RFC-003 §41 — `})`). It returns the block
 // statements, the closer line's trailing tokens, and the closer line itself.
 func (lp *lineParser) parseBlockWithSuffix() ([]Statement, []token, sourceLine, error) {
+	lp.blockDepth++
+	defer func() { lp.blockDepth-- }()
 	var out []Statement
 	for {
 		if lp.pos >= len(lp.lines) {
@@ -789,6 +798,9 @@ func (lp *lineParser) parseStatement(line sourceLine) (Statement, error) {
 	switch {
 	case tokens[0].kind == tokenIdent && tokens[0].text == "var":
 		return lp.parseVar(tokens, line)
+	case tokens[0].kind == tokenIdent && tokens[0].text == "const":
+		// Story 80 (RFC-018 §6.5/§6.29 v2): the package constant.
+		return lp.parseConstDecl(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "if":
 		return lp.parseIf(tokens, line)
 	case tokens[0].kind == tokenIdent && tokens[0].text == "for":
@@ -1886,7 +1898,7 @@ type token struct {
 	start, end int // absolute byte offsets
 }
 
-var reservedWords = map[string]bool{"var": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true, "interface": true, "impl": true, "unsafe": true, "try": true, "import": true}
+var reservedWords = map[string]bool{"var": true, "const": true, "if": true, "else": true, "for": true, "break": true, "continue": true, "in": true, "nil": true, "true": true, "false": true, "return": true, "type": true, "interface": true, "impl": true, "unsafe": true, "try": true, "import": true}
 
 // IntrinsicNames reserves the compiler-intrinsic namespace (story 41,
 // RFC-007 §6.6.13): a declaration with one of these names is a parse
@@ -2438,6 +2450,77 @@ func (lp *lineParser) parseVar(tokens []token, line sourceLine) (Statement, erro
 		}
 		statement.Values = values
 	}
+	lp.pos++
+	return statement, nil
+}
+
+// parseConstDecl parses the story 80 package constant (RFC-018 §6.5,
+// §6.29 v2; RFC-024 §6.23 v4): a single name with a constant-expression
+// initializer the layer lowers verbatim - the Go toolchain is the
+// evaluator. The form is package-level (the blockDepth gate rejects
+// body-level const); grouped declarations, `iota`, multi-name forms and
+// binding references reject until their slices. The typed form takes a
+// non-nullable named type, so the generated Go always compiles.
+func (lp *lineParser) parseConstDecl(tokens []token, line sourceLine) (Statement, error) {
+	if lp.blockDepth > 0 {
+		return Statement{}, newError(UnsupportedSyntax, tokens[0].start, "constant declarations are package-level in this slice")
+	}
+	if len(tokens) < 2 {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "constant declaration form is const Name = expression")
+	}
+	if tokens[1].kind != tokenIdent && tokens[1].kind != tokenBlank {
+		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, "constant declaration form is const Name = expression")
+	}
+	if reservedWords[tokens[1].text] || IntrinsicNames[tokens[1].text] {
+		return Statement{}, newError(UnsupportedSyntax, tokens[1].start, tokens[1].text+" is a reserved name")
+	}
+	if len(tokens) > 2 && isPunct(tokens[2], ",") {
+		return Statement{}, newError(UnsupportedSyntax, tokens[2].start, "constant declaration takes a single name")
+	}
+	statement := Statement{Kind: Const, Names: []string{tokens[1].text}, Span: Span{Start: line.offset, End: line.offset + len(line.text)}}
+	i := 2
+	typeStart := i
+	for i < len(tokens) && !isAssign(tokens[i]) {
+		i++
+	}
+	if i >= len(tokens) {
+		if typeStart < i {
+			return Statement{}, newError(BareDeclaration, tokens[1].start, "constant declaration requires an initializer")
+		}
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "constant declaration form is const Name = expression")
+	}
+	if typeStart < i {
+		typeExpr, typeErr := parseType(tokens[typeStart:i])
+		if typeErr != nil {
+			return Statement{}, typeErr
+		}
+		if typeExpr.Kind != NamedType || typeExpr.Nullable {
+			return Statement{}, newError(UnsupportedSyntax, tokens[typeStart].start, "constant type must be a non-nullable named type")
+		}
+		statement.Type = line.raw[tokens[typeStart].start-line.offset : tokens[i-1].end-line.offset]
+		statement.TypeExpr = typeExpr
+	}
+	values, verr := lp.parseRHS(tokens, i+1, line)
+	if verr != nil {
+		return Statement{}, verr
+	}
+	if len(values) != 1 {
+		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "constant declaration takes a single initializer")
+	}
+	// §6.29 v2: the initializer is a constant expression without binding
+	// references - `true`/`false` are the literal keywords, everything
+	// else (names, calls, composites, `nil` - not a constant in Go)
+	// rejects until constant resolution lands.
+	value := values[0]
+	if value.Closure != nil || value.Keyed != nil || value.Navigation != nil || value.Switch != nil || value.Text == "nil" {
+		return Statement{}, newError(UnsupportedSyntax, value.Span.Start, "constant initializer must be a constant expression")
+	}
+	for _, ident := range value.Idents {
+		if ident != "true" && ident != "false" {
+			return Statement{}, newError(UnsupportedSyntax, value.Span.Start, "constant initializer must be a constant expression")
+		}
+	}
+	statement.Values = values
 	lp.pos++
 	return statement, nil
 }

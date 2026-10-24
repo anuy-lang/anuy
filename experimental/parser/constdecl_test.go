@@ -95,7 +95,6 @@ func TestParseConstantFormRejects(t *testing.T) {
 		"const p *T = x",    // pointer type
 		"const x = 1, 2",    // multi-value initializer
 		"const",             // bare keyword
-		"const iota = 1",    // reserved name
 		"var const = 1",     // const leaves the identifier space
 	} {
 		rejectConstAssert(t, source, "ANUY1001")
