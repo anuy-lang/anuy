@@ -53,6 +53,7 @@ type filePlan struct {
 	file    File
 	program parser.Program
 	types   []parser.Statement
+	consts  []parser.Statement
 	vars    []parser.Statement
 	funcs   []parser.Statement
 	body    []parser.Statement
@@ -123,6 +124,14 @@ func lowerPackage(files []File, testVariant bool) (string, error) {
 		l.path, l.source = imp.owner.Path, imp.owner.Source
 		l.directive(&decls, imp.span)
 		fmt.Fprintf(&decls, "import %q\n", imp.path)
+	}
+	// Story 80 (RFC-018 §6.29 v2): the constants render after the imports
+	// and before the variables - compile-time state precedes runtime
+	// initialization state.
+	for i := range plans {
+		if err := l.renderConsts(&decls, &plans[i]); err != nil {
+			return "", err
+		}
 	}
 	// Story 78 (RFC-024 §6.7): the package variables render after the
 	// imports in canonical declaration order - file order (deterministic
@@ -204,6 +213,11 @@ func (l *lowerer) plan(plan *filePlan) error {
 		case parser.Impl:
 			// Story 39 (RFC-004 §6.8.2): impl is semantic metadata -
 			// after checking it erases from the generated Go.
+		case parser.Const:
+			// Story 80 (RFC-018 §6.29 v2): a package constant lowers as an
+			// ordinary Go const declaration - compile-time, no Run-body
+			// presence.
+			plan.consts = append(plan.consts, statement)
 		case parser.Var:
 			// Story 78 (RFC-024 §6.21-6.22): a top-level `var` with an
 			// explicit initializer lowers as a Go package-level variable -
@@ -275,6 +289,36 @@ func (l *lowerer) plan(plan *filePlan) error {
 		}
 	}
 	return l.planValidators(funcs)
+}
+
+// renderConsts renders the file's package constants with its //line
+// anchors (story 80, RFC-018 §6.29 v2): verbatim declarations in
+// canonical declaration order (§6.7 RFC-024), before the variables.
+func (l *lowerer) renderConsts(out *strings.Builder, plan *filePlan) error {
+	l.path, l.source = plan.file.Path, plan.file.Source
+	for i := range plan.consts {
+		l.directive(out, plan.consts[i].Span)
+		if err := l.packageConst(out, &plan.consts[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// packageConst renders one Go const declaration: the raw type spelling
+// (the parser gates it to a non-nullable named type) and the verbatim
+// constant expression.
+func (l *lowerer) packageConst(out *strings.Builder, statement *parser.Statement) error {
+	value, err := l.value(statement.Values[0])
+	if err != nil {
+		return err
+	}
+	if statement.Type != "" {
+		fmt.Fprintf(out, "const %s %s = %s\n", statement.Names[0], statement.Type, value)
+		return nil
+	}
+	fmt.Fprintf(out, "const %s = %s\n", statement.Names[0], value)
+	return nil
 }
 
 // renderVars renders the file's package variables with its //line
