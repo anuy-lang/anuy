@@ -70,6 +70,10 @@ var (
 	ReadBeforeInitializationDescriptor   = register(ReadBeforeInitialization, "ANUY3001", SeverityError)
 	PackageInitializerRequiredDescriptor = register(PackageInitializerRequired, "ANUY3002", SeverityError)
 	MissingReturnDescriptor              = register(MissingReturn, "ANUY3003", SeverityError) // D-6: result is a binding read by the caller (RFC-001 §13.3)
+	// Story 78 (RFC-024 §8): the package-variable initialization block.
+	InitializationCycleDescriptor                = register(InitializationCycle, "ANUY3004", SeverityError)                // RFC-024 §8.2
+	UnprovableInitializationDependencyDescriptor = register(UnprovableInitializationDependency, "ANUY3005", SeverityError) // RFC-024 §8.3
+	PackageVarUnavailableAssignmentDescriptor    = register(PackageVarUnavailableAssignment, "ANUY3006", SeverityError)    // RFC-024 §8.4
 
 	// Nullability/narrowing block (4xxx).
 	UnsafeMemberAccessDescriptor         = register(UnsafeMemberAccess, "ANUY4001", SeverityError)         // R2
@@ -132,6 +136,9 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		ReadBeforeInitializationDescriptor,
 		PackageInitializerRequiredDescriptor,
 		MissingReturnDescriptor,
+		InitializationCycleDescriptor,
+		UnprovableInitializationDependencyDescriptor,
+		PackageVarUnavailableAssignmentDescriptor,
 		UnsafeMemberAccessDescriptor,
 		RedundantSafeNavigationDescriptor,
 		NullableArgumentDescriptor,
@@ -207,6 +214,9 @@ var catalog = map[Code]string{
 	"ANUY3001": "read before initialization",
 	"ANUY3002": "package-level binding requires an initializer",
 	"ANUY3003": "missing return: declared result is not initialized on all paths",
+	"ANUY3004": "package initialization cycle",
+	"ANUY3005": "package variable initializer dependency cannot be proven",
+	"ANUY3006": "package variable cannot become unavailable",
 	"ANUY4001": "only safe (?.) or non-null asserted calls are allowed on a nullable receiver",
 	"ANUY4002": "redundant safe navigation: the receiver is known to be non-null",
 	"ANUY4003": "nullable argument where a non-null is required",

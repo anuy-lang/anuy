@@ -898,7 +898,10 @@ func TestRunMethodValueCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ANUY_REPLACE_ROOT", root)
-	path := writeTemp(t, "package demo\ntype Counter struct {\nn int\n}\nfunc (c Counter) Value() int {\nreturn c.n\n}\nfunc Apply(transform func() int) int {\nreturn transform()\n}\nvar c = Counter{n: 21}\nvar v = Apply(c.Value)\nv\n")
+	// The dynamic-dispatch call lives in the program flow: story 78
+	// (RFC-024 6.4/8.3) rejects initializers whose dependency set
+	// cannot be enumerated (Apply calls its func-typed parameter).
+	path := writeTemp(t, "package demo\ntype Counter struct {\nn int\n}\nfunc (c Counter) Value() int {\nreturn c.n\n}\nfunc Apply(transform func() int) int {\nreturn transform()\n}\nvar c = Counter{n: 21}\nfunc main_work() {\nvar v = Apply(c.Value)\nv\n}\nmain_work()\n")
 	code, _, stderr := runCLI([]string{"run", path})
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
@@ -1054,7 +1057,9 @@ func TestRunFallibleForwarding(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ANUY_REPLACE_ROOT", root)
-	path := writeTemp(t, "package demo\nfunc ReadData() (int, error?) {\nreturn 21, nil\n}\nfunc Load() (int, error?) {\nreturn ReadData()\n}\nvar a, e = Load()\nif e == nil {\nvar out = a\nout\n}\n")
+	// The destructuring lives in a called function: story 78 (RFC-024 6.3)
+	// rejects fallible destructuring of package variables.
+	path := writeTemp(t, "package demo\nfunc ReadData() (int, error?) {\nreturn 21, nil\n}\nfunc Load() (int, error?) {\nreturn ReadData()\n}\nfunc main_work() {\nvar a, e = Load()\nif e == nil {\nvar out = a\nout\n}\n}\nmain_work()\n")
 	code, _, stderr := runCLI([]string{"run", path})
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
