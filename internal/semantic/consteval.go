@@ -534,6 +534,16 @@ var numericTypeRanges = map[string]*big.Int{
 	"rune":   big.NewInt(1 << 31),
 }
 
+// IsNumericBasic reports whether the name is a Go basic numeric type
+// with a known representability rule (§6.4) - the typed-declaration fit
+// check applies to it.
+func IsNumericBasic(typeName string) bool {
+	if _, ok := numericTypeRanges[typeName]; ok {
+		return true
+	}
+	return typeName == "float32" || typeName == "float64"
+}
+
 // FitToType reports whether the constant value is representable in the
 // named Go basic type (§6.4/§8.1): integer contexts require exact
 // integers in range, float contexts round by magnitude, string and

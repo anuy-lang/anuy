@@ -115,6 +115,18 @@ const (
 	// value assignment targets a compile-time constant - the binding is
 	// immutable by declaration.
 	AssignmentToConstant DiagnosticCategory = "AssignmentToConstant"
+	// ConstantNotRepresentable is the RFC-018 §8.1/§8.4 category (story
+	// 82): a constant value is not representable in its typed context -
+	// a typed declaration, a typed-operand arithmetic step or a
+	// fractional constant in an integer context.
+	ConstantNotRepresentable DiagnosticCategory = "ConstantNotRepresentable"
+	// ConstantDivisionByZero is the RFC-018 §8.5 category (story 82): a
+	// constant expression divides (or takes a remainder) by zero.
+	ConstantDivisionByZero DiagnosticCategory = "ConstantDivisionByZero"
+	// InitializerNotConstant is the RFC-018 §6.5 category (story 82): a
+	// constant initializer references a binding that is not a compile-
+	// time constant.
+	InitializerNotConstant DiagnosticCategory = "InitializerNotConstant"
 	// UnsafeMemberAccess is the experimental category for an ordinary member
 	// access on a binding whose non-nil narrowing is not proven (story 05);
 	// final naming and text belong to RFC-011.
