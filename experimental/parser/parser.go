@@ -1989,7 +1989,16 @@ func tokenize(line string, base int) ([]token, *Error) {
 			}
 			tokens = append(tokens, token{kind: tokenPunct, text: ".", start: base + i, end: base + i + 1})
 			i++
-		case strings.ContainsRune("=,?()[]*+-{}", rune(c)):
+		case c == '/':
+			// Story 82 (RFC-018 §6.29 v3): the arithmetic division
+			// operator; `//` starts a comment running to the end of the
+			// line - the tokenizer returns the tokens so far.
+			if i+1 < len(line) && line[i+1] == '/' {
+				return tokens, nil
+			}
+			tokens = append(tokens, token{kind: tokenPunct, text: "/", start: base + i, end: base + i + 1})
+			i++
+		case strings.ContainsRune("=,?()[]*+-{}%", rune(c)):
 			if c == '=' && i+1 < len(line) && line[i+1] == '=' {
 				tokens = append(tokens, token{kind: tokenPunct, text: "==", start: base + i, end: base + i + 2})
 				i += 2
@@ -2507,18 +2516,21 @@ func (lp *lineParser) parseConstDecl(tokens []token, line sourceLine) (Statement
 	if len(values) != 1 {
 		return Statement{}, newError(UnsupportedSyntax, listEnd(tokens), "constant declaration takes a single initializer")
 	}
-	// §6.29 v2: the initializer is a constant expression without binding
-	// references - `true`/`false` are the literal keywords, everything
-	// else (names, calls, composites, `nil` - not a constant in Go)
-	// rejects until constant resolution lands.
+	// §6.29 v3 (story 82): the initializer is a constant expression -
+	// identifiers flow to the checker's constant resolution; `nil` is
+	// not a constant in Go, and non-constant constructs (calls,
+	// composites, navigation, closures) reject until their slices. A
+	// call is the `(` after a callee token (the validateConditionTokens
+	// callee rule) - `(1 + 2)` stays a legal parenthesized expression.
+	for k := i + 1; k < len(tokens); k++ {
+		if isPunct(tokens[k], "(") && k > i+1 &&
+			(tokens[k-1].kind == tokenIdent || isPunct(tokens[k-1], ")") || isPunct(tokens[k-1], "]")) {
+			return Statement{}, newError(UnsupportedSyntax, tokens[k-1].start, "constant initializer must be a constant expression")
+		}
+	}
 	value := values[0]
 	if value.Closure != nil || value.Keyed != nil || value.Navigation != nil || value.Switch != nil || value.Text == "nil" {
 		return Statement{}, newError(UnsupportedSyntax, value.Span.Start, "constant initializer must be a constant expression")
-	}
-	for _, ident := range value.Idents {
-		if ident != "true" && ident != "false" {
-			return Statement{}, newError(UnsupportedSyntax, value.Span.Start, "constant initializer must be a constant expression")
-		}
 	}
 	statement.Values = values
 	lp.pos++
@@ -3015,7 +3027,7 @@ func isValueToken(t token) bool {
 	case tokenInt, tokenString, tokenIdent:
 		return true
 	case tokenPunct:
-		return strings.ContainsRune("()[].?*+-{}:", rune(t.text[0])) || t.text == "==" || t.text == "!="
+		return strings.ContainsRune("()[].?*+-{}:/", rune(t.text[0])) || t.text == "==" || t.text == "!=" || t.text == "%"
 	default:
 		return false
 	}
