@@ -76,8 +76,11 @@ var (
 	PackageVarUnavailableAssignmentDescriptor    = register(PackageVarUnavailableAssignment, "ANUY3006", SeverityError)    // RFC-024 §8.4
 	InvalidInitSignatureDescriptor               = register(InvalidInitSignature, "ANUY3007", SeverityError)               // RFC-024 §8.5
 	InitNotOrdinaryDescriptor                    = register(InitNotOrdinary, "ANUY3008", SeverityError)                    // RFC-024 §8.6
-	// Story 80 (RFC-018 §6.5/§8.17): the constant-immutability block.
-	AssignmentToConstantDescriptor = register(AssignmentToConstant, "ANUY2004", SeverityError) // RFC-018 §8.17
+	// Story 80/82 (RFC-018 §6.5/§8.17): the constant blocks.
+	AssignmentToConstantDescriptor     = register(AssignmentToConstant, "ANUY2004", SeverityError)     // RFC-018 §8.17
+	ConstantNotRepresentableDescriptor = register(ConstantNotRepresentable, "ANUY2005", SeverityError) // RFC-018 §8.1/§8.4
+	ConstantDivisionByZeroDescriptor   = register(ConstantDivisionByZero, "ANUY2006", SeverityError)   // RFC-018 §8.5
+	InitializerNotConstantDescriptor   = register(InitializerNotConstant, "ANUY2007", SeverityError)   // RFC-018 §6.5
 
 	// Nullability/narrowing block (4xxx).
 	UnsafeMemberAccessDescriptor         = register(UnsafeMemberAccess, "ANUY4001", SeverityError)         // R2
@@ -146,6 +149,9 @@ var registry = func() map[DiagnosticCategory]Descriptor {
 		InvalidInitSignatureDescriptor,
 		InitNotOrdinaryDescriptor,
 		AssignmentToConstantDescriptor,
+		ConstantNotRepresentableDescriptor,
+		ConstantDivisionByZeroDescriptor,
+		InitializerNotConstantDescriptor,
 		UnsafeMemberAccessDescriptor,
 		RedundantSafeNavigationDescriptor,
 		NullableArgumentDescriptor,
@@ -227,6 +233,9 @@ var catalog = map[Code]string{
 	"ANUY3007": "invalid init function signature",
 	"ANUY3008": "init is not an ordinary function",
 	"ANUY2004": "cannot assign to a constant",
+	"ANUY2005": "constant is not representable in its type",
+	"ANUY2006": "division by zero in constant expression",
+	"ANUY2007": "constant initializer is not a constant",
 	"ANUY4001": "only safe (?.) or non-null asserted calls are allowed on a nullable receiver",
 	"ANUY4002": "redundant safe navigation: the receiver is known to be non-null",
 	"ANUY4003": "nullable argument where a non-null is required",

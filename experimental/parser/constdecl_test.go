@@ -87,7 +87,6 @@ func TestParseConstantFormRejects(t *testing.T) {
 	for _, source := range []string{
 		"const a, b = 1, 2", // multi-name
 		"const ( A = 1 )",   // grouped
-		"const x = y",       // binding reference
 		"const x = f()",     // call
 		"const x = nil",     // nil is not a constant
 		"const x = T{}",     // composite literal

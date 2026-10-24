@@ -107,6 +107,7 @@ func AnalyzeFiles(files []SourceFile) (Result, error) {
 		b.file = files[i].Path
 		b.preRegisterPackageVars(programs[i].Statements, files[i].Path, pkg)
 	}
+	b.evaluatePackageConsts()
 	b.seedPackageVars()
 	for i := range files {
 		b.file = files[i].Path
@@ -157,6 +158,7 @@ func analyzeSourceFile(path, source string, program parser.Program) (Result, err
 	// tables settle.
 	b.preparePackage(program.Imports, pkg)
 	b.preRegisterPackageVars(program.Statements, path, pkg)
+	b.evaluatePackageConsts()
 	b.seedPackageVars()
 	b.emit(program.Statements, pkg)
 	b.checkPackageInit()
@@ -373,6 +375,10 @@ func (b *builder) preRegisterPackageVars(statements []parser.Statement, file str
 				b.declared[id] = true
 				b.constIDs = append(b.constIDs, id)
 			}
+			if st.Names[0] != "_" && len(st.Values) == 1 {
+				b.constDecls[st.Names[0]] = st
+				b.constOrder = append(b.constOrder, st.Names[0])
+			}
 			continue
 		}
 		if st.Kind != parser.Var || st.TryCall != nil || len(st.Values) == 0 {
@@ -423,6 +429,123 @@ func (b *builder) preRegisterPackageVars(statements []parser.Statement, file str
 			continue
 		}
 		b.funcBodies[st.Names[0]] = st
+	}
+}
+
+// evaluatePackageConsts evaluates every package constant in canonical
+// declaration order (story 82, RFC-018 §6.29 v3): the lazy resolution
+// inside EvaluateConst handles forward references; failures map to the
+// §8.17 v3 codes at the declaration's own span, while cycles and
+// unsupported forms go to the go-stage backstop silently.
+func (b *builder) evaluatePackageConsts() {
+	for _, name := range b.constOrder {
+		if b.constOpaque[name] {
+			continue
+		}
+		st := b.constDecls[name]
+		entry, evalErr := b.evaluateConstDecl(st)
+		if evalErr != nil {
+			b.reportConstEvalError(evalErr, st)
+			continue
+		}
+		if st.TypeExpr != nil && !semantic.FitToType(entry.Value, st.TypeExpr.Name) {
+			b.report(semantic.ConstantNotRepresentable, st.Span)
+			b.constOpaque[name] = true
+			continue
+		}
+		b.constValues[name] = entry
+	}
+}
+
+// evaluateConstDecl evaluates one constant declaration with the
+// package-wide environment; the visiting guard makes forward
+// references terminate and marks cycles.
+func (b *builder) evaluateConstDecl(st *parser.Statement) (semantic.ConstEntry, *semantic.ConstEvalError) {
+	name := st.Names[0]
+	b.constEvalWip[name] = true
+	defer delete(b.constEvalWip, name)
+	value, evalErr := semantic.EvaluateConst(st.Values[0].Text, b.constEntry)
+	if evalErr != nil {
+		return semantic.ConstEntry{}, evalErr
+	}
+	typeName := ""
+	if st.TypeExpr != nil {
+		typeName = st.TypeExpr.Name
+	}
+	return semantic.ConstEntry{Value: value, Type: typeName}, nil
+}
+
+// constEntry resolves one constant name for the evaluator (story 82):
+// memoized values, lazy evaluation for forward references, cycle and
+// opacity guards.
+func (b *builder) constEntry(name string) (semantic.ConstEntry, bool) {
+	if entry, ok := b.constValues[name]; ok {
+		return entry, true
+	}
+	if b.constOpaque[name] || b.constEvalWip[name] {
+		return semantic.ConstEntry{}, false
+	}
+	st, ok := b.constDecls[name]
+	if !ok {
+		return semantic.ConstEntry{}, false
+	}
+	entry, evalErr := b.evaluateConstDecl(st)
+	if evalErr != nil {
+		b.constOpaque[name] = true
+		return semantic.ConstEntry{}, false
+	}
+	b.constValues[name] = entry
+	return entry, true
+}
+
+// reportConstEvalError maps one evaluation failure to the §8.17 v3
+// codes (story 82): overflow and division by zero are constant
+// diagnostics; an unresolved name is ANUY2007 for a known non-constant
+// binding and ANUY2001 for the undefined; cycles and unsupported forms
+// stay silent - the verbatim lowering keeps the go-stage verdict.
+func (b *builder) reportConstEvalError(evalErr *semantic.ConstEvalError, st *parser.Statement) {
+	name := st.Names[0]
+	switch evalErr.Kind {
+	case semantic.ConstDivByZero:
+		b.report(semantic.ConstantDivisionByZero, st.Span)
+	case semantic.ConstOverflow:
+		b.report(semantic.ConstantNotRepresentable, st.Span)
+	case semantic.ConstUnresolved:
+		missing := evalErr.Name
+		if missing == name || b.constEvalWip[missing] || b.constOpaque[missing] {
+			b.constOpaque[name] = true
+			return
+		}
+		if b.pkgScope != nil && b.pkgScope.Resolve(missing) != 0 {
+			b.report(semantic.InitializerNotConstant, st.Span)
+			return
+		}
+		b.report(semantic.UnknownRead, st.Span)
+	default:
+		b.constOpaque[name] = true
+	}
+}
+
+// checkTypedVarFit verifies a typed declaration's constant initializer
+// (story 82, RFC-018 §6.4/§8.1): the value must be representable in the
+// declared Go basic type. Non-basic types and shapes outside the
+// evaluator grammar stay in the tolerance (go-stage backstop).
+func (b *builder) checkTypedVarFit(statement *parser.Statement, span parser.Span) {
+	if statement.TypeExpr == nil || statement.TypeExpr.Kind != parser.NamedType || statement.TypeExpr.Nullable {
+		return
+	}
+	if !semantic.IsNumericBasic(statement.TypeExpr.Name) || len(statement.Values) != 1 {
+		return
+	}
+	value, evalErr := semantic.EvaluateConst(statement.Values[0].Text, b.constEntry)
+	if evalErr != nil {
+		if evalErr.Kind == semantic.ConstDivByZero {
+			b.report(semantic.ConstantDivisionByZero, span)
+		}
+		return
+	}
+	if !semantic.FitToType(value, statement.TypeExpr.Name) {
+		b.report(semantic.ConstantNotRepresentable, span)
 	}
 }
 
@@ -1103,9 +1226,18 @@ type builder struct {
 	// constants marks the package-constant bindings (story 80, RFC-018
 	// §6.29 v2): compile-time, immutable, outside the initialization
 	// graph; constIDs keeps the canonical declaration order for the
-	// entry seeding.
+	// entry seeding. The constant environment (story 82, §6.29 v3)
+	// evaluates the declarations: constDecls/constOrder carry the
+	// canonical source, constValues the memoized entries, constEvalWip/
+	// constOpaque the lazy-evaluation guards - a cycle or an unsupported
+	// form goes to the go-stage backstop silently.
 	constants        map[semantic.BindingID]bool
 	constIDs         []semantic.BindingID
+	constDecls       map[string]*parser.Statement
+	constOrder       []string
+	constValues      map[string]semantic.ConstEntry
+	constEvalWip     map[string]bool
+	constOpaque      map[string]bool
 	funcBodies       map[string]*parser.Statement
 	methodBodies     map[string][]*parser.Statement
 	importQualifiers map[string]bool
@@ -1155,6 +1287,10 @@ func newBuilder() *builder {
 		unsafeFuncs:      map[string]bool{},
 		packageVars:      map[semantic.BindingID]bool{},
 		constants:        map[semantic.BindingID]bool{},
+		constDecls:       map[string]*parser.Statement{},
+		constValues:      map[string]semantic.ConstEntry{},
+		constEvalWip:     map[string]bool{},
+		constOpaque:      map[string]bool{},
 		funcBodies:       map[string]*parser.Statement{},
 		methodBodies:     map[string][]*parser.Statement{},
 		importQualifiers: map[string]bool{},
@@ -1331,6 +1467,11 @@ func (b *builder) classifyValue(value *parser.Value, scope *semantic.Scope) sema
 		id := scope.Resolve(value.Idents[0])
 		if id == 0 {
 			return semantic.NullabilityUnknown
+		}
+		if b.constants[id] {
+			// Story 82 (RFC-018 §6.4): a constant never arrives nil - the
+			// inferred class is non-null.
+			return semantic.NullabilityNonNull
 		}
 		if b.staticallyNullable(id) {
 			// The fact is older than the declared class: a live non-nil
@@ -2202,6 +2343,10 @@ func (b *builder) emitStatement(statement *parser.Statement, scope *semantic.Sco
 		// never executed and the statement carries no flow effect
 		// (§6.2 RFC-024: no runtime initialization step).
 	case parser.Var:
+		// Story 82 (RFC-018 §6.4/§8.1): a typed declaration's constant
+		// initializer must be representable - package and local paths
+		// share the check.
+		b.checkTypedVarFit(statement, statement.Span)
 		if statement.TryCall == nil && len(statement.Values) > 0 && b.isPackageVarStatement(statement, scope) {
 			// Story 78 (RFC-024 §6.22 v2): a pre-registered package
 			// variable - the entry seeding owns storage and

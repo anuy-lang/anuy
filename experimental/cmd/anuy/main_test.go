@@ -1200,3 +1200,51 @@ func TestCheckInvalidConstantExpressionExitOne(t *testing.T) {
 		t.Fatalf("code = %d, stdout = %q, want the go-stage constant error remapped to the source", code, stdout)
 	}
 }
+
+// --- Story 82 (RFC-018 §6.29 v3) ---
+
+// Constant expressions evaluate at the source level and run end to end:
+// the generated Go folds the verbatim declaration.
+func TestRunConstToConst(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANUY_REPLACE_ROOT", root)
+	path := writeTemp(t, "package demo\nimport \"fmt\"\nconst A = 5\nconst B = A * 2 + 1\nfunc main_work() {\nfmt.Println(B)\n}\nmain_work()\n")
+	code, stdout, stderr := runCLI([]string{"run", path})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "11") {
+		t.Fatalf("stdout = %q, wants the evaluated constant", stdout)
+	}
+}
+
+// §8.4: a typed-constant overflow fails check at the source level.
+func TestCheckConstOverflowExitOne(t *testing.T) {
+	path := writeTemp(t, "const X uint8 = 255\nconst Y = X + 1\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY2005") {
+		t.Fatalf("code = %d, stdout = %q, want ANUY2005 exit one", code, stdout)
+	}
+}
+
+// §8.5: constant division by zero fails check at the source level - no
+// go-stage involvement.
+func TestCheckConstDivByZeroExitOne(t *testing.T) {
+	path := writeTemp(t, "const X = 1 / 0\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY2006") {
+		t.Fatalf("code = %d, stdout = %q, want ANUY2006 exit one", code, stdout)
+	}
+}
+
+// §6.5: a non-constant reference fails check with the dedicated code.
+func TestCheckNotConstantExitOne(t *testing.T) {
+	path := writeTemp(t, "var v = 1\nconst C = v\n")
+	code, stdout, _ := runCLI([]string{"check", path})
+	if code != 1 || !strings.Contains(stdout, "ANUY2007") {
+		t.Fatalf("code = %d, stdout = %q, want ANUY2007 exit one", code, stdout)
+	}
+}
